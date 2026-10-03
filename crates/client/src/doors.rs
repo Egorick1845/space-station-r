@@ -25,6 +25,16 @@ const AUTO_INTERACT_PERIOD: f32 = 1.0;
 /// RSI-ключи спрайтов двери (Structures/Doors/Airlocks/Standard/basic.rsi).
 const DOOR_CLOSED: &str = "sprites/ss14/Structures/Doors/Airlocks/Standard/basic.rsi#closed";
 const DOOR_OPEN: &str = "sprites/ss14/Structures/Doors/Airlocks/Standard/basic.rsi#open";
+const DOOR_OPENING: &str = "sprites/ss14/Structures/Doors/Airlocks/Standard/basic.rsi#opening";
+const DOOR_CLOSING: &str = "sprites/ss14/Structures/Doors/Airlocks/Standard/basic.rsi#closing";
+
+/// Анимация двери: проигрывание opening/closing по delays из RSI.
+#[derive(Clone, Copy, PartialEq)]
+enum DoorAnim {
+    Idle,
+    Opening { frame: u32, elapsed: f32 },
+    Closing { frame: u32, elapsed: f32 },
+}
 
 /// Визуальный спрайт двери, привязанный к реплицированной сущности.
 /// Публичный: параметр систем Bevy требует публичного типа (E0446).
@@ -32,6 +42,7 @@ const DOOR_OPEN: &str = "sprites/ss14/Structures/Doors/Airlocks/Standard/basic.r
 pub struct DoorVisual {
     door: Entity,
     last_open: bool,
+    anim: DoorAnim,
 }
 
 /// Спавнит спрайт при появлении реплицированной двери.
@@ -57,6 +68,7 @@ pub fn spawn_door_visuals(
             DoorVisual {
                 door: entity,
                 last_open: door.open,
+                anim: DoorAnim::Idle,
             },
             sprite,
             // Поверх тайлов (z=0), но под игроком (z=1).
@@ -66,33 +78,129 @@ pub fn spawn_door_visuals(
     }
 }
 
-/// Меняет спрайт по реплицированному состоянию и убирает осиротевшие спрайты.
+/// Применяет к спрайту кадр состояния двери.
+fn apply_door_state(sprite: &mut Sprite, rsi: &crate::rsi::RsiSprite, frame: u32) {
+    sprite.image = rsi.image.clone();
+    sprite.texture_atlas = Some(TextureAtlas {
+        layout: rsi.layout.clone(),
+        index: rsi.index(0, frame),
+    });
+}
+
+/// Меняет спрайт по состоянию двери и проигрывает анимацию opening/closing
+/// по `delays` из RSI (полноценная анимация, а не мгновенная смена).
 pub fn update_door_visuals(
+    time: Res<Time>,
     mut commands: Commands,
     doors: Query<&Door>,
     mut visuals: Query<(Entity, &mut DoorVisual, &mut Sprite)>,
     registry: Res<RsiRegistry>,
 ) {
-    let (Some(closed), Some(open)) = (registry.get(DOOR_CLOSED), registry.get(DOOR_OPEN)) else {
+    let (Some(closed), Some(open), Some(opening), Some(closing)) = (
+        registry.get(DOOR_CLOSED),
+        registry.get(DOOR_OPEN),
+        registry.get(DOOR_OPENING),
+        registry.get(DOOR_CLOSING),
+    ) else {
         return;
     };
+    let dt = time.delta_secs();
+
     for (visual_entity, mut visual, mut sprite) in visuals.iter_mut() {
         let Ok(door) = doors.get(visual.door) else {
             // Дверь исчезла (despawn с сервера).
             commands.entity(visual_entity).despawn();
             continue;
         };
+
+        // Сервер сообщил новое состояние — запускаем анимацию перехода.
         if door.open != visual.last_open {
             visual.last_open = door.open;
-            let target = if door.open { open } else { closed };
-            sprite.image = target.image.clone();
-            sprite.texture_atlas = Some(TextureAtlas {
-                layout: target.layout.clone(),
-                index: 0,
-            });
+            visual.anim = if door.open {
+                DoorAnim::Opening {
+                    frame: 0,
+                    elapsed: 0.0,
+                }
+            } else {
+                DoorAnim::Closing {
+                    frame: 0,
+                    elapsed: 0.0,
+                }
+            };
             tracing::info!(door = ?visual.door, open = door.open, "door state changed");
         }
+
+        match visual.anim {
+            DoorAnim::Idle => {
+                let target = if door.open { open } else { closed };
+                if sprite.image != target.image {
+                    apply_door_state(&mut sprite, target, 0);
+                }
+            }
+            DoorAnim::Opening { frame, elapsed } => {
+                advance_anim(
+                    &mut visual.anim,
+                    &mut sprite,
+                    opening,
+                    frame,
+                    elapsed,
+                    dt,
+                    true,
+                );
+            }
+            DoorAnim::Closing { frame, elapsed } => {
+                advance_anim(
+                    &mut visual.anim,
+                    &mut sprite,
+                    closing,
+                    frame,
+                    elapsed,
+                    dt,
+                    false,
+                );
+            }
+        }
     }
+}
+
+/// Продвигает кадр анимации по длительностям RSI; по завершении — конечное состояние.
+fn advance_anim(
+    anim: &mut DoorAnim,
+    sprite: &mut Sprite,
+    rsi: &crate::rsi::RsiSprite,
+    frame: u32,
+    elapsed: f32,
+    dt: f32,
+    to_open: bool,
+) {
+    let frames = rsi.frames_per_direction.first().copied().unwrap_or(1);
+    let mut frame = frame;
+    let mut elapsed = elapsed + dt;
+    // Возможно пройти несколько кадров за один тик — цикл, а не один шаг.
+    while frame < frames {
+        let delay = rsi
+            .delays
+            .first()
+            .and_then(|d| d.get(frame as usize))
+            .copied()
+            .unwrap_or(0.1)
+            .max(0.001);
+        if elapsed < delay {
+            break;
+        }
+        elapsed -= delay;
+        frame += 1;
+    }
+    if frame >= frames {
+        *anim = DoorAnim::Idle;
+    } else {
+        *anim = if to_open {
+            DoorAnim::Opening { frame, elapsed }
+        } else {
+            DoorAnim::Closing { frame, elapsed }
+        };
+    }
+    apply_door_state(sprite, rsi, frame.min(frames.saturating_sub(1)));
 }
 
 /// Клик левой кнопкой по двери в зоне попадания → `Interact` на сервер.

@@ -315,12 +315,13 @@ fn apply_player_state(
     let current = interp.prev.lerp(interp.target, alpha);
 
     // Направление — по серверному смещению за последний снимок.
+    // Порядок RsiDirection движка: South=0, North=1, East=2, West=3.
     let delta = interp.target - interp.prev;
     let direction = (delta.length() >= 0.5).then(|| {
         if delta.x.abs() > delta.y.abs() {
-            if delta.x > 0.0 { 1 } else { 3 } // восток / запад
+            if delta.x > 0.0 { 2 } else { 3 } // восток / запад
         } else if delta.y > 0.0 {
-            2 // север
+            1 // север
         } else {
             0 // юг
         }

@@ -25,6 +25,8 @@ pub struct RsiSprite {
     pub directions: u32,
     /// Кадров на каждое направление (порядок обхода движка).
     pub frames_per_direction: Vec<u32>,
+    /// Длительности кадров по направлениям (сек) — для анимаций (двери).
+    pub delays: Vec<Vec<f32>>,
 }
 
 impl RsiSprite {
@@ -85,6 +87,7 @@ pub fn build_registry(
                 layout,
                 directions: state.directions,
                 frames_per_direction: state.frames_per_direction.clone(),
+                delays: state.delays.clone(),
             };
             registry.sprites.insert(key, sprite);
         }

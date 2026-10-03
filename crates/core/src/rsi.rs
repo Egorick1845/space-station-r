@@ -56,6 +56,8 @@ pub struct RsiState {
     pub directions: u32,
     /// Кадров на каждое направление (из `delays`, минимум 1).
     pub frames_per_direction: Vec<u32>,
+    /// Длительности кадров по направлениям (для анимации, сек).
+    pub delays: Vec<Vec<f32>>,
     pub sheet: DynamicImage,
 }
 
@@ -107,19 +109,32 @@ pub fn load_rsi(path: &Path) -> Result<Rsi, RsiError> {
             return Err(RsiError::Directions(name, directions));
         }
         // delays[dir] = длительности кадров направления; пусто/нет — 1 кадр.
-        let frames_per_direction: Vec<u32> = st["delays"]
+        let mut delays: Vec<Vec<f32>> = st["delays"]
             .as_array()
             .map(|dirs| {
                 dirs.iter()
-                    .map(|d| d.as_array().map(|f| f.len() as u32).unwrap_or(1).max(1))
+                    .map(|d| {
+                        d.as_array()
+                            .map(|f| {
+                                f.iter()
+                                    .filter_map(|v| v.as_f64())
+                                    .map(|v| v as f32)
+                                    .collect()
+                            })
+                            .unwrap_or_else(|| vec![1.0])
+                    })
                     .collect()
             })
             .unwrap_or_default();
-        let frames_per_direction = if frames_per_direction.is_empty() {
-            vec![1; directions as usize]
-        } else {
-            frames_per_direction
-        };
+        if delays.is_empty() {
+            delays = vec![vec![1.0]; directions as usize];
+        }
+        for d in delays.iter_mut() {
+            if d.is_empty() {
+                d.push(1.0);
+            }
+        }
+        let frames_per_direction: Vec<u32> = delays.iter().map(|d| d.len() as u32).collect();
 
         let png_name = format!("{name}.png");
         let bytes = pngs
@@ -131,6 +146,7 @@ pub fn load_rsi(path: &Path) -> Result<Rsi, RsiError> {
             name,
             directions,
             frames_per_direction,
+            delays,
             sheet,
         };
         verify_sheet(&state, size)?;
