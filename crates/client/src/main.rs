@@ -2,6 +2,8 @@
 //!
 //! T0.2: окно 1280×720, тёмный фон, спрайт в центре, движение WASD/стрелки.
 
+use std::path::Path;
+
 use bevy::prelude::*;
 use bevy::window::{Window, WindowPlugin, WindowResolution};
 
@@ -12,17 +14,53 @@ const MOVE_SPEED: f32 = 300.0;
 
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: format!("{GAME_NAME} — dev client"),
-                resolution: WindowResolution::new(1280, 720),
-                ..default()
-            }),
-            ..default()
-        }))
+        .add_plugins(
+            DefaultPlugins
+                .set(WindowPlugin {
+                    primary_window: Some(Window {
+                        title: format!("{GAME_NAME} — dev client"),
+                        resolution: WindowResolution::new(1280, 720),
+                        ..default()
+                    }),
+                    ..default()
+                })
+                .set(asset_plugin()),
+        )
         .add_systems(Startup, (setup_camera, spawn_player))
         .add_systems(Update, player_movement)
         .run();
+}
+
+/// Плагин ассетов с явным путём к каталогу `assets/` в корне репозитория.
+///
+/// Bevy по умолчанию ищет ассеты относительно BEVY_ASSET_ROOT / CARGO_MANIFEST_DIR
+/// (при `cargo run` это `crates/client` — мимо корня репо) или каталога exe,
+/// поэтому путь задаём явно. Если BEVY_ASSET_ROOT выставлен вручную — не мешаем.
+fn asset_plugin() -> AssetPlugin {
+    if std::env::var_os("BEVY_ASSET_ROOT").is_some() {
+        return AssetPlugin::default();
+    }
+    AssetPlugin {
+        file_path: assets_file_path(),
+        ..default()
+    }
+}
+
+/// Абсолютный путь к `<repo>/assets/`, вычисленный из окружения запуска.
+fn assets_file_path() -> String {
+    // `cargo run`: CARGO_MANIFEST_DIR = <repo>/crates/client → корень через два уровня.
+    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+        if let Some(root) = Path::new(&manifest_dir).ancestors().nth(2) {
+            return root.join("assets").to_string_lossy().into_owned();
+        }
+    }
+    // Прямой запуск: <repo>/target/<profile>/ssr-client.exe → корень через три уровня.
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(root) = exe_path.ancestors().nth(3) {
+            return root.join("assets").to_string_lossy().into_owned();
+        }
+    }
+    "assets".into()
 }
 
 fn setup_camera(mut commands: Commands) {
