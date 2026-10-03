@@ -10,3 +10,4 @@ ssr-protocol = { workspace = true, features = ["net"] }
 bevy = { workspace = true }
 lightyear = { workspace = true }
 tracing = { workspace = true }
+walkdir = { workspace = true }

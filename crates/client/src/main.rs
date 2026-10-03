@@ -13,6 +13,8 @@ use bevy::window::{Window, WindowPlugin, WindowResolution};
 use lightyear::prelude::client::*;
 use lightyear::prelude::*;
 use ssr_core::{GAME_NAME, PlayerPosition};
+
+mod rsi;
 use ssr_protocol::net::GameChannel;
 use ssr_protocol::{
     ClientMessage, DEFAULT_SERVER_PORT, PROTOCOL_VERSION, ProtocolPlugin, ServerMessage,
@@ -55,7 +57,10 @@ fn main() {
     app.add_plugins(ProtocolPlugin);
     app.init_resource::<Handshake>();
     app.init_resource::<PlayerEntity>();
-    app.add_systems(Startup, (setup_camera, spawn_player, startup_connection));
+    app.add_systems(
+        Startup,
+        (setup_camera, spawn_player, startup_connection, startup_rsi),
+    );
     app.add_systems(
         Update,
         (send_connect, send_input, receive_server, apply_position),
@@ -234,6 +239,28 @@ fn spawn_player(mut commands: Commands, assets: Res<AssetServer>) {
     // Временный спрайт из сборки мини-станции (assets/sprites/ss14/ATTRIBUTION.md).
     let texture: Handle<Image> = assets.load("sprites/ss14/Mobs/Animals/monkey.rsi/monkey.png");
     commands.spawn((Player, Sprite::from_image(texture)));
+}
+
+/// Строит RsiRegistry и спавнит лом из SS14 (критерий IMP.1: лом виден в окне).
+fn startup_rsi(
+    mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
+    mut layouts: ResMut<Assets<TextureAtlasLayout>>,
+) {
+    let root = Path::new(&assets_file_path()).join("sprites/ss14");
+    let registry = rsi::build_registry(&mut images, &mut layouts, &root);
+    let key = "sprites/ss14/Objects/Tools/crowbar.rsi#icon";
+    match rsi::spawn_rsi_sprite(
+        &mut commands,
+        &registry,
+        key,
+        0,
+        Vec3::new(220.0, 120.0, 0.0),
+    ) {
+        Some(_) => tracing::info!(key, "rsi sprite spawned"),
+        None => tracing::warn!(key, "rsi sprite not found in registry"),
+    }
+    commands.insert_resource(registry);
 }
 
 #[derive(Component)]

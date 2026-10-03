@@ -29,6 +29,15 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde = { version = "1", features = ["derive"] }
 postcard = "1"
 
+# Импорт контента SS14 (SS14_IMPORT.md §6, IMP.1)
+image = "0.25"
+serde_json = "1"
+zip = "2"
+walkdir = "2"
+
+# Ошибки (PLAN.md §2): thiserror в библиотеках
+thiserror = "2"
+
 # Сеть (PLAN.md §2): lightyear — основной выбор (репликация, предсказание, interest management).
 # replication включена с T1.3; prediction/interpolation добавляются после T2.2
 # (их системы требуют ресурсов предсказания и без репликации паникуют).
