@@ -49,16 +49,16 @@ fn asset_plugin() -> AssetPlugin {
 /// Абсолютный путь к `<repo>/assets/`, вычисленный из окружения запуска.
 fn assets_file_path() -> String {
     // `cargo run`: CARGO_MANIFEST_DIR = <repo>/crates/client → корень через два уровня.
-    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
-        if let Some(root) = Path::new(&manifest_dir).ancestors().nth(2) {
-            return root.join("assets").to_string_lossy().into_owned();
-        }
+    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR")
+        && let Some(root) = Path::new(&manifest_dir).ancestors().nth(2)
+    {
+        return root.join("assets").to_string_lossy().into_owned();
     }
     // Прямой запуск: <repo>/target/<profile>/ssr-client.exe → корень через три уровня.
-    if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(root) = exe_path.ancestors().nth(3) {
-            return root.join("assets").to_string_lossy().into_owned();
-        }
+    if let Ok(exe_path) = std::env::current_exe()
+        && let Some(root) = exe_path.ancestors().nth(3)
+    {
+        return root.join("assets").to_string_lossy().into_owned();
     }
     "assets".into()
 }
