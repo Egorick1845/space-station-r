@@ -4771,8 +4771,11 @@ version = "0.1.0"
 name = "ssr-server"
 version = "0.1.0"
 dependencies = [
+ "bevy",
  "ssr-core",
  "ssr-protocol",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

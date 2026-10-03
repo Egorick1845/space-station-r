@@ -7,3 +7,6 @@ publish.workspace = true
 [dependencies]
 ssr-core = { workspace = true }
 ssr-protocol = { workspace = true }
+bevy = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
