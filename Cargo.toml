@@ -29,6 +29,18 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde = { version = "1", features = ["derive"] }
 postcard = "1"
 
+# Сеть (PLAN.md §2): lightyear — основной выбор (репликация, предсказание, interest management).
+# Пока включены только нужные фазы фичи: prediction/interpolation/replication
+# добавятся в T1.3/T1.4 (их системы требуют полной инфраструктуры репликации).
+lightyear = { version = "0.30.1", default-features = false, features = [
+    "std",
+    "client",
+    "server",
+    "udp",
+    "raw_connection",
+] }
+bevy_app = "0.19"
+
 # Быстрый рантайм в dev-сборках: свои крейты — opt-level 1, зависимости — 3.
 # debug=1 у зависимостей выключен: полный debuginfo Bevy на windows-gnu
 # даёт exe >2 ГБ, который Windows не может запустить.

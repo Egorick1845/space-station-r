@@ -6,7 +6,8 @@ publish.workspace = true
 
 [dependencies]
 ssr-core = { workspace = true }
-ssr-protocol = { workspace = true }
+ssr-protocol = { workspace = true, features = ["net"] }
 bevy = { workspace = true }
+lightyear = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

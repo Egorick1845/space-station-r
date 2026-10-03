@@ -8,6 +8,16 @@ use serde::{Deserialize, Serialize};
 /// Версия протокола. Несовпадение при рукопожатии = отказ соединения (проверка в T1.2).
 pub const PROTOCOL_VERSION: u32 = 1;
 
+/// Порт игрового сервера по умолчанию (T1.2).
+pub const DEFAULT_SERVER_PORT: u16 = 7777;
+
+#[cfg(feature = "net")]
+pub mod net;
+
+/// Регистрация протокола в Bevy-приложении: сообщения и канал.
+#[cfg(feature = "net")]
+pub use net::ProtocolPlugin;
+
 /// Сообщения клиент → сервер.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ClientMessage {
