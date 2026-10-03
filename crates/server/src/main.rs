@@ -72,6 +72,7 @@ fn main() {
     app.init_resource::<Players>();
     app.init_resource::<TickState>();
     app.init_resource::<ChunkRooms>();
+    app.init_resource::<SpawnCursor>();
     app.add_systems(Startup, startup);
     app.add_systems(
         Startup,
@@ -114,6 +115,11 @@ struct GameMap {
     spawn_points: Vec<(f32, f32)>,
     chunks: Vec<TileChunkData>,
 }
+
+/// Курсор выдачи точек спавна (T2.4): каждый новый игрок получает следующую
+/// точку по кругу, чтобы игроки не появлялись друг в друге.
+#[derive(Resource, Default)]
+struct SpawnCursor(usize);
 
 /// Загрузка карты из `assets/maps/test.ron` (T2.3): правка файла + рестарт
 /// сервера меняют мир без перекомпиляции. Чанки спавнятся сущностями
@@ -236,6 +242,7 @@ fn on_link_disconnected(
 fn handle_client_messages(
     mut commands: Commands,
     map: Res<GameMap>,
+    mut spawn_cursor: ResMut<SpawnCursor>,
     mut receivers: Query<(Entity, &RemoteId, &mut MessageReceiver<ClientMessage>), With<Connected>>,
     mut senders: Query<(Entity, &mut MessageSender<ServerMessage>), With<Connected>>,
     mut inputs: Query<&mut PlayerInput>,
@@ -282,8 +289,15 @@ fn handle_client_messages(
     }
 
     for (link_entity, name) in connected {
-        // Игрок появляется на первой точке спавна из файла карты (T2.3).
-        let spawn = map.spawn_points.first().copied().unwrap_or((0.0, 0.0));
+        // Игрок появляется на следующей точке спавна из файла карты (T2.4).
+        let spawn = if map.spawn_points.is_empty() {
+            (0.0, 0.0)
+        } else {
+            let point = map.spawn_points[spawn_cursor.0 % map.spawn_points.len()];
+            spawn_cursor.0 += 1;
+            point
+        };
+        tracing::info!(name, spawn = ?spawn, "player spawned");
         // Игровая сущность игрока: динамическое тело (T2.2), позиция реплицируется
         // клиентам из интереса (T1.3/T1.4).
         let player = commands

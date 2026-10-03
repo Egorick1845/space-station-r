@@ -239,21 +239,25 @@ fn apply_position(
     tracing::debug!(target = ?target.to_array(), render = ?current.to_array(), "position applied");
 }
 
-/// Счётчик реплицированных сущностей для критерия T1.4 (лог раз в 2 секунды).
+/// Счётчик и позиции видимых игроков (T1.4/T2.4): лог раз в 2 секунды.
+/// Позиции меняются на глазах — видно, что реплицируется движение.
 fn count_replicated(
     time: Res<Time>,
     mut next_log: Local<f32>,
-    replicated: Query<(), (With<Remote>, With<PlayerPosition>)>,
+    replicated: Query<&PlayerPosition, With<Remote>>,
 ) {
     *next_log += time.delta_secs();
     if *next_log < 2.0 {
         return;
     }
     *next_log = 0.0;
-    let count = replicated.iter().count();
-    if count > 0 {
-        tracing::info!(count, "replicated entities visible");
+    let mut positions: Vec<[f32; 2]> = replicated.iter().map(|p| p.0).collect();
+    if positions.is_empty() {
+        return;
     }
+    // Постоянный порядок в логе: сортировка по x, затем по y.
+    positions.sort_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])));
+    tracing::info!(count = positions.len(), positions = ?positions, "visible players");
 }
 
 fn setup_camera(mut commands: Commands) {
