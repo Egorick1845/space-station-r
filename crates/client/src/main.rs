@@ -12,16 +12,14 @@ const MOVE_SPEED: f32 = 300.0;
 
 fn main() {
     App::new()
-        .add_plugins(
-            DefaultPlugins.set(WindowPlugin {
-                primary_window: Some(Window {
-                    title: format!("{GAME_NAME} — dev client"),
-                    resolution: WindowResolution::new(1280, 720),
-                    ..default()
-                }),
+        .add_plugins(DefaultPlugins.set(WindowPlugin {
+            primary_window: Some(Window {
+                title: format!("{GAME_NAME} — dev client"),
+                resolution: WindowResolution::new(1280, 720),
                 ..default()
             }),
-        )
+            ..default()
+        }))
         .add_systems(Startup, (setup_camera, spawn_player))
         .add_systems(Update, player_movement)
         .run();
