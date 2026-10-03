@@ -15,6 +15,7 @@ use lightyear::prelude::*;
 use ssr_core::{GAME_NAME, PlayerPosition};
 
 mod rsi;
+mod tiles;
 use ssr_protocol::net::GameChannel;
 use ssr_protocol::{
     ClientMessage, DEFAULT_SERVER_PORT, PROTOCOL_VERSION, ProtocolPlugin, ServerMessage,
@@ -59,7 +60,13 @@ fn main() {
     app.init_resource::<PlayerEntity>();
     app.add_systems(
         Startup,
-        (setup_camera, spawn_player, startup_connection, startup_rsi),
+        (
+            setup_camera,
+            spawn_player,
+            startup_connection,
+            startup_rsi,
+            startup_map,
+        ),
     );
     app.add_systems(
         Update,
@@ -69,6 +76,7 @@ fn main() {
             receive_server,
             apply_position,
             count_replicated,
+            tiles::camera_edge_scroll,
         ),
     );
     // Регистрация реплицируемых компонентов — одинакова на сервере и клиенте (T1.3).
@@ -257,7 +265,19 @@ fn setup_camera(mut commands: Commands) {
 fn spawn_player(mut commands: Commands, assets: Res<AssetServer>) {
     // Временный спрайт из сборки мини-станции (assets/sprites/ss14/ATTRIBUTION.md).
     let texture: Handle<Image> = assets.load("sprites/ss14/Mobs/Animals/monkey.rsi/monkey.png");
-    commands.spawn((Player, Sprite::from_image(texture)));
+    // z = 1: игрок рисуется поверх тайлов карты.
+    commands.spawn((
+        Player,
+        Sprite::from_image(texture),
+        Transform::from_xyz(0.0, 0.0, 1.0),
+    ));
+}
+
+/// Генерирует тестовую карту 128×128 и спавнит её чанки (критерий T2.1).
+fn startup_map(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
+    let root = Path::new(&assets_file_path()).to_path_buf();
+    let spawned = tiles::spawn_map(&mut commands, &mut images, &root, Vec3::ZERO);
+    tracing::info!(chunks = spawned, "test map spawned");
 }
 
 /// Строит RsiRegistry и спавнит лом из SS14 (критерий IMP.1: лом виден в окне).

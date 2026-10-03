@@ -11,3 +11,4 @@ bevy = { workspace = true }
 lightyear = { workspace = true }
 tracing = { workspace = true }
 walkdir = { workspace = true }
+image = { workspace = true }

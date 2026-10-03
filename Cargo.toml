@@ -35,6 +35,9 @@ serde_json = "1"
 zip = "2"
 walkdir = "2"
 
+# Сохранение: конфиги, прототипы и карты в .ron (PLAN.md §2, ADR-6)
+ron = "0.12"
+
 # Ошибки (PLAN.md §2): thiserror в библиотеках
 thiserror = "2"
 

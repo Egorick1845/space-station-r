@@ -1,0 +1,9 @@
+(
+    // Прототипы тайлов (T2.1, ADR-6). Спрайт — полоса вариантов 32×N пикселей
+    // относительно assets/; None — тайл не рисуется (космос = фон окна).
+    tiles: {
+        "floor": ( sprite: Some("sprites/ss14/Tiles/steel.png"), solid: false ),
+        "wall":  ( sprite: Some("sprites/ss14/Tiles/dark.png"),  solid: true ),
+        "space": ( sprite: None, solid: false ),
+    },
+)

@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 pub const GAME_NAME: &str = "Space Station R";
 
 pub mod rsi;
+pub mod tiles;
 
 /// Скорость игрока, пикселей в секунду (сервер применяет ввод по ADR-3).
 pub const PLAYER_MOVE_SPEED: f32 = 300.0;
