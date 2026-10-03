@@ -128,7 +128,7 @@ fn install_default_font(mut fonts: ResMut<Assets<Font>>) {
         Ok(bytes) => {
             // Подмена дефолтного ассета: все тексты без явного шрифта
             // начинают использовать Noto Sans с кириллицей.
-            fonts.insert(AssetId::default(), Font::from_bytes(bytes));
+            let _ = fonts.insert(AssetId::default(), Font::from_bytes(bytes));
             tracing::info!("шрифт Noto Sans (кириллица) установлен");
         }
         Err(e) => tracing::warn!(path = %path.display(), error = %e, "шрифт не найден"),
