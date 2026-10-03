@@ -1,0 +1,7 @@
+# Rust
+/target
+
+# Рабочий мусор
+*.log
+*.tmp
+.zcode/

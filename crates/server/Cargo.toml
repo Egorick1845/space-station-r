@@ -1,0 +1,9 @@
+[package]
+name = "ssr-server"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+ssr-core = { workspace = true }
+ssr-protocol = { workspace = true }

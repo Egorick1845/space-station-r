@@ -1,0 +1,33 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/protocol",
+    "crates/server",
+    "crates/client",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+# Внутренние крейты (ADR-1: client и server зависят от core и protocol,
+# core не зависит ни от кого, protocol — только от serde при появлении сети)
+ssr-core = { path = "crates/core" }
+ssr-protocol = { path = "crates/protocol" }
+
+# Движок (PLAN.md §2): последняя стабильная на момент старта — 0.19.1 (03.10.2026)
+bevy = "0.19.1"
+
+# Быстрый рантайм в dev-сборках: свои крейты — opt-level 1, зависимости — 3.
+# debug=1 у зависимостей выключен: полный debuginfo Bevy на windows-gnu
+# даёт exe >2 ГБ, который Windows не может запустить.
+[profile.dev]
+opt-level = 1
+debug = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+debug = false
