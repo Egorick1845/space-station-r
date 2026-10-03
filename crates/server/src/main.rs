@@ -297,7 +297,8 @@ fn handle_client_messages(
                 }
                 ClientMessage::Input { movement } => {
                     let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {
-                        tracing::warn!(link = ?link_entity, "input for unknown player");
+                        // Штатный случай: ввод пришёл раньше Connect (спавна игрока).
+                        tracing::debug!(link = ?link_entity, "input before handshake");
                         continue;
                     };
                     match inputs.get_mut(entry.player) {

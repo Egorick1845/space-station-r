@@ -74,7 +74,7 @@ fn main() {
             rsi::build_registry(&mut images, &mut layouts, &rsi_root)
         });
     app.insert_resource(registry);
-    app.add_systems(Startup, (setup_camera, startup_map, lobby::spawn_lobby));
+    app.add_systems(Startup, (setup_camera, startup_map));
     app.add_systems(
         Update,
         (
@@ -94,10 +94,17 @@ fn main() {
         )
             .run_if(in_game),
     );
-    app.add_systems(Update, (enter_game, lobby::lobby_button));
-    // SSR_AUTO_PLAY=1 — тестовый режим: сразу в игру, без клика по «Играть».
-    if std::env::var_os("SSR_AUTO_PLAY").is_some() {
+    // Лобби — только в релизной сборке (в dev сразу в игру; для отладки
+    // лобби в dev: SSR_LOBBY=1; тестовый обход лобби: SSR_AUTO_PLAY=1).
+    let force_lobby = std::env::var_os("SSR_LOBBY").is_some();
+    let auto_play = std::env::var_os("SSR_AUTO_PLAY").is_some();
+    let show_lobby = !auto_play && (force_lobby || cfg!(not(debug_assertions)));
+    if show_lobby {
+        app.add_systems(Startup, lobby::spawn_lobby);
+        app.add_systems(Update, (enter_game, lobby::lobby_button));
+    } else {
         app.insert_resource(lobby::LobbyState::Playing);
+        app.add_systems(Update, enter_game);
     }
     // Регистрация реплицируемых компонентов — одинакова на сервере и клиенте (T1.3).
     // ВАЖНО: порядок регистрации должен совпадать с сервером (иначе replicon
@@ -212,10 +219,14 @@ fn input_direction(input: &ButtonInput<KeyCode>) -> Vec2 {
 fn send_input(
     input: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
+    player_entity: Res<PlayerEntity>,
     mut connected_elapsed: Local<f32>,
     connected: Query<(), With<Connected>>,
     mut senders: Query<&mut MessageSender<ClientMessage>, With<Connected>>,
 ) {
+    if !input_ready(&player_entity) {
+        return;
+    }
     if connected.iter().next().is_some() {
         *connected_elapsed += time.delta_secs();
     }
@@ -248,6 +259,12 @@ fn send_input(
             movement: direction.to_array(),
         });
     }
+}
+
+/// Готов ли клиент слать ввод: сервер создал игрока (Welcome получен).
+/// До этого пакеты ввода бессмысленны и спамят лог сервера.
+fn input_ready(player_entity: &PlayerEntity) -> bool {
+    player_entity.0.is_some()
 }
 
 /// Принимает Welcome (и будущие серверные сообщения).
