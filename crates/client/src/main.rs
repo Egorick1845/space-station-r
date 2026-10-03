@@ -63,7 +63,13 @@ fn main() {
     );
     app.add_systems(
         Update,
-        (send_connect, send_input, receive_server, apply_position),
+        (
+            send_connect,
+            send_input,
+            receive_server,
+            apply_position,
+            count_replicated,
+        ),
     );
     // Регистрация реплицируемых компонентов — одинакова на сервере и клиенте (T1.3).
     app.component::<PlayerPosition>().replicate();
@@ -134,10 +140,6 @@ fn input_direction(input: &ButtonInput<KeyCode>) -> Vec2 {
     direction.normalize_or_zero()
 }
 
-/// Шлёт серверу текущее направление ввода (сервер сам двигает игрока, ADR-3).
-///
-/// SSR_AUTO_WALK=1 — тестовый режим: первые 3 секунды после подключения клиент
-/// «держит вправо» (затем отдаёт приоритет клавиатуре). Пригодится ботам в T6.1.
 /// Шлёт серверу текущее направление ввода (сервер сам двигает игрока, ADR-3).
 ///
 /// Состояние шлётся каждый кадр (а не только при изменении): первый пакет может
@@ -223,6 +225,23 @@ fn apply_position(
         transform.translation.y = current.y;
     }
     tracing::debug!(target = ?target.to_array(), render = ?current.to_array(), "position applied");
+}
+
+/// Счётчик реплицированных сущностей для критерия T1.4 (лог раз в 2 секунды).
+fn count_replicated(
+    time: Res<Time>,
+    mut next_log: Local<f32>,
+    replicated: Query<(), (With<Remote>, With<PlayerPosition>)>,
+) {
+    *next_log += time.delta_secs();
+    if *next_log < 2.0 {
+        return;
+    }
+    *next_log = 0.0;
+    let count = replicated.iter().count();
+    if count > 0 {
+        tracing::info!(count, "replicated entities visible");
+    }
 }
 
 fn setup_camera(mut commands: Commands) {
