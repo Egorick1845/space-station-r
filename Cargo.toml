@@ -43,7 +43,7 @@ thiserror = "2"
 
 # Сеть (PLAN.md §2): lightyear — основной выбор (репликация, предсказание, interest management).
 # replication включена с T1.3; prediction/interpolation добавляются после T2.2
-# (их системы требуют ресурсов предсказания и без репликации паникуют).
+# (их системы требуют ресурсов репликации и паникуют без неё).
 lightyear = { version = "0.30.1", default-features = false, features = [
     "std",
     "client",
@@ -52,6 +52,9 @@ lightyear = { version = "0.30.1", default-features = false, features = [
     "raw_connection",
     "replication",
 ] }
+
+# Физика 2D (PLAN.md §2): avian2d 0.7 — под bevy 0.19; только на сервере (ADR-3)
+avian2d = "0.7"
 bevy_app = "0.19"
 
 # Быстрый рантайм в dev-сборках: свои крейты — opt-level 1, зависимости — 3.

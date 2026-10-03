@@ -9,11 +9,16 @@ use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
+use avian2d::math::Vector;
+use avian2d::prelude::{
+    Collider, Gravity, LinearVelocity, PhysicsPlugins, Position, RigidBody, Rotation,
+};
 use bevy::app::ScheduleRunnerPlugin;
 use bevy::prelude::*;
 use lightyear::connection::server::Start;
 use lightyear::prelude::server::*;
 use lightyear::prelude::*;
+use ssr_core::tiles::gen_test_map;
 use ssr_core::{CHUNK_SIZE, PLAYER_MOVE_SPEED, PlayerPosition, chunk_coords};
 use ssr_protocol::net::GameChannel;
 use ssr_protocol::{
@@ -60,18 +65,26 @@ fn main() {
     // Interest management через комнаты (T1.4): сущность видна клиенту,
     // если они делят хотя бы одну комнату.
     app.add_plugins(RoomPlugin);
+    // Физика только на сервере (ADR-3): стены — статические тела, игрок — динамическое.
+    app.add_plugins(PhysicsPlugins::default());
+    // Топ-даун вид: гравитация avian (−9.81 по Y) не нужна.
+    app.insert_resource(Gravity(Vector::ZERO));
     app.init_resource::<Players>();
     app.init_resource::<TickState>();
     app.init_resource::<ChunkRooms>();
     app.add_systems(Startup, startup);
+    app.add_systems(Startup, spawn_walls);
     app.add_systems(Startup, spawn_load_test);
+    app.add_systems(Startup, spawn_collision_test);
     app.add_systems(
         Update,
         (
             tick_logger,
             handle_client_messages,
             movement,
+            sync_replicated_position,
             update_client_rooms,
+            log_player_position,
         ),
     );
     app.add_observer(on_link_connected);
@@ -221,13 +234,18 @@ fn handle_client_messages(
     }
 
     for (link_entity, name) in connected {
-        // Игровая сущность игрока: позиция реплицируется клиентам из интереса (T1.3/T1.4).
+        // Игровая сущность игрока: динамическое тело (T2.2), позиция реплицируется
+        // клиентам из интереса (T1.3/T1.4).
         let player = commands
             .spawn((
                 PlayerPosition::default(),
                 PlayerInput::default(),
                 Replicate::to_clients(NetworkTarget::All),
                 Rooms::default(),
+                RigidBody::Dynamic,
+                Collider::circle(16.0),
+                Position(Vector::ZERO),
+                Rotation::default(),
             ))
             .id();
 
@@ -249,17 +267,19 @@ fn handle_client_messages(
     }
 }
 
-/// Двигает игроков по их вводу; результат реплицируется компонентом PlayerPosition.
-fn movement(time: Res<Time>, mut players: Query<(&PlayerInput, &mut PlayerPosition)>) {
-    let dt = time.delta_secs();
-    for (input, mut position) in players.iter_mut() {
-        let dir = Vec2::from_array(input.0);
-        if dir == Vec2::ZERO {
-            continue;
-        }
-        let next = Vec2::from_array(position.0) + dir.normalize_or_zero() * PLAYER_MOVE_SPEED * dt;
-        position.0 = next.to_array();
-        tracing::debug!(position = ?position.0, "player moved");
+/// Ввод игрока превращается в скорость физического тела (ADR-3: физика на сервере).
+/// Физический шаг двигает тело, стены останавливают его коллизией (T2.2).
+fn movement(mut players: Query<(&PlayerInput, &mut LinearVelocity)>) {
+    for (input, mut velocity) in players.iter_mut() {
+        velocity.0 = Vec2::from_array(input.0).normalize_or_zero() * PLAYER_MOVE_SPEED;
+    }
+}
+
+/// Копирует позицию физического тела в реплицируемый компонент (T2.2):
+/// клиент получает подтверждённую сервером позицию.
+fn sync_replicated_position(mut players: Query<(&Position, &mut PlayerPosition)>) {
+    for (position, mut replicated) in players.iter_mut() {
+        replicated.0 = [position.x, position.y];
     }
 }
 
@@ -332,10 +352,71 @@ fn spawn_load_test(
     tracing::info!(count, "load test entities spawned");
 }
 
+/// Стены карты (T2.2): для каждого чанка — одно статическое тело с составным
+/// коллайдером из тайлов-стен. Карта та же, что генерирует клиент (T2.3
+/// заменит на реплицируемую из файла).
+fn spawn_walls(mut commands: Commands) {
+    let chunks = gen_test_map();
+    let tile = CHUNK_SIZE; // 32 юнита на тайл
+    let mut total = 0usize;
+    for chunk in &chunks {
+        let mut shapes = Vec::new();
+        for ly in 0..32u32 {
+            for lx in 0..32u32 {
+                if chunk.get_local(lx, ly) != ssr_core::tiles::TileType::Wall {
+                    continue;
+                }
+                let tx = chunk.coords.x * 32 + lx as i32;
+                let ty = chunk.coords.y * 32 + ly as i32;
+                // Центр тайла в мировых координатах (тело чанка стоит в origin).
+                let offset = Vector::new((tx as f32 + 0.5) * tile, (ty as f32 + 0.5) * tile);
+                shapes.push((offset, Rotation::default(), Collider::rectangle(tile, tile)));
+                total += 1;
+            }
+        }
+        if shapes.is_empty() {
+            continue;
+        }
+        commands.spawn((RigidBody::Static, Collider::compound(shapes)));
+    }
+    tracing::info!(walls = total, "map wall colliders spawned");
+}
+
+/// Тест коллизии T2.2: SSR_COLLISION_TEST=1 ставит стену 32×4096 с центром
+/// x=704 (блокирует 688..720). Игрок (радиус 16) при автоходе вправо
+/// останавливается на x=672 и не проходит сквозь.
+fn spawn_collision_test(mut commands: Commands) {
+    if std::env::var_os("SSR_COLLISION_TEST").is_none() {
+        return;
+    }
+    commands.spawn((
+        RigidBody::Static,
+        Collider::rectangle(CHUNK_SIZE, 4096.0),
+        Position(Vector::new(704.0, 0.0)),
+        Rotation::default(),
+    ));
+    tracing::info!("collision test wall spawned at x=704 (blocks 688..720)");
+}
+
 /// Счётчик тиков сервера с момента запуска (T0.3).
 #[derive(Resource, Default)]
 struct TickState {
     tick: u64,
+}
+
+/// Раз в секунду пишет позицию игрока (для тестов коллизии, T2.2).
+fn log_player_position(time: Res<Time>, mut next_log: Local<f32>, players: Query<&PlayerPosition>) {
+    if std::env::var_os("SSR_COLLISION_TEST").is_none() {
+        return;
+    }
+    *next_log += time.delta_secs();
+    if *next_log < 1.0 {
+        return;
+    }
+    *next_log = 0.0;
+    for position in players.iter() {
+        tracing::info!(position = ?position.0, "player position");
+    }
 }
 
 fn tick_logger(mut state: ResMut<TickState>) {

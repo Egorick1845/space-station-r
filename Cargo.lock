@@ -6444,6 +6444,7 @@ dependencies = [
  "num-derive",
  "num-traits",
  "ordered-float",
+ "rayon",
  "serde",
  "serde_arrays",
  "simba",
@@ -6472,6 +6473,7 @@ dependencies = [
  "num-derive",
  "num-traits",
  "ordered-float",
+ "rayon",
  "serde",
  "serde_arrays",
  "simba",
@@ -7992,6 +7994,7 @@ dependencies = [
 name = "ssr-server"
 version = "0.1.0"
 dependencies = [
+ "avian2d",
  "bevy",
  "lightyear",
  "ssr-core",
