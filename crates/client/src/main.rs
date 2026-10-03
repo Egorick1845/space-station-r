@@ -103,7 +103,14 @@ fn main() {
     let show_lobby = !auto_play && (force_lobby || cfg!(not(debug_assertions)));
     if show_lobby {
         app.add_systems(Startup, lobby::spawn_lobby);
-        app.add_systems(Update, (enter_game, lobby::lobby_button));
+        app.add_systems(
+            Update,
+            (
+                enter_game,
+                lobby::lobby_button,
+                lobby::animate_lobby_background,
+            ),
+        );
     } else {
         app.insert_resource(lobby::LobbyState::Playing);
         app.add_systems(Update, enter_game);

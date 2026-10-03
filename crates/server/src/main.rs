@@ -79,7 +79,14 @@ fn main() {
     app.add_systems(Startup, startup);
     app.add_systems(
         Startup,
-        (load_map, spawn_walls, spawn_load_test, spawn_collision_test).chain(),
+        (
+            load_prototypes,
+            load_map,
+            spawn_walls,
+            spawn_load_test,
+            spawn_collision_test,
+        )
+            .chain(),
     );
     app.add_systems(
         Update,
@@ -112,6 +119,29 @@ fn startup(mut commands: Commands) -> Result {
     commands.trigger(Start { entity: server });
     tracing::info!(%SERVER_ADDR, "server listening");
     Ok(())
+}
+
+/// Прототипы контента (портированы из SS14, задача IMP.2/IMP.3):
+/// грузятся при старте, чтобы конвейер импорта проверялся в рантайме.
+/// Использование в игровых системах — по мере появления фаз 4–5.
+#[derive(Resource)]
+struct Prototypes(ssr_core::prototypes::ProtoSet);
+
+/// Грузит `assets/prototypes_ss14.ron` (9258 прототипов сущностей).
+fn load_prototypes(mut commands: Commands) {
+    let path = ssr_core::assets_root().join("prototypes_ss14.ron");
+    match ssr_core::prototypes::ProtoSet::load(&path) {
+        Ok(set) => {
+            let with_sprite = set.protos.iter().filter(|p| p.sprite.is_some()).count();
+            tracing::info!(
+                protos = set.protos.len(),
+                with_sprite,
+                "content prototypes loaded"
+            );
+            commands.insert_resource(Prototypes(set));
+        }
+        Err(e) => tracing::warn!(error = %e, "content prototypes not loaded"),
+    }
 }
 
 /// Загруженная карта (T2.3): чанки для репликации и точки спавна.

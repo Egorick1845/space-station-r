@@ -1,10 +1,13 @@
-//! Лобби в духе сборки «Мини-станции» (их `LobbyGui.xaml`): слева — панель
-//! с логотипом и кнопками «Сайт»/«Вики», в центре — строка статуса, кнопка
-//! «Готов» (подключение к серверу) и «Выход». Показывается ТОЛЬКО в релизной
-//! сборке — в dev сразу игра (принудительно включить: SSR_LOBBY=1).
+//! Лобби по образцу мини-станции (`LobbyGui.xaml` + их `AnimatedBackgroundControl`):
+//! полноэкранный анимированный фон (`_Mini/Lobby/mars.rsi`, 64 кадра), верхняя
+//! панель-«страйп» с кнопками «Правила»/«Вики» и логотипом, внизу слева —
+//! информация о сервере, по центру — статус смены и кнопки «Готов»/«Выход».
+//! Показывается ТОЛЬКО в релизной сборке (в dev сразу игра; SSR_LOBBY=1 — отладка).
 
 use bevy::prelude::*;
 use bevy::ui::widget::Button;
+
+use crate::rsi::RsiRegistry;
 
 /// Состояние клиента: лобби или игра.
 #[derive(Resource, Default, Clone, Copy, PartialEq)]
@@ -18,6 +21,17 @@ pub enum LobbyState {
 #[derive(Component)]
 pub struct LobbyRoot;
 
+/// Фон лобби: анимированный ImageNode.
+#[derive(Component)]
+pub struct LobbyBackground;
+
+/// Анимация фона (кадр + таймер по delays RSI).
+#[derive(Default)]
+pub struct BackgroundAnim {
+    frame: u32,
+    elapsed: f32,
+}
+
 /// Действие кнопки лобби.
 #[derive(Component, Clone, Copy, PartialEq)]
 pub enum LobbyAction {
@@ -29,8 +43,8 @@ pub enum LobbyAction {
     Quit,
 }
 
-/// Фон лобби — арт станции из сборки мини-станции (см. ASSETS_LICENSES.md).
-const LOBBY_BACKGROUND: &str = "sprites/ss14/LobbyScreens/SpaceStation64.webp";
+/// Анимированный фон — RSI из сборки мини-станции (см. ASSETS_LICENSES.md).
+const LOBBY_BACKGROUND_RSI: &str = "sprites/ss14/_Mini/Lobby/mars.rsi#1";
 /// Логотип мини-станции (их `Textures/Interface/main_logo.png`).
 const LOBBY_LOGO: &str = "sprites/ss14/Interface/main_logo.png";
 
@@ -46,9 +60,18 @@ const DANGER_BG: Color = Color::srgb(0.42, 0.13, 0.13);
 const DANGER_BG_HOVER: Color = Color::srgb(0.55, 0.17, 0.17);
 
 /// Строит стартовый экран по образцу лобби мини-станции.
-pub fn spawn_lobby(mut commands: Commands, assets: Res<AssetServer>) {
-    let background = assets.load(LOBBY_BACKGROUND);
+pub fn spawn_lobby(mut commands: Commands, assets: Res<AssetServer>, registry: Res<RsiRegistry>) {
     let logo = assets.load(LOBBY_LOGO);
+
+    // Фон: первый кадр mars.rsi, дальше система крутит анимацию.
+    let background = registry.get(LOBBY_BACKGROUND_RSI).map(|rsi| {
+        let mut node = ImageNode::new(rsi.image.clone());
+        node.texture_atlas = Some(TextureAtlas {
+            layout: rsi.layout.clone(),
+            index: rsi.index(0, 0),
+        });
+        node
+    });
 
     commands
         .spawn((
@@ -61,81 +84,92 @@ pub fn spawn_lobby(mut commands: Commands, assets: Res<AssetServer>) {
             },
         ))
         .with_children(|root| {
-            // Фон: арт станции.
-            root.spawn((
-                ImageNode::new(background),
-                Node {
-                    width: percent(100),
-                    height: percent(100),
-                    ..default()
-                },
-            ));
+            // Полноэкранный анимированный фон (аналог AnimatedBackgroundControl).
+            if let Some(mut node) = background {
+                node.image_mode = NodeImageMode::Stretch;
+                root.spawn((
+                    LobbyBackground,
+                    node,
+                    Node {
+                        width: percent(100),
+                        height: percent(100),
+                        position_type: PositionType::Absolute,
+                        ..default()
+                    },
+                ));
+            }
 
-            // Левая панель: логотип, информация о сервере и кнопки —
-            // как левая панель лобби мини-станции (main_logo + Сайт/Дискорд/Телеграм).
+            // Верхняя панель-«страйп»: кнопки и логотип справа (TopPanel из XAML).
             root.spawn((
                 Node {
                     position_type: PositionType::Absolute,
                     left: px(0),
+                    right: px(0),
                     top: px(0),
-                    bottom: px(0),
-                    width: px(300),
-                    flex_direction: FlexDirection::Column,
+                    height: px(56),
+                    flex_direction: FlexDirection::Row,
                     align_items: AlignItems::Center,
-                    padding: UiRect::all(px(18)),
-                    row_gap: px(14),
+                    padding: UiRect::horizontal(px(12)),
+                    column_gap: px(8),
                     ..default()
                 },
                 BackgroundColor(PANEL_BG),
             ))
-            .with_children(|panel| {
-                panel.spawn((
+            .with_children(|top| {
+                top_button(top, "Правила", LobbyAction::Url("https://ministation.ru"));
+                top_button(top, "Вики", LobbyAction::Url("https://wiki.ministation.ru"));
+                // Пружина: логотип уходит вправо.
+                top.spawn(Node {
+                    flex_grow: 1.0,
+                    ..default()
+                });
+                top.spawn((
                     ImageNode::new(logo),
                     Node {
-                        width: px(220),
-                        height: px(220),
+                        width: px(40),
+                        height: px(40),
                         ..default()
                     },
                 ));
-                panel.spawn((
-                    Text::new("SPACE STATION R"),
-                    TextFont::from_font_size(22.0),
+            });
+
+            // Низ слева: ServerInfo (название сервера, адрес, режим) — как левая панель XAML.
+            root.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: px(12),
+                    bottom: px(12),
+                    flex_direction: FlexDirection::Column,
+                    padding: UiRect::all(px(12)),
+                    row_gap: px(4),
+                    ..default()
+                },
+                BackgroundColor(PANEL_BG),
+            ))
+            .with_children(|info| {
+                info.spawn((
+                    Text::new("Мини-станция · Space Station R"),
+                    TextFont::from_font_size(18.0),
                     TextColor(ACCENT),
                 ));
-                panel.spawn((
-                    Text::new("Мини-станция · 127.0.0.1:7777"),
+                info.spawn((
+                    Text::new("Сервер: 127.0.0.1:7777"),
+                    TextFont::from_font_size(14.0),
+                    TextColor(TEXT),
+                ));
+                info.spawn((
+                    Text::new("Режим: песочница · сборка на Rust"),
                     TextFont::from_font_size(13.0),
                     TextColor(TEXT_DIM),
                 ));
-                panel.spawn((
-                    Node {
-                        width: percent(100),
-                        height: px(1),
-                        margin: UiRect::vertical(px(6)),
-                        ..default()
-                    },
-                    BackgroundColor(BUTTON_BORDER),
-                ));
-                menu_button(
-                    panel,
-                    "Сайт",
-                    LobbyAction::Url("https://ministation.ru"),
-                    false,
-                );
-                menu_button(
-                    panel,
-                    "Вики",
-                    LobbyAction::Url("https://wiki.ministation.ru"),
-                    false,
-                );
             });
 
-            // Центральная колонка: строка статуса, «Готов», «Выход».
+            // Центральная колонка: статус смены, «Готов», «Выход» (CenterPanel из XAML).
             root.spawn(Node {
                 position_type: PositionType::Absolute,
-                left: px(300),
+                left: px(0),
                 right: px(0),
-                top: px(0),
+                top: px(56),
                 bottom: px(0),
                 flex_direction: FlexDirection::Column,
                 align_items: AlignItems::Center,
@@ -148,7 +182,7 @@ pub fn spawn_lobby(mut commands: Commands, assets: Res<AssetServer>) {
                     .spawn((
                         Node {
                             padding: UiRect::axes(px(18), px(6)),
-                            margin: UiRect::bottom(px(8)),
+                            margin: UiRect::bottom(px(10)),
                             ..default()
                         },
                         BackgroundColor(PANEL_BG),
@@ -164,26 +198,26 @@ pub fn spawn_lobby(mut commands: Commands, assets: Res<AssetServer>) {
         });
 }
 
-/// Кнопка шириной панели (левая колонка).
-fn menu_button(parent: &mut ChildSpawnerCommands, label: &str, action: LobbyAction, danger: bool) {
+/// Кнопка верхней панели (125×36, как кнопки Rules/Guidebook в XAML).
+fn top_button(parent: &mut ChildSpawnerCommands, label: &str, action: LobbyAction) {
     parent
         .spawn((
             Button,
             action,
             Node {
-                width: percent(100),
-                height: px(40),
+                width: px(125),
+                height: px(36),
                 align_items: AlignItems::Center,
                 justify_content: JustifyContent::Center,
                 border: UiRect::all(px(2)),
                 ..default()
             },
-            BackgroundColor(if danger { DANGER_BG } else { BUTTON_BG }),
+            BackgroundColor(BUTTON_BG),
             BorderColor::from(BUTTON_BORDER),
         ))
         .with_child((
             Text::new(label),
-            TextFont::from_font_size(18.0),
+            TextFont::from_font_size(16.0),
             TextColor(TEXT),
         ));
 }
@@ -210,6 +244,39 @@ fn wide_button(parent: &mut ChildSpawnerCommands, label: &str, action: LobbyActi
             TextFont::from_font_size(22.0),
             TextColor(TEXT),
         ));
+}
+
+/// Крутит кадры анимированного фона по `delays` из RSI (аналог
+/// AnimatedBackgroundControl.FrameUpdate в сборке мини-станции).
+pub fn animate_lobby_background(
+    time: Res<Time>,
+    registry: Res<RsiRegistry>,
+    mut anim: Local<BackgroundAnim>,
+    mut backgrounds: Query<&mut ImageNode, With<LobbyBackground>>,
+) {
+    let Some(rsi) = registry.get(LOBBY_BACKGROUND_RSI) else {
+        return;
+    };
+    let frames = rsi.frames_per_direction.first().copied().unwrap_or(1);
+    if frames <= 1 {
+        return;
+    }
+    let delays = rsi.delays.first().cloned().unwrap_or_default();
+
+    anim.elapsed += time.delta_secs();
+    let current = (anim.frame % frames) as usize;
+    let delay = delays.get(current).copied().unwrap_or(0.4).max(0.001);
+    if anim.elapsed < delay {
+        return;
+    }
+    anim.elapsed -= delay;
+    anim.frame = (anim.frame + 1) % frames;
+
+    for mut node in backgrounds.iter_mut() {
+        if let Some(atlas) = node.texture_atlas.as_mut() {
+            atlas.index = rsi.index(0, anim.frame);
+        }
+    }
 }
 
 /// Запрос кнопок лобби (алиас против clippy::type_complexity).

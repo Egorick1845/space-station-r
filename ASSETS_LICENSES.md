@@ -40,6 +40,10 @@
   экраны лобби сборки, CC BY-SA 3.0.
 - `assets/maps/imported_aspid.ron`, `assets/maps/imported_floor3x3.ron` —
   сконвертированные карты (источники: `_Mini/aspid.yml`, `Test/floor3x3.yml`).
+- `assets/maps/imported/{amber,bagel,box,cluster,marathon}.ron` — карты `_Mini/*.yml`.
+- `assets/sprites/ss14/_Mini/Lobby/{mars,mini_deep_space}.rsi` — анимированный
+  фон лобби мини-станции (64 и 48 кадров), CC BY-SA 3.0.
+- `assets/fonts/NotoSans-*.ttf` — шрифты сборки (OFL, см. выше).
 
 ## Карты SS14 (staging для IMP.4)
 

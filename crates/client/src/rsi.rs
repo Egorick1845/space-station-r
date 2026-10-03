@@ -65,6 +65,8 @@ pub const STARTUP_RSI: &[&str] = &[
     "Objects/Tools/crowbar.rsi",
     "Structures/Walls/solid.rsi",
     "Structures/Doors/Airlocks/Standard/basic.rsi",
+    // Анимированный фон лобби мини-станции (64 кадра).
+    "_Mini/Lobby/mars.rsi",
 ];
 
 /// Загружает RSI из [`STARTUP_RSI`] и строит реестр.
@@ -100,8 +102,15 @@ pub fn build_registry(
     registry
 }
 
+/// Предел размера текстуры на типичном GPU: листы шире (например, лента из
+/// 64 кадров 320×180 = 20480 px) нужно перепаковать в сетку поближе к квадрату.
+const MAX_TEXTURE_DIM: u32 = 16384;
+
 /// Загружает лист состояния в GPU: один [`Image`] + [`TextureAtlasLayout`],
 /// где ячейка i — это i-я клетка листа в порядке обхода движка.
+///
+/// Если лист не влезает в лимит GPU по ширине/высоте — клетки перепаковываются
+/// в квадратную сетку (порядок клеток в атласе сохраняется).
 fn upload_state(
     rsi: &Rsi,
     state: &rsi::RsiState,
@@ -109,29 +118,70 @@ fn upload_state(
     layouts: &mut Assets<TextureAtlasLayout>,
 ) -> (Handle<Image>, Handle<TextureAtlasLayout>) {
     let (w, h) = rsi.size;
-    let rgba = state.sheet.to_rgba8();
+    let sheet = state.sheet.to_rgba8();
+    let (src_cols, src_rows) = state.sheet_grid(rsi.size);
+    let cells = src_cols * src_rows;
+
+    let max_cols = (MAX_TEXTURE_DIM / w).max(1);
+    let max_rows = (MAX_TEXTURE_DIM / h).max(1);
+    let fits = src_cols <= max_cols && src_rows <= max_rows;
+
+    let (pack_cols, pack_rows) = if fits {
+        (src_cols, src_rows)
+    } else {
+        // Перепаковка: сетка поближе к квадрату в пределах лимитов.
+        let mut cols = (cells as f32).sqrt().ceil() as u32;
+        cols = cols.clamp(1, max_cols);
+        let mut rows = cells.div_ceil(cols);
+        if rows > max_rows {
+            rows = max_rows;
+            cols = cells.div_ceil(rows);
+        }
+        (cols, rows)
+    };
+
+    // Итоговое изображение атласа.
+    let mut packed = image::RgbaImage::new(pack_cols * w, pack_rows * h);
+    let mut layout = TextureAtlasLayout::new_empty(UVec2::new(pack_cols * w, pack_rows * h));
+    for cell in 0..cells {
+        let src_col = cell % src_cols;
+        let src_row = cell / src_cols;
+        let dst_col = cell % pack_cols;
+        let dst_row = cell / pack_cols;
+        let view = image::imageops::crop_imm(&sheet, src_col * w, src_row * h, w, h);
+        image::imageops::overlay(
+            &mut packed,
+            &view.to_image(),
+            (dst_col * w) as i64,
+            (dst_row * h) as i64,
+        );
+        layout.add_texture(URect::new(
+            dst_col * w,
+            dst_row * h,
+            dst_col * w + w,
+            dst_row * h + h,
+        ));
+    }
+    if !fits {
+        tracing::debug!(
+            sheet = ?(src_cols, src_rows),
+            packed = ?(pack_cols, pack_rows),
+            "rsi sheet repacked for GPU limits"
+        );
+    }
+
     let image = Image::new(
         Extent3d {
-            width: state.sheet.width(),
-            height: state.sheet.height(),
+            width: packed.width(),
+            height: packed.height(),
             depth_or_array_layers: 1,
         },
         TextureDimension::D2,
-        rgba.into_vec(),
+        packed.into_raw(),
         TextureFormat::Rgba8UnormSrgb,
         RenderAssetUsages::default(),
     );
     let image_handle = images.add(image);
-
-    let (cols, rows) = state.sheet_grid(rsi.size);
-    let mut layout =
-        TextureAtlasLayout::new_empty(UVec2::new(state.sheet.width(), state.sheet.height()));
-    // Ячейки добавляем строго в порядке обхода листа: кадры каждого направления подряд.
-    for row in 0..rows {
-        for col in 0..cols {
-            layout.add_texture(URect::new(col * w, row * h, col * w + w, row * h + h));
-        }
-    }
     let layout_handle = layouts.add(layout);
     (image_handle, layout_handle)
 }
