@@ -4,4 +4,7 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
+# bevy — только для Component-деривов игровых данных; логика остаётся чистой (PLAN.md §6)
 [dependencies]
+bevy = { workspace = true }
+serde = { workspace = true }

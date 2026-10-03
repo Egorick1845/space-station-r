@@ -30,14 +30,15 @@ serde = { version = "1", features = ["derive"] }
 postcard = "1"
 
 # Сеть (PLAN.md §2): lightyear — основной выбор (репликация, предсказание, interest management).
-# Пока включены только нужные фазы фичи: prediction/interpolation/replication
-# добавятся в T1.3/T1.4 (их системы требуют полной инфраструктуры репликации).
+# replication включена с T1.3; prediction/interpolation добавляются после T2.2
+# (их системы требуют ресурсов предсказания и без репликации паникуют).
 lightyear = { version = "0.30.1", default-features = false, features = [
     "std",
     "client",
     "server",
     "udp",
     "raw_connection",
+    "replication",
 ] }
 bevy_app = "0.19"
 
