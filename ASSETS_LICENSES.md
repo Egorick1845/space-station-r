@@ -22,6 +22,12 @@
 | maps/ss14/admin_test_arena.yml | Maps/Test/admin_test_arena.yml | CC BY-SA 3.0 (апстрим SS14) | 04.10.2026 |
 | maps/ss14/aspid.yml | Maps/_Mini/aspid.yml (карта «Мини-станции») | CC BY-SA 3.0 | 04.10.2026 |
 
+## Шрифты
+
+- `assets/fonts/NotoSans-Regular.ttf`, `NotoSans-Bold.ttf` — из сборки
+  мини-станции (`Resources/Fonts/NotoSans`), лицензия SIL OFL 1.1
+  (`LICENSE-NotoSans.txt`); ставится шрифтом по умолчанию в клиенте (кириллица).
+
 ## Массовый импорт (04.10.2026, инструменты ssr-tools)
 
 - `assets/prototypes_ss14.ron` — 9258 прототипов сущностей, сконвертированы из

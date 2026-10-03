@@ -8,7 +8,9 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
 
+use bevy::asset::AssetId;
 use bevy::prelude::*;
+use bevy::text::Font;
 use bevy::window::{Window, WindowPlugin, WindowResolution};
 use bevy_replicon::shared::server_entity_map::ServerEntityMap;
 use lightyear::prelude::client::*;
@@ -74,7 +76,7 @@ fn main() {
             rsi::build_registry(&mut images, &mut layouts, &rsi_root)
         });
     app.insert_resource(registry);
-    app.add_systems(Startup, (setup_camera, startup_map));
+    app.add_systems(Startup, (setup_camera, startup_map, install_default_font));
     app.add_systems(
         Update,
         (
@@ -116,6 +118,21 @@ fn main() {
     // Двери: состояние реплицируется сервером (T3.1).
     app.component::<ssr_core::Door>().replicate();
     app.run();
+}
+
+/// Ставит Noto Sans (из сборки мини-станции, OFL) шрифтом по умолчанию:
+/// встроенный шрифт Bevy — без кириллицы, из-за него в UI были «квадратики».
+fn install_default_font(mut fonts: ResMut<Assets<Font>>) {
+    let path = Path::new(&assets_file_path()).join("fonts/NotoSans-Regular.ttf");
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            // Подмена дефолтного ассета: все тексты без явного шрифта
+            // начинают использовать Noto Sans с кириллицей.
+            fonts.insert(AssetId::default(), Font::from_bytes(bytes));
+            tracing::info!("шрифт Noto Sans (кириллица) установлен");
+        }
+        Err(e) => tracing::warn!(path = %path.display(), error = %e, "шрифт не найден"),
+    }
 }
 
 /// Игровые системы работают только вне лобби.
