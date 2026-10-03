@@ -1,10 +1,11 @@
+# T0.4 (PLAN.md): PR без зелёного CI нельзя мержить.
+# По требованию владельца: НЕ гонять CI на каждый push — только на PR и вручную
+# (`gh workflow run ci.yml -R Egorick1845/space-station-r`).
 name: CI
 
-# T0.4 (PLAN.md): PR без зелёного CI нельзя мержить.
 on:
   pull_request:
-  push:
-    branches: [master]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
