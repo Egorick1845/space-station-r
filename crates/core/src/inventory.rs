@@ -177,6 +177,17 @@ pub struct HeldBy {
     pub player: u64,
 }
 
+/// Мировая позиция предмета или контейнера (реплицируется; T3.4).
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+pub struct ItemPosition(pub [f32; 2]);
+
+/// Контейнер (ящик/шкаф, T3.4): состояние «открыт» меняет только сервер (ADR-3).
+#[derive(Component, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct Container {
+    pub open: bool,
+    pub name: String,
+}
+
 /// Предмет-сущность (T3.2): имя до появления прототипов в игре (T5.2).
 #[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 pub struct Item {

@@ -67,6 +67,8 @@ pub const STARTUP_RSI: &[&str] = &[
     "Structures/Doors/Airlocks/Standard/basic.rsi",
     // Анимированный фон лобби мини-станции (64 кадра).
     "_Mini/Lobby/mars.rsi",
+    // Ящик-контейнер (T3.4): состояния closed/open.
+    "Structures/Storage/Crates/generic.rsi",
 ];
 
 /// Загружает RSI из [`STARTUP_RSI`] и строит реестр.

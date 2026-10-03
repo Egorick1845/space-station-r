@@ -586,6 +586,11 @@ pub fn world_click(
     own: Res<OwnPlayerEntity>,
     hands: Query<&Hands>,
     visuals: Query<(&RemotePlayerVisual, &Transform)>,
+    containers: Query<(
+        Entity,
+        &ssr_core::inventory::Container,
+        &ssr_core::inventory::ItemPosition,
+    )>,
     entity_map: Option<Res<ServerEntityMap>>,
     mut menu: ResMut<ActionMenu>,
     mut senders: Query<&mut MessageSender<ClientMessage>, With<Connected>>,
@@ -668,7 +673,22 @@ pub fn world_click(
         return;
     }
 
-    // 2) Тайл: применить предмет из активной руки (стройка/разборка).
+    // 2) Ящик под курсором: открыть/закрыть (T3.4).
+    if let Some(container_entity) = container_under_cursor(&containers, world)
+        && let Some(bits) = entity_map
+            .as_deref()
+            .and_then(|m| m.to_server().get(&container_entity))
+            .copied()
+            .map(Entity::to_bits)
+    {
+        for mut sender in senders.iter_mut() {
+            sender.send::<GameChannel>(ClientMessage::Interact { entity: bits });
+        }
+        tracing::info!(?container_entity, "container interact sent");
+        return;
+    }
+
+    // 3) Тайл: применить предмет из активной руки (стройка/разборка).
     if let Some(item) = active_item {
         let tx = (world.x / TILE_UNITS).floor() as i32;
         let ty = (world.y / TILE_UNITS).floor() as i32;
@@ -677,6 +697,25 @@ pub fn world_click(
         }
         tracing::info!(tx, ty, "use item sent");
     }
+}
+
+/// Ближайший контейнер под точкой клика (для открытия/закрытия, T3.4).
+fn container_under_cursor(
+    containers: &Query<(
+        Entity,
+        &ssr_core::inventory::Container,
+        &ssr_core::inventory::ItemPosition,
+    )>,
+    world: Vec2,
+) -> Option<Entity> {
+    let mut best: Option<(Entity, f32)> = None;
+    for (entity, _, position) in containers.iter() {
+        let distance = Vec2::from_array(position.0).distance(world);
+        if distance <= 24.0 && best.is_none_or(|(_, d)| distance < d) {
+            best = Some((entity, distance));
+        }
+    }
+    best.map(|(entity, _)| entity)
 }
 
 /// Ближайший другой игрок под точкой клика.

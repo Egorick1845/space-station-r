@@ -17,6 +17,7 @@ use lightyear::prelude::client::*;
 use lightyear::prelude::*;
 use ssr_core::{GAME_NAME, PlayerPosition};
 
+mod containers;
 mod doors;
 mod inventory_ui;
 mod lobby;
@@ -118,6 +119,17 @@ fn main() {
         )
             .run_if(in_game),
     );
+    app.add_systems(
+        Update,
+        (
+            containers::spawn_crate_visuals,
+            containers::update_crate_visuals,
+            containers::render_container_panel,
+            containers::container_slot_click,
+            containers::container_test_mode,
+        )
+            .run_if(in_game),
+    );
     // Лобби — только в релизной сборке (в dev сразу в игру; для отладки
     // лобби в dev: SSR_LOBBY=1; тестовый обход лобби: SSR_AUTO_PLAY=1).
     let force_lobby = std::env::var_os("SSR_LOBBY").is_some();
@@ -154,6 +166,11 @@ fn main() {
     app.component::<ssr_core::inventory::Hands>().replicate();
     app.component::<ssr_core::inventory::Health>().replicate();
     app.component::<ssr_core::inventory::HeldBy>().replicate();
+    // Контейнеры (T3.4). Тот же порядок, что у сервера!
+    app.component::<ssr_core::inventory::Container>()
+        .replicate();
+    app.component::<ssr_core::inventory::ItemPosition>()
+        .replicate();
     app.run();
 }
 

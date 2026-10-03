@@ -19,7 +19,9 @@ use bevy::prelude::*;
 use lightyear::connection::server::Start;
 use lightyear::prelude::server::*;
 use lightyear::prelude::*;
-use ssr_core::inventory::{Hands, Health, HeldBy, Inventory, Item, SLOT_ANY};
+use ssr_core::inventory::{
+    Container, Hands, Health, HeldBy, Inventory, Item, ItemPosition, SLOT_ANY,
+};
 use ssr_core::tiles::{MapFile, TileChunkData, TileType};
 use ssr_core::{
     CHUNK_UNITS, Door, INTERACT_RANGE, PLAYER_MOVE_SPEED, PlayerPosition, TILE_SIZE, chunk_coords,
@@ -86,6 +88,7 @@ fn main() {
             check_prototypes,
             load_map,
             spawn_walls,
+            spawn_containers,
             spawn_load_test,
             spawn_collision_test,
         )
@@ -118,6 +121,9 @@ fn main() {
     app.component::<Hands>().replicate();
     app.component::<Health>().replicate();
     app.component::<HeldBy>().replicate();
+    // Контейнеры (T3.4). Тот же порядок, что у клиента!
+    app.component::<Container>().replicate();
+    app.component::<ItemPosition>().replicate();
     app.run();
 }
 
@@ -130,6 +136,61 @@ fn startup(mut commands: Commands) -> Result {
     commands.trigger(Start { entity: server });
     tracing::info!(%SERVER_ADDR, "server listening");
     Ok(())
+}
+
+/// Ящики (T3.4): пара контейнеров рядом со спавн-точками с запасом предметов.
+/// Стоят в мире (Container + Inventory + ItemPosition), состояние — серверное.
+fn spawn_containers(
+    mut commands: Commands,
+    map: Res<GameMap>,
+    mut chunk_rooms: ResMut<ChunkRooms>,
+    mut allocator: ResMut<RoomAllocator>,
+) {
+    let Some(&(sx, sy)) = map.spawn_points.first() else {
+        return;
+    };
+    // Смещения в тайлах от первой точки спавна (пол в стартовом зале).
+    let spots = [(sx + 64.0, sy), (sx + 64.0, sy + 64.0)];
+    for (index, (x, y)) in spots.iter().enumerate() {
+        let mut inventory = Inventory::default();
+        // Разное содержимое: лом и листы (индекс — для разнообразия).
+        let names: [&str; 2] = if index == 0 {
+            ["Crowbar", "SteelSheet"]
+        } else {
+            ["SteelSheet", "SteelSheet"]
+        };
+        let mut items = Vec::new();
+        for name in names {
+            items.push(
+                commands
+                    .spawn((
+                        Item {
+                            name: name.to_string(),
+                        },
+                        HeldBy { player: 0 },
+                        Replicate::to_clients(NetworkTarget::All),
+                        Rooms::default(),
+                    ))
+                    .id()
+                    .to_bits(),
+            );
+        }
+        for item in items {
+            inventory.put_first_empty(item);
+        }
+        let room = chunk_rooms.room_for(chunk_coords(*x, *y), &mut allocator);
+        commands.spawn((
+            Container {
+                open: false,
+                name: format!("Ящик {}", index + 1),
+            },
+            inventory,
+            ItemPosition([*x, *y]),
+            Replicate::to_clients(NetworkTarget::All),
+            Rooms::single(room),
+        ));
+    }
+    tracing::info!(count = spots.len(), "containers spawned");
 }
 
 /// Проверяет портированные прототипы (`assets/prototypes_ss14.ron`, IMP.2/IMP.3)
@@ -333,6 +394,8 @@ fn handle_client_messages(
     positions: Query<&PlayerPosition>,
     mut inventories: Query<&mut Inventory>,
     mut hands: Query<&mut Hands>,
+    containers: Query<(Entity, &Container)>,
+    container_positions: Query<&ItemPosition>,
     mut actions: ResMut<ActionQueue>,
     mut players: ResMut<Players>,
 ) {
@@ -370,6 +433,9 @@ fn handle_client_messages(
                     to_slot,
                     target_player,
                 } => {
+                    // Перенос предмета (T3.2/T3.4): источник — рюкзак или руки
+                    // отправителя ЛИБО открытый контейнер рядом; приёмник —
+                    // игрок (0 = сам) либо открытый контейнер.
                     let Some(sender_entry) = players.entry_by_link_mut(link_entity.to_bits())
                     else {
                         continue;
@@ -378,75 +444,123 @@ fn handle_client_messages(
                     let Ok(sender_position) = positions.get(sender_player) else {
                         continue;
                     };
+                    let in_range = |point: [f32; 2]| {
+                        let dx = point[0] - sender_position.0[0];
+                        let dy = point[1] - sender_position.0[1];
+                        (dx * dx + dy * dy).sqrt() <= INTERACT_RANGE + TILE_SIZE
+                    };
+
+                    // Приёмник: свой/чужой рюкзак или контейнер.
                     let receiver_player = if target_player == 0 {
-                        sender_player
+                        Some(sender_player)
                     } else {
                         let Some(target) = Entity::try_from_bits(target_player) else {
                             tracing::warn!(bits = target_player, "transfer: invalid target bits");
                             continue;
                         };
-                        if inventories.get(target).is_err() {
+                        if containers.get(target).is_ok() {
+                            // В контейнер: только открытый и только рядом.
+                            let Ok((_, container)) = containers.get(target) else {
+                                continue;
+                            };
+                            if !container.open {
+                                tracing::warn!(?target, "transfer: container is closed");
+                                continue;
+                            }
+                            let Ok(item_position) = container_positions.get(target) else {
+                                continue;
+                            };
+                            if !in_range(item_position.0) {
+                                tracing::warn!(?target, "transfer: container too far");
+                                continue;
+                            }
+                            None
+                        } else if inventories.contains(target) {
+                            let Ok(target_position) = positions.get(target) else {
+                                continue;
+                            };
+                            let dx = target_position.0[0] - sender_position.0[0];
+                            let dy = target_position.0[1] - sender_position.0[1];
+                            if (dx * dx + dy * dy).sqrt() > INTERACT_RANGE + 32.0 {
+                                tracing::warn!(target = ?target, "transfer: too far");
+                                continue;
+                            }
+                            Some(target)
+                        } else {
                             tracing::warn!(target = ?target, "transfer: target has no inventory");
                             continue;
                         }
-                        let Ok(target_position) = positions.get(target) else {
-                            continue;
-                        };
-                        let dx = target_position.0[0] - sender_position.0[0];
-                        let dy = target_position.0[1] - sender_position.0[1];
-                        if (dx * dx + dy * dy).sqrt() > INTERACT_RANGE + 32.0 {
-                            tracing::warn!(target = ?target, "transfer: too far");
-                            continue;
-                        }
-                        target
                     };
-                    if receiver_player == sender_player {
-                        let Ok(mut inventory) = inventories.get_mut(sender_player) else {
-                            continue;
-                        };
-                        if !inventory.contains(item) {
-                            tracing::warn!(item, "transfer: item is not in sender inventory");
+                    let receiver_entity = Entity::try_from_bits(target_player);
+
+                    // Источник: рюкзак/руки отправителя или открытый контейнер рядом.
+                    let mut source_container: Option<Entity> = None;
+                    let in_own = inventories
+                        .get(sender_player)
+                        .ok()
+                        .is_some_and(|inv| inv.contains(item));
+                    let in_hands = hands.get(sender_player).ok().is_some_and(|h| h.has(item));
+                    if !in_own && !in_hands {
+                        // Ищем предмет в открытых контейнерах рядом.
+                        for (container_entity, container) in containers.iter() {
+                            if !container.open {
+                                continue;
+                            }
+                            let Ok(item_position) = container_positions.get(container_entity)
+                            else {
+                                continue;
+                            };
+                            if !in_range(item_position.0) {
+                                continue;
+                            }
+                            let Ok(inv) = inventories.get(container_entity) else {
+                                continue;
+                            };
+                            if inv.contains(item) {
+                                source_container = Some(container_entity);
+                                break;
+                            }
+                        }
+                        if source_container.is_none() {
+                            tracing::warn!(item, "transfer: item is not available to sender");
                             continue;
                         }
-                        let Some(from) = inventory.slot_of(item) else {
-                            continue;
-                        };
-                        if to_slot == SLOT_ANY || to_slot == from {
-                            continue;
-                        }
-                        inventory.take(item);
-                        if !inventory.put(to_slot, item) {
-                            inventory.put(from, item);
-                            tracing::warn!(slot = to_slot, "transfer: slot busy");
-                            continue;
-                        }
-                        tracing::info!(item, from, to = to_slot, "item moved");
-                        continue;
                     }
-                    let Ok([mut sender_inventory, mut receiver_inventory]) =
-                        inventories.get_many_mut([sender_player, receiver_player])
-                    else {
+
+                    // Куда класть: указанный слот или первый свободный.
+                    let dest_entity = receiver_player.or(receiver_entity);
+                    let Some(dest_entity) = dest_entity else {
                         continue;
                     };
-                    if !sender_inventory.contains(item) {
-                        tracing::warn!(item, "transfer: item is not in sender inventory");
+                    let Ok(mut dest_inventory) = inventories.get_mut(dest_entity) else {
                         continue;
-                    }
+                    };
                     let slot = if to_slot == SLOT_ANY {
-                        receiver_inventory.first_empty()
+                        dest_inventory.first_empty()
                     } else {
                         Some(to_slot)
                     };
                     let Some(slot) = slot else {
-                        tracing::warn!(target = ?receiver_player, "transfer: no free slot");
+                        tracing::warn!(?dest_entity, "transfer: no free slot");
                         continue;
                     };
-                    if !receiver_inventory.put(slot, item) {
+                    if !dest_inventory.put(slot, item) {
                         tracing::warn!(slot, "transfer: slot busy");
                         continue;
                     }
-                    sender_inventory.take(item);
-                    tracing::info!(item, slot, from = ?sender_player, to = ?receiver_player, "item transferred");
+
+                    // Изъять из источника.
+                    if let Some(container_entity) = source_container {
+                        if let Ok(mut source) = inventories.get_mut(container_entity) {
+                            source.take(item);
+                        }
+                    } else if in_hands && let Ok(mut hand) = hands.get_mut(sender_player) {
+                        hand.take(item);
+                    } else if let Ok(mut inventory) = inventories.get_mut(sender_player) {
+                        inventory.take(item);
+                    }
+                    tracing::info!(item, slot, from = ?source_container, to = ?dest_entity, "item transferred");
+                    continue;
                 }
                 ClientMessage::SwitchHand => {
                     let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {
@@ -771,6 +885,8 @@ fn process_actions(
     mut hands: Query<&mut Hands>,
     mut healths: Query<&mut Health>,
     mut doors: Query<&mut Door>,
+    mut containers: Query<&mut Container>,
+    container_positions: Query<&ItemPosition>,
     items: Query<&Item>,
     mut senders: Query<&mut MessageSender<ServerMessage>, With<Connected>>,
     map: Res<GameMap>,
@@ -911,7 +1027,28 @@ fn process_actions(
                     continue;
                 };
                 let Ok(mut door) = doors.get_mut(target) else {
-                    tracing::debug!(target = ?target, "interact: target is not a door");
+                    // Не дверь — возможно, контейнер (T3.4): открыть/закрыть.
+                    if let Ok(mut container) = containers.get_mut(target) {
+                        let dx = container_positions
+                            .get(target)
+                            .map(|p| p.0[0] - player_position.0[0])
+                            .unwrap_or(0.0);
+                        let dy = container_positions
+                            .get(target)
+                            .map(|p| p.0[1] - player_position.0[1])
+                            .unwrap_or(0.0);
+                        if (dx * dx + dy * dy).sqrt() > INTERACT_RANGE + TILE_SIZE {
+                            tracing::warn!(?player, "interact container: too far");
+                            continue;
+                        }
+                        container.open = !container.open;
+                        tracing::info!(
+                            container = ?target, open = container.open,
+                            "container toggled"
+                        );
+                    } else {
+                        tracing::debug!(target = ?target, "interact: target is not interactable");
+                    }
                     continue;
                 };
                 let dx = door.position[0] - player_position.0[0];
