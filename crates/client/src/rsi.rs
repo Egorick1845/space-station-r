@@ -56,7 +56,18 @@ impl RsiRegistry {
     }
 }
 
-/// Сканирует все `*.rsi`-папки под `root` и строит реестр.
+/// RSI-наборы, которые грузятся при старте. В assets лежат 2500+ RSI из сборки,
+/// грузить их все нельзя — расширяем список по мере использования (ленивая
+/// загрузка по требованию — отдельная задача, T5.3).
+pub const STARTUP_RSI: &[&str] = &[
+    "Mobs/Animals/monkey.rsi",
+    "Mobs/Ghosts/ghost_human.rsi",
+    "Objects/Tools/crowbar.rsi",
+    "Structures/Walls/solid.rsi",
+    "Structures/Doors/Airlocks/Standard/basic.rsi",
+];
+
+/// Загружает RSI из [`STARTUP_RSI`] и строит реестр.
 pub fn build_registry(
     images: &mut Assets<Image>,
     layouts: &mut Assets<TextureAtlasLayout>,
@@ -64,20 +75,13 @@ pub fn build_registry(
 ) -> RsiRegistry {
     let mut registry = RsiRegistry::default();
 
-    for entry in walkdir::WalkDir::new(root)
-        .into_iter()
-        .filter_map(Result::ok)
-    {
-        if !entry.file_type().is_dir() || !entry.file_name().to_string_lossy().ends_with(".rsi") {
-            continue;
-        }
-        let dir = entry.path();
-        let Ok(rsi) = rsi::load_rsi(dir) else {
+    for relative in STARTUP_RSI {
+        let dir = root.join(relative.replace('/', std::path::MAIN_SEPARATOR_STR));
+        let Ok(rsi) = rsi::load_rsi(&dir) else {
             tracing::warn!(path = %dir.display(), "rsi load failed");
             continue;
         };
-        let relative = dir.strip_prefix(root).unwrap_or(dir).to_string_lossy();
-        let prefix = format!("sprites/ss14/{}", relative.replace('\\', "/"));
+        let prefix = format!("sprites/ss14/{relative}");
 
         for state in &rsi.states {
             let key = format!("{prefix}#{}", state.name);

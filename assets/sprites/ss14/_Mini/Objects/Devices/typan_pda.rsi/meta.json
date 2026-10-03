@@ -1,0 +1,239 @@
+{
+  "version": 1,
+  "license": "CC-BY-SA-3.0",
+  "copyright": "Taken from tgstation.",
+  "size": {
+    "x": 32,
+    "y": 32
+  },
+  "states": [
+    {
+      "name": "id_overlay"
+    },
+    {
+      "name": "id_overlay_wide"
+    },
+    {
+      "name": "equipped-BELT",
+      "directions": 4
+    },
+    {
+      "name": "equipped-IDCARD",
+      "directions": 4
+    },
+    {
+      "name": "inhand-left",
+      "directions": 4
+    },
+    {
+      "name": "inhand-right",
+      "directions": 4
+    },
+    {
+      "name": "insert_overlay"
+    },
+    {
+      "name": "light_overlay"
+    },
+    {
+      "name": "light_overlay_wide"
+    },
+    {
+      "name": "pda-deathsquad"
+    },
+    {
+      "name": "id_overlay-deathsquad",
+      "delays": [
+        [
+          0.5,
+          0.5,
+          0.2,
+          0.2,
+          0.2,
+          0.2,
+          0.5,
+          0.2,
+          0.2,
+          0.2,
+          0.5,
+          0.2,
+          0.2,
+          0.5,
+          0.2,
+          0.2,
+          0.2,
+          1,
+          0.2,
+          0.2,
+          0.2,
+          0.2,
+          0.8
+        ]
+      ]
+    },
+    {
+      "name": "pda",
+      "delays": [
+        [
+          1.2,
+          1.2,
+          1.2,
+          1.2
+        ]
+      ]
+    },
+    {
+      "name": "pda-atmos",
+      "delays": [
+        [
+          1.2,
+          1.2,
+          1.2,
+          1.2
+        ]
+      ]
+    },
+    {
+      "name": "pda-cargo",
+      "delays": [
+        [
+          1.2,
+          1.2,
+          1.2,
+          1.2
+        ]
+      ]
+    },
+    {
+      "name": "pda-tos",
+      "delays": [
+        [
+          1.2,
+          1.2,
+          1.2,
+          1.2
+        ]
+      ]
+    },
+    {
+      "name": "pda-chef",
+      "delays": [
+        [
+          1.2,
+          1.2,
+          1.2,
+          1.2
+        ]
+      ]
+    },
+    {
+      "name": "pda-technician",
+      "delays": [
+        [
+          1.2,
+          1.2,
+          1.2,
+          1.2
+        ]
+      ]
+    },
+    {
+      "name": "pda-co",
+      "delays": [
+        [
+          1.2,
+          1.2,
+          1.2,
+          1.2
+        ]
+      ]
+    },
+    {
+      "name": "pda-medical",
+      "delays": [
+        [
+          1.2,
+          1.2,
+          1.2,
+          1.2
+        ]
+      ]
+    },
+    {
+      "name": "pda-paramedic",
+      "delays": [
+        [
+          1.2,
+          1.2,
+          1.2,
+          1.2
+        ]
+      ]
+    },
+    {
+      "name": "pda-rd",
+      "delays": [
+        [
+          1.2,
+          1.2,
+          1.2,
+          1.2
+        ]
+      ]
+    },
+    {
+      "name": "pda-researcher",
+      "delays": [
+        [
+          1.2,
+          1.2,
+          1.2,
+          1.2
+        ]
+      ]
+    },
+    {
+      "name": "pda-security",
+      "delays": [
+        [
+          1.2,
+          1.2,
+          1.2,
+          1.2
+        ]
+      ]
+    },
+    {
+      "name": "pda-hydro",
+      "delays": [
+        [
+          1.2,
+          1.2,
+          1.2,
+          1.2
+        ]
+      ]
+    },
+    {
+      "name": "pda-syndi-med"
+    },
+    {
+      "name": "pda-syndi-com"
+    },
+    {
+      "name": "pda-syndi-corpsman"
+    },
+    {
+      "name": "pda-syndi-commander"
+    },
+    {
+      "name": "pda-syndi-agent"
+    },
+    {
+      "name": "pda-syndi-operative"
+    },
+    {
+      "name": "pda-syndi"
+    }
+  ]
+}

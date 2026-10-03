@@ -69,6 +69,13 @@
 - **Порядок направлений RSI в движке: South=0, North=1, East=2, West=3** (не S,E,N,W!) — ошибка в этом маппинге давала неверные стороны игрока и четверти стен
 - Карты SS14: staging в assets/maps/ss14/ (empty, floor3x3, admin_test_arena, aspid — формат 7 со словарём tilemap); импорт в игровой .ron — задача IMP.4
 - Всплывающая обводка объектов под курсором (сейчас двери; для предметов — в T3.2)
+- **Импорт контента SS14 (IMP.2–IMP.4)**: крейт `ssr-tools` —
+  `import-map` (карты формата 6/7 → наш .ron; тайлы по коду движка MapChunkSerializer),
+  `import-proto` (прототипы YAML с наследованием → `assets/prototypes_ss14.ron`, 9258 шт.),
+  `import-sprites` (копирование RSI по списку `tools/sprites_ss14.txt`, 2533 папки/41 МБ)
+- Карты SS14: `assets/maps/imported_aspid.ron` (реальная станция: 20 чанков, 1385 стен, 204 двери) и `imported_floor3x3.ron`; выбор карты — `SSR_MAP=<файл>.ron`
+- **Лобби** (как в сборке): фон-арт `LobbyScreens/SpaceStation64.webp`, название, кнопка «Играть» — подключение только после нажатия; тестовый обход — `SSR_AUTO_PLAY=1`
+- Реестр RSI грузит только `rsi::STARTUP_RSI` (в assets 2500+ RSI — ленивая загрузка остальных в T5.3)
 
 ## Технический долг
 

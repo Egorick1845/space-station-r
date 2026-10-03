@@ -16,6 +16,7 @@ use lightyear::prelude::*;
 use ssr_core::{GAME_NAME, PlayerPosition};
 
 mod doors;
+mod lobby;
 mod rsi;
 mod tiles;
 use ssr_protocol::net::GameChannel;
@@ -62,6 +63,7 @@ fn main() {
     app.init_resource::<Handshake>();
     app.init_resource::<PlayerEntity>();
     app.init_resource::<tiles::ChunkRenderState>();
+    app.init_resource::<lobby::LobbyState>();
     // RsiRegistry строится сразу после DefaultPlugins: нужен и игроку (обезьяна),
     // и дверям (closed/open) уже на Startup.
     let rsi_root = Path::new(&assets_file_path()).join("sprites/ss14");
@@ -72,16 +74,7 @@ fn main() {
             rsi::build_registry(&mut images, &mut layouts, &rsi_root)
         });
     app.insert_resource(registry);
-    app.add_systems(
-        Startup,
-        (
-            setup_camera,
-            spawn_player,
-            spawn_crowbar,
-            startup_connection,
-            startup_map,
-        ),
-    );
+    app.add_systems(Startup, (setup_camera, startup_map, lobby::spawn_lobby));
     app.add_systems(
         Update,
         (
@@ -98,8 +91,14 @@ fn main() {
             doors::click_interact,
             doors::auto_interact,
             doors::hover_outline,
-        ),
+        )
+            .run_if(in_game),
     );
+    app.add_systems(Update, (enter_game, lobby::lobby_button));
+    // SSR_AUTO_PLAY=1 — тестовый режим: сразу в игру, без клика по «Играть».
+    if std::env::var_os("SSR_AUTO_PLAY").is_some() {
+        app.insert_resource(lobby::LobbyState::Playing);
+    }
     // Регистрация реплицируемых компонентов — одинакова на сервере и клиенте (T1.3).
     // ВАЖНО: порядок регистрации должен совпадать с сервером (иначе replicon
     // паникует «FnsId should be registered first»): PlayerPosition, TileChunkData, Door.
@@ -112,8 +111,23 @@ fn main() {
     app.run();
 }
 
-/// Сетевой линк клиента; идентификация по адресу (netcode — позже, T5.x).
-fn startup_connection(mut commands: Commands) {
+/// Игровые системы работают только вне лобби.
+fn in_game(state: Res<lobby::LobbyState>) -> bool {
+    *state == lobby::LobbyState::Playing
+}
+
+/// Вход в игру: после кнопки «Играть» создаём сетевой линк и спрайт игрока.
+fn enter_game(
+    mut commands: Commands,
+    state: Res<lobby::LobbyState>,
+    registry: Res<rsi::RsiRegistry>,
+    mut entered: Local<bool>,
+) {
+    if *state != lobby::LobbyState::Playing || *entered {
+        return;
+    }
+    *entered = true;
+    // Сетевой линк клиента; идентификация по адресу (netcode — позже, T5.x).
     commands
         .spawn((
             Client,
@@ -126,6 +140,16 @@ fn startup_connection(mut commands: Commands) {
             ReplicationReceiver,
         ))
         .trigger(Connect::from);
+    spawn_player_sprite(&mut commands, &registry);
+    // Лом из SS14 рядом со стартовой точкой (демо IMP.1).
+    let key = "sprites/ss14/Objects/Tools/crowbar.rsi#icon";
+    rsi::spawn_rsi_sprite(
+        &mut commands,
+        &registry,
+        key,
+        0,
+        Vec3::new(220.0, 120.0, 0.0),
+    );
 }
 
 /// Состояние рукопожатия.
@@ -373,8 +397,8 @@ fn setup_camera(mut commands: Commands) {
     ));
 }
 
-/// Спрайт игрока из RSI с атласом направлений (SS14: юг, восток, север, запад).
-fn spawn_player(mut commands: Commands, registry: Res<rsi::RsiRegistry>) {
+/// Спрайт игрока из RSI с атласом направлений (порядок движка: S,N,E,W).
+fn spawn_player_sprite(commands: &mut Commands, registry: &rsi::RsiRegistry) {
     const KEY: &str = "sprites/ss14/Mobs/Animals/monkey.rsi#monkey";
     let Some(sprite) = registry.get(KEY) else {
         tracing::warn!(KEY, "player rsi missing");
@@ -392,21 +416,6 @@ fn spawn_player(mut commands: Commands, registry: Res<rsi::RsiRegistry>) {
         PlayerFacing(0),
         Transform::from_xyz(0.0, 0.0, 1.0),
     ));
-}
-
-/// Кладёт лом из SS14 рядом со стартовой точкой (демо IMP.1).
-fn spawn_crowbar(mut commands: Commands, registry: Res<rsi::RsiRegistry>) {
-    let key = "sprites/ss14/Objects/Tools/crowbar.rsi#icon";
-    match rsi::spawn_rsi_sprite(
-        &mut commands,
-        &registry,
-        key,
-        0,
-        Vec3::new(220.0, 120.0, 0.0),
-    ) {
-        Some(_) => tracing::info!(key, "rsi sprite spawned"),
-        None => tracing::warn!(key, "rsi sprite not found in registry"),
-    }
 }
 
 /// Камера жёстко следует за отрисованной позицией игрока: никакого второго

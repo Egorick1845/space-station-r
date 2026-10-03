@@ -1,0 +1,13 @@
+[package]
+name = "ssr-tools"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+ssr-core = { workspace = true }
+serde = { workspace = true }
+serde_yaml_ng = { workspace = true }
+base64 = { workspace = true }
+ron = { workspace = true }
+walkdir = { workspace = true }

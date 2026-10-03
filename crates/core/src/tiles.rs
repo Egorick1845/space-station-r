@@ -73,6 +73,11 @@ pub struct TileChunk {
 }
 
 impl TileChunk {
+    /// Конструктор по целочисленным координатам чанка.
+    pub fn at(cx: i32, cy: i32) -> Self {
+        Self::new(IVec2::new(cx, cy))
+    }
+
     pub fn new(coords: IVec2) -> Self {
         Self {
             coords,

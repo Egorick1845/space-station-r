@@ -134,7 +134,9 @@ fn load_map(
     mut chunk_rooms: ResMut<ChunkRooms>,
     mut allocator: ResMut<RoomAllocator>,
 ) {
-    let path = ssr_core::assets_root().join("maps/test.ron");
+    // SSR_MAP=imported_aspid.ron — выбрать карту (файлы в assets/maps/).
+    let map_name = std::env::var("SSR_MAP").unwrap_or_else(|_| "test.ron".to_string());
+    let path = ssr_core::assets_root().join("maps").join(&map_name);
     let file = MapFile::load(&path).unwrap_or_else(|e| panic!("{e}"));
     let chunks: Vec<TileChunkData> = file
         .to_chunks()

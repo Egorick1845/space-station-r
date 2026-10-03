@@ -22,6 +22,19 @@
 | maps/ss14/admin_test_arena.yml | Maps/Test/admin_test_arena.yml | CC BY-SA 3.0 (апстрим SS14) | 04.10.2026 |
 | maps/ss14/aspid.yml | Maps/_Mini/aspid.yml (карта «Мини-станции») | CC BY-SA 3.0 | 04.10.2026 |
 
+## Массовый импорт (04.10.2026, инструменты ssr-tools)
+
+- `assets/prototypes_ss14.ron` — 9258 прототипов сущностей, сконвертированы из
+  `Resources/Prototypes/Entities` сборки (`import-proto`), CC BY-SA 3.0.
+- `assets/sprites/ss14/**` — 2533 RSI-набора, на которые ссылаются прототипы
+  (список `tools/sprites_ss14.txt`, копирование `import-sprites`), 41 МБ, CC BY-SA 3.0;
+  полный перечень авторов — в `meta.json` каждого RSI и `attributions.yml` сборки.
+- `assets/sprites/ss14/Tiles/**` — тайлы пола (`import-map` для карт), CC BY-SA 3.0.
+- `assets/sprites/ss14/LobbyScreens/SpaceStation64.webp`, `JustAnotherShift.webp` —
+  экраны лобби сборки, CC BY-SA 3.0.
+- `assets/maps/imported_aspid.ron`, `assets/maps/imported_floor3x3.ron` —
+  сконвертированные карты (источники: `_Mini/aspid.yml`, `Test/floor3x3.yml`).
+
 ## Карты SS14 (staging для IMP.4)
 
 `assets/maps/ss14/*.yml` — оригинальные карты формата 7 из сборки. Прямой
