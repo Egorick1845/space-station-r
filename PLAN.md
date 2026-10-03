@@ -247,6 +247,8 @@ space-station-r/
 
 ---
 
-## 10. Ассеты
+## 10. Ассеты и импорт контента
 
-Спрайты берём из сборки «Мини-станции»: локальный чекаут `C:\ss14\mini-station-goob` (зеркало github.com/ministation/mini-station-goob), каталог `Resources/Textures`. Стартовый набор скопирован в `assets/sprites/ss14/` с сохранением относительных путей; авторство и лицензии — `assets/sprites/ss14/ATTRIBUTION.md`. Расширять набор скриптом `tools/sync_sprites.ps1` (список файлов — в начале скрипта).
+Спрайты берём из сборки «Мини-станции»: локальный чекаут `C:\ss14\mini-station-goob` (зеркало github.com/ministation/mini-station-goob), каталог `Resources/Textures`. Стартовый набор скопирован в `assets/sprites/ss14/` с сохранением относительных путей; авторство и лицензии — `assets/sprites/ss14/ATTRIBUTION.md` и `ASSETS_LICENSES.md`. Расширять набор скриптом `tools/sync_sprites.ps1`.
+
+Импорт прототипов, карт и RSI-спрайтов из SS14 — отдельный поток задач **IMP.1–IMP.4** (выполнять по одной, после T0.4): единая инструкция — **[SS14_IMPORT.md](SS14_IMPORT.md)**.
