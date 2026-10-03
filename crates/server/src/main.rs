@@ -20,7 +20,9 @@ use lightyear::connection::server::Start;
 use lightyear::prelude::server::*;
 use lightyear::prelude::*;
 use ssr_core::tiles::{MapFile, TileChunkData, TileType};
-use ssr_core::{CHUNK_SIZE, Door, INTERACT_RANGE, PLAYER_MOVE_SPEED, PlayerPosition, chunk_coords};
+use ssr_core::{
+    CHUNK_UNITS, Door, INTERACT_RANGE, PLAYER_MOVE_SPEED, PlayerPosition, TILE_SIZE, chunk_coords,
+};
 use ssr_protocol::net::GameChannel;
 use ssr_protocol::{
     ClientMessage, DEFAULT_SERVER_PORT, PROTOCOL_VERSION, ProtocolPlugin, ServerMessage,
@@ -160,7 +162,7 @@ fn load_map(
             Replicate::to_clients(NetworkTarget::All),
             Rooms::single(room),
             RigidBody::Static,
-            Collider::rectangle(CHUNK_SIZE, CHUNK_SIZE),
+            Collider::rectangle(TILE_SIZE, TILE_SIZE),
             Position(Vector::new(x, y)),
             Rotation::default(),
         ));
@@ -465,9 +467,10 @@ fn spawn_load_test(
         return;
     }
     let count = LOAD_TEST_ENTITIES;
+    // По одной сущности в центр своего чанка (ADR-5): игрок видит только 5×5 чанков.
     for i in 0..count {
-        let x = ((i % 40) as f32 - 20.0) * CHUNK_SIZE + 16.0;
-        let y = ((i / 40) as f32 - 12.0) * CHUNK_SIZE + 16.0;
+        let x = ((i % 40) as f32 - 20.0) * CHUNK_UNITS + CHUNK_UNITS / 2.0;
+        let y = ((i / 40) as f32 - 12.0) * CHUNK_UNITS + CHUNK_UNITS / 2.0;
         let chunk = chunk_coords(x, y);
         let room = chunk_rooms.room_for(chunk, &mut allocator);
         commands.spawn((
@@ -482,7 +485,7 @@ fn spawn_load_test(
 /// Стены карты (T2.2/T2.3): для каждого чанка — одно статическое тело
 /// с составным коллайдером из тайлов-стен загруженной карты.
 fn spawn_walls(mut commands: Commands, map: Res<GameMap>) {
-    let tile = CHUNK_SIZE; // 32 юнита на тайл
+    let tile = TILE_SIZE; // 32 юнита на тайл
     let mut total = 0usize;
     for data in &map.chunks {
         let mut shapes = Vec::new();
@@ -516,7 +519,7 @@ fn spawn_collision_test(mut commands: Commands) {
     }
     commands.spawn((
         RigidBody::Static,
-        Collider::rectangle(CHUNK_SIZE, 4096.0),
+        Collider::rectangle(TILE_SIZE, 4096.0),
         Position(Vector::new(704.0, 0.0)),
         Rotation::default(),
     ));

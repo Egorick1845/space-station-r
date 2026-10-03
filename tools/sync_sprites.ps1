@@ -11,6 +11,8 @@ $Sprites = @(
     "Mobs/Animals/monkey.rsi",
     "Mobs/Ghosts/ghost_human.rsi",
     "Objects/Tools/crowbar.rsi",
+    "Structures/Walls/solid.rsi",
+    "Structures/Doors/Airlocks/Standard/basic.rsi",
     "Tiles/steel.png",
     "Tiles/dark.png",
     "Tiles/blue.png"

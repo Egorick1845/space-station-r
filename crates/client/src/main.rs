@@ -10,6 +10,7 @@ use std::path::Path;
 
 use bevy::prelude::*;
 use bevy::window::{Window, WindowPlugin, WindowResolution};
+use bevy_replicon::shared::server_entity_map::ServerEntityMap;
 use lightyear::prelude::client::*;
 use lightyear::prelude::*;
 use ssr_core::{GAME_NAME, PlayerPosition};
@@ -36,8 +37,9 @@ const CLIENT_ADDR: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST),
 /// Имя игрока до появления экрана входа (T5.4).
 const DEV_PLAYER_NAME: &str = "SSR-dev";
 
-/// Скорость сглаживания реплицированной позиции (экспоненциальный lerp).
-const POSITION_SMOOTHING: f32 = 12.0;
+/// Длительность серверного тика: интерполяция проигрывает путь между двумя
+/// последними серверными позициями ровно за это время (без рывков).
+const NET_TICK_SECS: f32 = 1.0 / NET_TPS as f32;
 
 fn main() {
     let mut app = App::new();
@@ -59,13 +61,24 @@ fn main() {
     app.add_plugins(ProtocolPlugin);
     app.init_resource::<Handshake>();
     app.init_resource::<PlayerEntity>();
+    app.init_resource::<tiles::ChunkRenderState>();
+    // RsiRegistry строится сразу после DefaultPlugins: нужен и игроку (обезьяна),
+    // и дверям (closed/open) уже на Startup.
+    let rsi_root = Path::new(&assets_file_path()).join("sprites/ss14");
+    let registry = app
+        .world_mut()
+        .resource_scope(|world, mut images: Mut<Assets<Image>>| {
+            let mut layouts = world.resource_mut::<Assets<TextureAtlasLayout>>();
+            rsi::build_registry(&mut images, &mut layouts, &rsi_root)
+        });
+    app.insert_resource(registry);
     app.add_systems(
         Startup,
         (
             setup_camera,
             spawn_player,
+            spawn_crowbar,
             startup_connection,
-            startup_rsi,
             startup_map,
         ),
     );
@@ -75,14 +88,16 @@ fn main() {
             send_connect,
             send_input,
             receive_server,
-            apply_position,
+            apply_player_state,
             count_replicated,
             tiles::render_map_chunks,
-            tiles::camera_edge_scroll,
+            tiles::despawn_orphan_chunks,
+            camera_follow_player,
             doors::spawn_door_visuals,
             doors::update_door_visuals,
             doors::click_interact,
             doors::auto_interact,
+            doors::hover_outline,
         ),
     );
     // Регистрация реплицируемых компонентов — одинакова на сервере и клиенте (T1.3).
@@ -185,9 +200,22 @@ fn send_input(
         .and_then(|v| v.parse::<f32>().ok())
         .map(|ms| ms / 1000.0)
         .unwrap_or(3.0);
+    // SSR_LOCK_INPUT=1 — тестовый режим: клавиатура игнорируется
+    // (ввод только автоходом), тесты детерминированы даже при чужом вводе.
+    let locked = std::env::var_os("SSR_LOCK_INPUT").is_some();
+    // SSR_AUTO_WALK_DIR="0,1" — направление автохода (по умолчанию вправо).
+    let walk_dir = std::env::var("SSR_AUTO_WALK_DIR")
+        .ok()
+        .and_then(|v| {
+            let (x, y) = v.split_once(',')?;
+            Some(Vec2::new(x.trim().parse().ok()?, y.trim().parse().ok()?))
+        })
+        .unwrap_or(Vec2::X);
     let direction = if std::env::var_os("SSR_AUTO_WALK").is_some() && *connected_elapsed < walk_secs
     {
-        Vec2::X
+        walk_dir
+    } else if locked {
+        Vec2::ZERO
     } else {
         input_direction(&input)
     };
@@ -230,27 +258,86 @@ fn receive_server(
     }
 }
 
-/// Двигает спрайт к реплицированной позиции сервера с экспоненциальным сглаживанием.
-/// Отставание при локальной игре заведомо меньше 200 мс (критерий T1.3).
-fn apply_position(
+/// Клиентская сущность своего игрока: bits из Welcome → ServerEntityMap → клиент.
+fn own_player_entity(
+    player_entity: &PlayerEntity,
+    entity_map: &Option<Res<ServerEntityMap>>,
+) -> Option<Entity> {
+    let server = Entity::try_from_bits(player_entity.0?)?;
+    entity_map.as_deref()?.to_client().get(&server).copied()
+}
+
+/// Интерполяция собственной позиции между серверными снимками (T3.x):
+/// держим предыдущую и целевую точки и проигрываем путь ровно за тик сети —
+/// движение равномерное, без экспоненциального «догоняния» и дробления.
+#[derive(Default)]
+struct PositionInterp {
+    prev: Vec2,
+    target: Vec2,
+    elapsed: f32,
+    started: bool,
+}
+
+/// Двигает спрайт к реплицированной позиции СВОЕГО игрока (не «единственного»:
+/// рядом бывают другие игроки) и выбирает сторону из 4 по движению.
+fn apply_player_state(
     time: Res<Time>,
-    mut render_pos: Local<Option<Vec2>>,
+    player_entity: Res<PlayerEntity>,
+    entity_map: Option<Res<ServerEntityMap>>,
     positions: Query<&PlayerPosition>,
-    mut sprites: Query<&mut Transform, With<Player>>,
+    registry: Res<rsi::RsiRegistry>,
+    mut interp: Local<PositionInterp>,
+    mut sprites: Query<(&mut Transform, &mut Sprite, &mut PlayerFacing), With<Player>>,
 ) {
-    let Ok(target) = positions.single() else {
+    const KEY: &str = "sprites/ss14/Mobs/Animals/monkey.rsi#monkey";
+    let Some(own) = own_player_entity(&player_entity, &entity_map) else {
+        return;
+    };
+    let Ok(target) = positions.get(own) else {
         return;
     };
     let target = Vec2::from_array(target.0);
 
-    let current = render_pos.unwrap_or(target);
-    let alpha = 1.0 - (-POSITION_SMOOTHING * time.delta_secs()).exp();
-    let current = current.lerp(target, alpha);
-    *render_pos = Some(current);
+    if !interp.started {
+        interp.prev = target;
+        interp.target = target;
+        interp.started = true;
+    } else if target != interp.target {
+        // Новая серверная позиция: продолжаем путь от текущей отрисованной точки.
+        interp.prev = interp
+            .prev
+            .lerp(interp.target, (interp.elapsed / NET_TICK_SECS).min(1.0));
+        interp.target = target;
+        interp.elapsed = 0.0;
+    }
+    interp.elapsed += time.delta_secs();
+    let alpha = (interp.elapsed / NET_TICK_SECS).min(1.0);
+    let current = interp.prev.lerp(interp.target, alpha);
 
-    for mut transform in sprites.iter_mut() {
+    // Направление — по серверному смещению за последний снимок.
+    let delta = interp.target - interp.prev;
+    let direction = (delta.length() >= 0.5).then(|| {
+        if delta.x.abs() > delta.y.abs() {
+            if delta.x > 0.0 { 1 } else { 3 } // восток / запад
+        } else if delta.y > 0.0 {
+            2 // север
+        } else {
+            0 // юг
+        }
+    });
+
+    let sprite_rsi = registry.get(KEY);
+    for (mut transform, mut sprite, mut facing) in sprites.iter_mut() {
         transform.translation.x = current.x;
         transform.translation.y = current.y;
+        if let Some(direction) = direction
+            && facing.0 != direction
+        {
+            facing.0 = direction;
+            if let (Some(rsi), Some(atlas)) = (sprite_rsi, sprite.texture_atlas.as_mut()) {
+                atlas.index = rsi.index(direction, 0);
+            }
+        }
     }
     tracing::debug!(target = ?target.to_array(), render = ?current.to_array(), "position applied");
 }
@@ -271,7 +358,6 @@ fn count_replicated(
     if positions.is_empty() {
         return;
     }
-    // Постоянный порядок в логе: сортировка по x, затем по y.
     positions.sort_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])));
     tracing::info!(count = positions.len(), positions = ?positions, "visible players");
 }
@@ -286,32 +372,29 @@ fn setup_camera(mut commands: Commands) {
     ));
 }
 
-fn spawn_player(mut commands: Commands, assets: Res<AssetServer>) {
-    // Временный спрайт из сборки мини-станции (assets/sprites/ss14/ATTRIBUTION.md).
-    let texture: Handle<Image> = assets.load("sprites/ss14/Mobs/Animals/monkey.rsi/monkey.png");
+/// Спрайт игрока из RSI с атласом направлений (SS14: юг, восток, север, запад).
+fn spawn_player(mut commands: Commands, registry: Res<rsi::RsiRegistry>) {
+    const KEY: &str = "sprites/ss14/Mobs/Animals/monkey.rsi#monkey";
+    let Some(sprite) = registry.get(KEY) else {
+        tracing::warn!(KEY, "player rsi missing");
+        return;
+    };
+    let mut sprite_component = Sprite::from_image(sprite.image.clone());
+    sprite_component.texture_atlas = Some(TextureAtlas {
+        layout: sprite.layout.clone(),
+        index: sprite.index(0, 0), // старт: смотрит на юг
+    });
     // z = 1: игрок рисуется поверх тайлов карты.
     commands.spawn((
         Player,
-        Sprite::from_image(texture),
+        sprite_component,
+        PlayerFacing(0),
         Transform::from_xyz(0.0, 0.0, 1.0),
     ));
 }
 
-/// Грузит прототипы/спрайты тайлов; сами чанки приходят с сервера (T2.3).
-fn startup_map(mut commands: Commands) {
-    let root = Path::new(&assets_file_path()).to_path_buf();
-    let visuals = tiles::load_tile_visuals(&root);
-    commands.insert_resource(visuals);
-}
-
-/// Строит RsiRegistry и спавнит лом из SS14 (критерий IMP.1: лом виден в окне).
-fn startup_rsi(
-    mut commands: Commands,
-    mut images: ResMut<Assets<Image>>,
-    mut layouts: ResMut<Assets<TextureAtlasLayout>>,
-) {
-    let root = Path::new(&assets_file_path()).join("sprites/ss14");
-    let registry = rsi::build_registry(&mut images, &mut layouts, &root);
+/// Кладёт лом из SS14 рядом со стартовой точкой (демо IMP.1).
+fn spawn_crowbar(mut commands: Commands, registry: Res<rsi::RsiRegistry>) {
     let key = "sprites/ss14/Objects/Tools/crowbar.rsi#icon";
     match rsi::spawn_rsi_sprite(
         &mut commands,
@@ -323,7 +406,30 @@ fn startup_rsi(
         Some(_) => tracing::info!(key, "rsi sprite spawned"),
         None => tracing::warn!(key, "rsi sprite not found in registry"),
     }
-    commands.insert_resource(registry);
+}
+
+/// Камера жёстко следует за отрисованной позицией игрока: никакого второго
+/// сглаживания — иначе мир «дрожит» относительно персонажа.
+fn camera_follow_player(
+    player: Query<&Transform, (With<Player>, Without<Camera2d>)>,
+    mut camera: Single<&mut Transform, With<Camera2d>>,
+) {
+    let Ok(target) = player.single() else {
+        return;
+    };
+    camera.translation.x = target.translation.x;
+    camera.translation.y = target.translation.y;
+}
+
+/// Текущее направление игрока (0 юг, 1 восток, 2 север, 3 запад).
+#[derive(Component, Default, Clone, Copy, PartialEq)]
+struct PlayerFacing(u32);
+
+/// Грузит прототипы/спрайты тайлов; сами чанки приходят с сервера (T2.3).
+fn startup_map(mut commands: Commands) {
+    let root = Path::new(&assets_file_path()).to_path_buf();
+    let visuals = tiles::load_tile_visuals(&root);
+    commands.insert_resource(visuals);
 }
 
 #[derive(Component)]

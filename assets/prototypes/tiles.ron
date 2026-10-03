@@ -3,7 +3,7 @@
     // относительно assets/; None — тайл не рисуется (космос = фон окна).
     tiles: {
         "floor": ( sprite: Some("sprites/ss14/Tiles/steel.png"), solid: false ),
-        "wall":  ( sprite: Some("sprites/ss14/Tiles/dark.png"),  solid: true ),
+        "wall":  ( sprite: Some("sprites/ss14/Structures/Walls/solid.rsi/full.png"), solid: true ),
         "space": ( sprite: None, solid: false ),
     },
 )

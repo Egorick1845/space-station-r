@@ -1,8 +1,11 @@
 //! RSI-загрузчик (SS14_IMPORT.md §6, задача IMP.1).
 //!
-//! Чистый (без Bevy) разбор RSI: папка `Name.rsi/` или zip `Name.rsi`.
-//! Раскладка направлений в SS14 — сетка, не полоса: 1→1×1, 2→2×1, 4→2×2,
-//! 8→4×2; кадры анимации добавляются строками снизу.
+//! Модель раскладки — как в движке (RobustToolbox `RsiLoading.cs`):
+//! лист состоит из ячеек `size × size`, которые обходятся построчно
+//! (слева-вправо, сверху-вниз): сначала все кадры нулевого направления,
+//! затем следующего. `delays` в meta.json — по одному массиву на направление
+//! (`delays[dir]` = длительности кадров этого направления); без `delays` —
+//! 1 кадр на направление. Размер листа обязан быть кратен размеру кадра.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -23,8 +26,12 @@ pub enum RsiError {
     Png(String, image::ImageError),
     #[error("state {0}: нет PNG в RSI")]
     MissingPng(String),
-    #[error("state {0}: PNG {1}x{2}, ожидалось {3}x{4} при сетке {5}x{6} и {7} кадрах")]
-    SheetSize(String, u32, u32, u32, u32, u32, u32, u32),
+    #[error("state {0}: недопустимое число направлений {1} (ожидается 1, 4 или 8)")]
+    Directions(String, u32),
+    #[error("state {0}: PNG {1}x{2} не кратен размеру кадра {3}x{4}")]
+    SheetSize(String, u32, u32, u32, u32),
+    #[error("state {0}: ячеек {1}, а кадров требуется {2} (направлений {3}, кадров {4:?})")]
+    CellCount(String, u32, u32, u32, Vec<u32>),
 }
 
 /// Загруженный RSI.
@@ -41,44 +48,39 @@ impl Rsi {
     }
 }
 
-/// Состояние RSI: `directions` направлений, `frames` кадров анимации.
-///
-/// `sheet` — целый PNG состояния; позиция (кадр, направление) — сетка [`dir_grid`].
+/// Состояние RSI: лист-изображение с ячейками (направление × кадр).
 #[derive(Debug)]
 pub struct RsiState {
     pub name: String,
+    /// 1, 4 или 8 (как в движке).
     pub directions: u32,
-    pub frames: u32,
-    /// `delays[frame][direction]` — длительности кадров анимации, сек.
-    pub delays: Vec<Vec<f32>>,
+    /// Кадров на каждое направление (из `delays`, минимум 1).
+    pub frames_per_direction: Vec<u32>,
     pub sheet: DynamicImage,
 }
 
 impl RsiState {
-    /// Сетка направлений (колонок, строк) одного кадра.
-    pub fn grid(&self) -> (u32, u32) {
-        dir_grid(self.directions)
+    /// Наибольшее число кадров среди направлений.
+    pub fn frames(&self) -> u32 {
+        self.frames_per_direction.iter().copied().max().unwrap_or(1)
     }
 
-    /// Индекс ячейки (кадр, направление) в атласе, собранном по порядку кадров.
-    pub fn cell_index(&self, frame: u32, direction: u32) -> u32 {
-        let (cols, rows) = self.grid();
-        frame * rows * cols + direction
-    }
-}
-
-/// Сетка направлений SS14: 1→1×1, 2→2×1, 3→3×1, 4→2×2, 8→4×2, остальное — квадрат.
-pub fn dir_grid(directions: u32) -> (u32, u32) {
-    match directions {
-        1 => (1, 1),
-        2 => (2, 1),
-        3 => (3, 1),
-        4 => (2, 2),
-        8 => (4, 2),
-        d => {
-            let cols = (d as f64).sqrt().ceil() as u32;
-            (cols, d.div_ceil(cols))
+    /// Индекс ячейки (направление, кадр) в порядке обхода движка.
+    pub fn cell_index(&self, direction: u32, frame: u32) -> u32 {
+        let mut index = 0u32;
+        for d in 0..direction.min(self.directions) {
+            index += self
+                .frames_per_direction
+                .get(d as usize)
+                .copied()
+                .unwrap_or(1);
         }
+        index + frame
+    }
+
+    /// Сетка ячеек листа: (колонок, строк).
+    pub fn sheet_grid(&self, size: (u32, u32)) -> (u32, u32) {
+        (self.sheet.width() / size.0, self.sheet.height() / size.1)
     }
 }
 
@@ -101,26 +103,23 @@ pub fn load_rsi(path: &Path) -> Result<Rsi, RsiError> {
             continue;
         };
         let directions = st["directions"].as_u64().unwrap_or(1) as u32;
-        // delays[frame][direction]; отсутствует у статичных состояний → 1 кадр.
-        let delays: Vec<Vec<f32>> = st["delays"]
+        if !matches!(directions, 1 | 4 | 8) {
+            return Err(RsiError::Directions(name, directions));
+        }
+        // delays[dir] = длительности кадров направления; пусто/нет — 1 кадр.
+        let frames_per_direction: Vec<u32> = st["delays"]
             .as_array()
-            .map(|frames| {
-                frames
-                    .iter()
-                    .map(|f| {
-                        f.as_array()
-                            .map(|d| {
-                                d.iter()
-                                    .filter_map(|v| v.as_f64())
-                                    .map(|v| v as f32)
-                                    .collect()
-                            })
-                            .unwrap_or_default()
-                    })
+            .map(|dirs| {
+                dirs.iter()
+                    .map(|d| d.as_array().map(|f| f.len() as u32).unwrap_or(1).max(1))
                     .collect()
             })
             .unwrap_or_default();
-        let frames = delays.len().max(1) as u32;
+        let frames_per_direction = if frames_per_direction.is_empty() {
+            vec![1; directions as usize]
+        } else {
+            frames_per_direction
+        };
 
         let png_name = format!("{name}.png");
         let bytes = pngs
@@ -131,32 +130,33 @@ pub fn load_rsi(path: &Path) -> Result<Rsi, RsiError> {
         let state = RsiState {
             name,
             directions,
-            frames,
-            delays,
+            frames_per_direction,
             sheet,
         };
-        verify_sheet_size(&state, size)?;
+        verify_sheet(&state, size)?;
         states.push(state);
     }
 
     Ok(Rsi { size, states })
 }
 
-/// Проверка размера листа по сетке направлений и числу кадров.
-fn verify_sheet_size(state: &RsiState, (w, h): (u32, u32)) -> Result<(), RsiError> {
-    let (cols, rows) = state.grid();
-    let expected = (w * cols, h * rows * state.frames);
+/// Проверка: лист кратен кадру и содержит ЯЧЕЕК НЕ МЕНЬШЕ (направления × кадры).
+/// Движок допускает лишние ячейки в листе (они просто не используются,
+/// например `deny_unlit` в basic.rsi: 6 ячеек при 5 кадрах).
+fn verify_sheet(state: &RsiState, (w, h): (u32, u32)) -> Result<(), RsiError> {
     let (width, height) = (state.sheet.width(), state.sheet.height());
-    if (width, height) != expected {
-        return Err(RsiError::SheetSize(
+    if width % w != 0 || height % h != 0 {
+        return Err(RsiError::SheetSize(state.name.clone(), width, height, w, h));
+    }
+    let cells = (width / w) * (height / h);
+    let expected: u32 = state.frames_per_direction.iter().sum();
+    if cells < expected {
+        return Err(RsiError::CellCount(
             state.name.clone(),
-            width,
-            height,
-            expected.0,
-            expected.1,
-            cols,
-            rows,
-            state.frames,
+            cells,
+            expected,
+            state.directions,
+            state.frames_per_direction.clone(),
         ));
     }
     Ok(())
@@ -230,41 +230,56 @@ fn read_zip_rsi(path: &Path) -> Result<(serde_json::Value, HashMap<String, Vec<u
 mod tests {
     use super::*;
 
-    /// Реальный RSI из сборки мини-станции (см. ASSETS_LICENSES.md).
-    fn crowbar_path() -> std::path::PathBuf {
+    fn asset_rsi(rel: &str) -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .ancestors()
             .nth(2)
             .expect("repo root")
-            .join("assets/sprites/ss14/Objects/Tools/crowbar.rsi")
+            .join("assets/sprites/ss14")
+            .join(rel)
     }
 
     #[test]
     fn crowbar_folder_form() {
-        let rsi = load_rsi(&crowbar_path()).expect("load crowbar.rsi");
+        let rsi = load_rsi(&asset_rsi("Objects/Tools/crowbar.rsi")).expect("load crowbar.rsi");
         assert_eq!(rsi.size, (32, 32));
-        // meta.json монтировки: 14 состояний.
         assert_eq!(rsi.states.len(), 14);
 
         let icon = rsi.state("icon").expect("icon state");
         assert_eq!(icon.directions, 1);
-        assert_eq!(icon.frames, 1);
-        assert_eq!(icon.sheet.width(), 32);
+        assert_eq!(icon.frames(), 1);
+        assert_eq!(icon.sheet_grid(rsi.size), (1, 1));
 
         let inhand = rsi.state("inhand-left").expect("inhand-left state");
         assert_eq!(inhand.directions, 4);
-        assert_eq!(inhand.grid(), (2, 2));
-        assert_eq!(inhand.sheet.width(), 64);
-        assert_eq!(inhand.sheet.height(), 64);
+        assert_eq!(inhand.frames_per_direction, vec![1, 1, 1, 1]);
+        assert_eq!(inhand.sheet_grid(rsi.size), (2, 2));
         // Порядок направлений SS14: юг, восток, север, запад — индексы 0..3.
-        assert_eq!(inhand.cell_index(0, 3), 3);
+        assert_eq!(inhand.cell_index(0, 0), 0);
+        assert_eq!(inhand.cell_index(3, 0), 3);
     }
 
     #[test]
-    fn dir_grid_matches_ss14_layout() {
-        assert_eq!(dir_grid(1), (1, 1));
-        assert_eq!(dir_grid(2), (2, 1));
-        assert_eq!(dir_grid(4), (2, 2));
-        assert_eq!(dir_grid(8), (4, 2));
+    fn monkey_and_animated_airlock() {
+        let monkey = load_rsi(&asset_rsi("Mobs/Animals/monkey.rsi")).expect("load monkey.rsi");
+        let state = monkey.state("monkey").expect("monkey state");
+        assert_eq!(state.directions, 4);
+        assert_eq!(state.sheet_grid(monkey.size), (2, 2));
+
+        // Дверь: анимированные состояния (delays) — кадры идут подряд в листе.
+        let door = load_rsi(&asset_rsi("Structures/Doors/Airlocks/Standard/basic.rsi"))
+            .expect("load basic.rsi");
+        let closed = door.state("closed").expect("closed");
+        assert_eq!(closed.directions, 1);
+        assert_eq!(closed.frames(), 1);
+        let closing = door.state("closing").expect("closing");
+        assert_eq!(closing.frames(), 6);
+        assert_eq!(closing.cell_index(0, 0), 0);
+        assert_eq!(closing.cell_index(0, 5), 5);
+        let sparks = door.state("sparks_broken").expect("sparks_broken");
+        assert_eq!(sparks.frames(), 7);
+        // Лишние ячейки в листе допустимы (движок их игнорирует).
+        let deny = door.state("deny_unlit").expect("deny_unlit");
+        assert_eq!(deny.frames(), 5);
     }
 }

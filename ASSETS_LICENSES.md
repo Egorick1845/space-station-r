@@ -15,3 +15,16 @@
 | sprites/ss14/Tiles/steel.png | Tiles/steel.png | CC BY-SA 3.0 (апстрим SS14) | 03.10.2026 |
 | sprites/ss14/Tiles/dark.png | Tiles/dark.png | CC BY-SA 3.0 (апстрим SS14) | 03.10.2026 |
 | sprites/ss14/Tiles/blue.png | Tiles/blue.png | CC BY-SA 3.0 (апстрим SS14) | 03.10.2026 |
+| sprites/ss14/Structures/Walls/solid.rsi/ | Structures/Walls/solid.rsi | CC BY-SA 3.0 — TauCetiStation (см. copyright в meta.json) | 04.10.2026 |
+| sprites/ss14/Structures/Doors/Airlocks/Standard/basic.rsi/ | Structures/Doors/Airlocks/Standard/basic.rsi | CC BY-SA 3.0 (апстрим SS14) | 04.10.2026 |
+| maps/ss14/empty.yml | Maps/Test/empty.yml | CC BY-SA 3.0 (апстрим SS14) | 04.10.2026 |
+| maps/ss14/floor3x3.yml | Maps/Test/floor3x3.yml | CC BY-SA 3.0 (апстрим SS14) | 04.10.2026 |
+| maps/ss14/admin_test_arena.yml | Maps/Test/admin_test_arena.yml | CC BY-SA 3.0 (апстрим SS14) | 04.10.2026 |
+| maps/ss14/aspid.yml | Maps/_Mini/aspid.yml (карта «Мини-станции») | CC BY-SA 3.0 | 04.10.2026 |
+
+## Карты SS14 (staging для IMP.4)
+
+`assets/maps/ss14/*.yml` — оригинальные карты формата 7 из сборки. Прямой
+импорт в игровой формат (`assets/maps/*.ron`) — задача IMP.4 (SS14_IMPORT.md §5):
+формат 7 уже содержит словарь `tilemap` (id → имя тайла), что упрощает парсер;
+дальше — экспорт тайлов чанков и сущностей, как описано в документе.

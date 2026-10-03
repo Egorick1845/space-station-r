@@ -1,8 +1,9 @@
 //! Bevy-интеграция RSI (SS14_IMPORT.md §6.4, задача IMP.1).
 //!
 //! [`build_registry`] при старте сканирует каталог ассетов: каждый PNG-лист
-//! состояния заливается в [`Image`], ячейки (кадр × направление) регистрируются
-//! в [`TextureAtlasLayout`]. Соглашение ссылок — как в SS14: `path/to/name.rsi#state`.
+//! состояния заливается в [`Image`], клетки листа (в порядке обхода движка:
+//! построчно, кадры направления подряд) регистрируются в [`TextureAtlasLayout`].
+//! Соглашение ссылок — как в SS14: `path/to/name.rsi#state`.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -20,18 +21,24 @@ pub type RsiKey = String;
 pub struct RsiSprite {
     pub image: Handle<Image>,
     pub layout: Handle<TextureAtlasLayout>,
-    /// (колонок, строк) сетки направлений одного кадра.
-    pub grid: (u32, u32),
-    /// Число кадров анимации; понадобится в фазе 2 (анимации по delays).
-    #[allow(dead_code)]
-    pub frames: u32,
+    /// 1, 4 или 8.
+    pub directions: u32,
+    /// Кадров на каждое направление (порядок обхода движка).
+    pub frames_per_direction: Vec<u32>,
 }
 
 impl RsiSprite {
-    /// Индекс ячейки атласа для направления/кадра.
+    /// Индекс ячейки атласа для направления/кадра (правило движка).
     pub fn index(&self, direction: u32, frame: u32) -> usize {
-        let (cols, rows) = self.grid;
-        (frame * rows * cols + direction) as usize
+        let mut index = 0u32;
+        for d in 0..direction.min(self.directions) {
+            index += self
+                .frames_per_direction
+                .get(d as usize)
+                .copied()
+                .unwrap_or(1);
+        }
+        (index + frame) as usize
     }
 }
 
@@ -76,8 +83,8 @@ pub fn build_registry(
             let sprite = RsiSprite {
                 image,
                 layout,
-                grid: state.grid(),
-                frames: state.frames,
+                directions: state.directions,
+                frames_per_direction: state.frames_per_direction.clone(),
             };
             registry.sprites.insert(key, sprite);
         }
@@ -86,8 +93,8 @@ pub fn build_registry(
     registry
 }
 
-/// Загружает лист состояния в GPU: один [`Image`] + [`TextureAtlasLayout`]
-/// с ячейками по порядку кадров×направлений.
+/// Загружает лист состояния в GPU: один [`Image`] + [`TextureAtlasLayout`],
+/// где ячейка i — это i-я клетка листа в порядке обхода движка.
 fn upload_state(
     rsi: &Rsi,
     state: &rsi::RsiState,
@@ -109,18 +116,14 @@ fn upload_state(
     );
     let image_handle = images.add(image);
 
-    let (cols, rows) = state.grid();
-    let cells = state.frames * rows * cols;
-    let mut layout = TextureAtlasLayout::new_empty(UVec2::new(w * cols, h * rows * state.frames));
-    // Ячейка i: кадр = i / directions, направление = i % directions;
-    // направление d занимает колонку d % cols и строку d / cols внутри кадра.
-    let directions = state.directions;
-    for i in 0..cells {
-        let frame = i / directions;
-        let dir = i % directions;
-        let col = dir % cols;
-        let row = dir / cols + frame * rows;
-        layout.add_texture(URect::new(col * w, row * h, col * w + w, row * h + h));
+    let (cols, rows) = state.sheet_grid(rsi.size);
+    let mut layout =
+        TextureAtlasLayout::new_empty(UVec2::new(state.sheet.width(), state.sheet.height()));
+    // Ячейки добавляем строго в порядке обхода листа: кадры каждого направления подряд.
+    for row in 0..rows {
+        for col in 0..cols {
+            layout.add_texture(URect::new(col * w, row * h, col * w + w, row * h + h));
+        }
     }
     let layout_handle = layouts.add(layout);
     (image_handle, layout_handle)

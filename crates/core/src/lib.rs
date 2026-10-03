@@ -29,14 +29,19 @@ pub fn assets_root() -> std::path::PathBuf {
 /// Скорость игрока, пикселей в секунду (сервер применяет ввод по ADR-3).
 pub const PLAYER_MOVE_SPEED: f32 = 300.0;
 
-/// Размер чанка мира в юнитах: ADR-5 (32×32 тайла) × IMP-1 (1 тайл = 1 юнит).
-pub const CHUNK_SIZE: f32 = 32.0;
+/// Размер тайла в юнитах мира: 1 тайл = 1 юнит сетки (ADR-8, IMP-1),
+/// спрайты 32 px. Все мировые координаты в юнитах, тайл — минимальная единица.
+pub const TILE_SIZE: f32 = 32.0;
 
-/// Координаты чанка точки мира (floor-деление, корректно для отрицательных).
+/// Размер чанка в юнитах: ADR-5 (чанк = 32×32 тайла).
+pub const CHUNK_UNITS: f32 = TILE_SIZE * tiles::CHUNK_TILES as f32;
+
+/// Координаты ЧАНКА (ADR-5: 32×32 тайла) точки мира.
+/// Именно в этой сетке работает interest management (ADR-4) и чанки карты.
 pub fn chunk_coords(x: f32, y: f32) -> (i32, i32) {
     (
-        (x / CHUNK_SIZE).floor() as i32,
-        (y / CHUNK_SIZE).floor() as i32,
+        (x / CHUNK_UNITS).floor() as i32,
+        (y / CHUNK_UNITS).floor() as i32,
     )
 }
 
@@ -46,10 +51,11 @@ mod tests {
 
     #[test]
     fn chunk_coords_floors_negatives() {
+        // Чанк = 1024 юнита (32 тайла × 32 юнита).
         assert_eq!(chunk_coords(0.0, 0.0), (0, 0));
-        assert_eq!(chunk_coords(31.9, -0.1), (0, -1));
-        assert_eq!(chunk_coords(64.0, 64.0), (2, 2));
-        assert_eq!(chunk_coords(-33.0, 33.0), (-2, 1));
+        assert_eq!(chunk_coords(1023.9, -0.1), (0, -1));
+        assert_eq!(chunk_coords(1024.0, 2048.0), (1, 2));
+        assert_eq!(chunk_coords(-33.0, 33.0), (-1, 0));
     }
 }
 

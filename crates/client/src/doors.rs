@@ -3,6 +3,8 @@
 
 use bevy::prelude::*;
 use bevy_replicon::shared::server_entity_map::ServerEntityMap;
+
+use crate::rsi::RsiRegistry;
 use lightyear::prelude::client::*;
 use lightyear::prelude::*;
 use ssr_core::Door;
@@ -20,6 +22,10 @@ const CLICK_RADIUS: f32 = 24.0;
 /// Времени между авто-взаимодействиями в тестовом режиме (SSR_INTERACT_TEST).
 const AUTO_INTERACT_PERIOD: f32 = 1.0;
 
+/// RSI-ключи спрайтов двери (Structures/Doors/Airlocks/Standard/basic.rsi).
+const DOOR_CLOSED: &str = "sprites/ss14/Structures/Doors/Airlocks/Standard/basic.rsi#closed";
+const DOOR_OPEN: &str = "sprites/ss14/Structures/Doors/Airlocks/Standard/basic.rsi#open";
+
 /// Визуальный спрайт двери, привязанный к реплицированной сущности.
 /// Публичный: параметр систем Bevy требует публичного типа (E0446).
 #[derive(Component)]
@@ -28,25 +34,31 @@ pub struct DoorVisual {
     last_open: bool,
 }
 
-fn color_for(open: bool) -> Color {
-    if open {
-        // Открытая — светлая (просвет).
-        Color::srgb(0.35, 0.75, 0.35)
-    } else {
-        // Закрытая — тёмно-рыжая (как дверное полотно).
-        Color::srgb(0.55, 0.27, 0.07)
-    }
-}
-
 /// Спавнит спрайт при появлении реплицированной двери.
-pub fn spawn_door_visuals(mut commands: Commands, doors: Query<(Entity, &Door), Added<Door>>) {
+pub fn spawn_door_visuals(
+    mut commands: Commands,
+    doors: Query<(Entity, &Door), Added<Door>>,
+    registry: Res<RsiRegistry>,
+) {
+    let (Some(closed), Some(open)) = (registry.get(DOOR_CLOSED), registry.get(DOOR_OPEN)) else {
+        for (entity, door) in doors.iter() {
+            tracing::warn!(?entity, open = door.open, "door rsi sprites missing");
+        }
+        return;
+    };
     for (entity, door) in doors.iter() {
+        let target = if door.open { open } else { closed };
+        let mut sprite = Sprite::from_image(target.image.clone());
+        sprite.texture_atlas = Some(TextureAtlas {
+            layout: target.layout.clone(),
+            index: 0,
+        });
         commands.spawn((
             DoorVisual {
                 door: entity,
                 last_open: door.open,
             },
-            Sprite::from_color(color_for(door.open), Vec2::splat(DOOR_HALF * 2.0)),
+            sprite,
             // Поверх тайлов (z=0), но под игроком (z=1).
             Transform::from_xyz(door.position[0], door.position[1], 0.5),
         ));
@@ -54,12 +66,16 @@ pub fn spawn_door_visuals(mut commands: Commands, doors: Query<(Entity, &Door), 
     }
 }
 
-/// Обновляет цвет по реплицированному состоянию и убирает осиротевшие спрайты.
+/// Меняет спрайт по реплицированному состоянию и убирает осиротевшие спрайты.
 pub fn update_door_visuals(
     mut commands: Commands,
     doors: Query<&Door>,
     mut visuals: Query<(Entity, &mut DoorVisual, &mut Sprite)>,
+    registry: Res<RsiRegistry>,
 ) {
+    let (Some(closed), Some(open)) = (registry.get(DOOR_CLOSED), registry.get(DOOR_OPEN)) else {
+        return;
+    };
     for (visual_entity, mut visual, mut sprite) in visuals.iter_mut() {
         let Ok(door) = doors.get(visual.door) else {
             // Дверь исчезла (despawn с сервера).
@@ -68,10 +84,12 @@ pub fn update_door_visuals(
         };
         if door.open != visual.last_open {
             visual.last_open = door.open;
-            let color = color_for(door.open);
-            if sprite.color != color {
-                sprite.color = color;
-            }
+            let target = if door.open { open } else { closed };
+            sprite.image = target.image.clone();
+            sprite.texture_atlas = Some(TextureAtlas {
+                layout: target.layout.clone(),
+                index: 0,
+            });
             tracing::info!(door = ?visual.door, open = door.open, "door state changed");
         }
     }
@@ -142,6 +160,36 @@ pub fn send_interact(
     }
     tracing::info!(?door_entity, "Interact sent");
     Some(())
+}
+
+/// Обводка объекта под курсором (T3.1; задел под предметы в T3.2):
+/// жёлтая рамка вокруг двери, на которую наведён курсор.
+pub fn hover_outline(
+    windows: Query<&Window>,
+    camera: Single<(&Camera, &GlobalTransform), With<Camera2d>>,
+    doors: Query<&Door>,
+    mut gizmos: Gizmos,
+) {
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let Some(cursor) = window.cursor_position() else {
+        return;
+    };
+    let (camera, camera_transform) = *camera;
+    let Ok(world) = camera.viewport_to_world_2d(camera_transform, cursor) else {
+        return;
+    };
+    for door in doors.iter() {
+        let position = Vec2::from_array(door.position);
+        if position.distance(world) <= CLICK_RADIUS {
+            gizmos.rect_2d(
+                Isometry2d::from_translation(position),
+                Vec2::splat(DOOR_HALF * 2.0 + 4.0),
+                Color::srgb(1.0, 0.9, 0.35),
+            );
+        }
+    }
 }
 
 /// Тестовый режим SSR_INTERACT_TEST=1: раз в [`AUTO_INTERACT_PERIOD`] секунд
