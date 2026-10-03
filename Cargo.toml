@@ -55,6 +55,9 @@ lightyear = { version = "0.30.1", default-features = false, features = [
 
 # Физика 2D (PLAN.md §2): avian2d 0.7 — под bevy 0.19; только на сервере (ADR-3)
 avian2d = "0.7"
+
+# Репликация: маппинг серверных/клиентских сущностей (ServerEntityMap) для Interact (T3.1)
+bevy_replicon = "0.44"
 bevy_app = "0.19"
 
 # Быстрый рантайм в dev-сборках: свои крейты — opt-level 1, зависимости — 3.

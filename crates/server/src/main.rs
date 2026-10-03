@@ -11,7 +11,8 @@ use std::time::Duration;
 
 use avian2d::math::Vector;
 use avian2d::prelude::{
-    Collider, Gravity, LinearVelocity, PhysicsPlugins, Position, RigidBody, Rotation,
+    Collider, ColliderDisabled, Gravity, LinearVelocity, PhysicsPlugins, Position, RigidBody,
+    Rotation,
 };
 use bevy::app::ScheduleRunnerPlugin;
 use bevy::prelude::*;
@@ -19,7 +20,7 @@ use lightyear::connection::server::Start;
 use lightyear::prelude::server::*;
 use lightyear::prelude::*;
 use ssr_core::tiles::{MapFile, TileChunkData, TileType};
-use ssr_core::{CHUNK_SIZE, PLAYER_MOVE_SPEED, PlayerPosition, chunk_coords};
+use ssr_core::{CHUNK_SIZE, Door, INTERACT_RANGE, PLAYER_MOVE_SPEED, PlayerPosition, chunk_coords};
 use ssr_protocol::net::GameChannel;
 use ssr_protocol::{
     ClientMessage, DEFAULT_SERVER_PORT, PROTOCOL_VERSION, ProtocolPlugin, ServerMessage,
@@ -95,6 +96,8 @@ fn main() {
     app.component::<PlayerPosition>().replicate();
     // Чанки карты реплицируются с учётом интереса (T2.3).
     app.component::<TileChunkData>().replicate();
+    // Двери: сервер-авторитарное состояние (T3.1).
+    app.component::<Door>().replicate();
     app.run();
 }
 
@@ -146,10 +149,27 @@ fn load_map(
             Rooms::single(room),
         ));
     }
+    // Двери (T3.1): статичные тела, закрытые; состояние реплицируется клиентам.
+    for &(x, y) in &file.doors {
+        let room = chunk_rooms.room_for(chunk_coords(x, y), &mut allocator);
+        commands.spawn((
+            Door {
+                open: false,
+                position: [x, y],
+            },
+            Replicate::to_clients(NetworkTarget::All),
+            Rooms::single(room),
+            RigidBody::Static,
+            Collider::rectangle(CHUNK_SIZE, CHUNK_SIZE),
+            Position(Vector::new(x, y)),
+            Rotation::default(),
+        ));
+    }
     tracing::info!(
         name = %file.name,
         chunks = chunks.len(),
         spawns = file.spawn_points.len(),
+        doors = file.doors.len(),
         "map loaded"
     );
     commands.insert_resource(GameMap {
@@ -239,6 +259,7 @@ fn on_link_disconnected(
 /// ВАЖНО: MessageReceiver осушается одним вызовом receive(), поэтому все
 /// обработчики сообщений клиента живут в этой одной системе — иначе системы
 /// конкурировали бы за один буфер и теряли сообщения.
+#[allow(clippy::too_many_arguments)]
 fn handle_client_messages(
     mut commands: Commands,
     map: Res<GameMap>,
@@ -246,6 +267,8 @@ fn handle_client_messages(
     mut receivers: Query<(Entity, &RemoteId, &mut MessageReceiver<ClientMessage>), With<Connected>>,
     mut senders: Query<(Entity, &mut MessageSender<ServerMessage>), With<Connected>>,
     mut inputs: Query<&mut PlayerInput>,
+    positions: Query<&PlayerPosition>,
+    mut doors: Query<&mut Door>,
     mut players: ResMut<Players>,
 ) {
     let mut connected: Vec<(Entity, String)> = Vec::new();
@@ -283,7 +306,47 @@ fn handle_client_messages(
                         }
                     }
                 }
-                ClientMessage::Interact { .. } => {} // взаимодействие — T3.1
+                ClientMessage::Interact {
+                    entity: target_bits,
+                } => {
+                    // Взаимодействие (T3.1): цель должна быть дверью в радиусе
+                    // INTERACT_RANGE (1.5 тайла) от игрока — сервер-авторитарно.
+                    let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {
+                        continue;
+                    };
+                    let player_entity = entry.player;
+                    let Some(target) = Entity::try_from_bits(target_bits) else {
+                        tracing::warn!(bits = target_bits, "interact: invalid entity bits");
+                        continue;
+                    };
+                    let Ok(player_position) = positions.get(player_entity) else {
+                        continue;
+                    };
+                    let Ok(mut door) = doors.get_mut(target) else {
+                        tracing::debug!(target = ?target, "interact: target is not a door");
+                        continue;
+                    };
+                    let dx = door.position[0] - player_position.0[0];
+                    let dy = door.position[1] - player_position.0[1];
+                    let distance = (dx * dx + dy * dy).sqrt();
+                    if distance > INTERACT_RANGE {
+                        tracing::warn!(
+                            player = ?player_entity,
+                            distance,
+                            range = INTERACT_RANGE,
+                            "interact: too far"
+                        );
+                        continue;
+                    }
+                    door.open = !door.open;
+                    // Открытая дверь пропускает: коллайдер отключается маркером.
+                    if door.open {
+                        commands.entity(target).insert(ColliderDisabled);
+                    } else {
+                        commands.entity(target).remove::<ColliderDisabled>();
+                    }
+                    tracing::info!(door = ?target, open = door.open, "door toggled");
+                }
             }
         }
     }

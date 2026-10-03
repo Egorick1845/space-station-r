@@ -163,6 +163,9 @@ pub struct MapFile {
     /// Точки спавна в юнитах мира (центр тайла).
     #[serde(default)]
     pub spawn_points: Vec<(f32, f32)>,
+    /// Центры дверей в юнитах мира (T3.1).
+    #[serde(default)]
+    pub doors: Vec<(f32, f32)>,
     pub chunks: Vec<MapChunkFile>,
 }
 
@@ -185,11 +188,13 @@ impl MapFile {
         path: &Path,
         name: &str,
         spawn_points: Vec<(f32, f32)>,
+        doors: Vec<(f32, f32)>,
         chunks: &[TileChunk],
     ) -> Result<(), String> {
         let file = Self {
             name: name.to_string(),
             spawn_points,
+            doors,
             chunks: chunks
                 .iter()
                 .map(|c| MapChunkFile {
@@ -275,10 +280,18 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("temp dir");
         let path = dir.join("round-trip.ron");
 
-        MapFile::save(&path, "test", vec![(16.0, 16.0)], &chunks).expect("save");
+        MapFile::save(
+            &path,
+            "test",
+            vec![(16.0, 16.0)],
+            vec![(144.0, 16.0)],
+            &chunks,
+        )
+        .expect("save");
         let file = MapFile::load(&path).expect("load");
         assert_eq!(file.name, "test");
         assert_eq!(file.spawn_points, vec![(16.0, 16.0)]);
+        assert_eq!(file.doors, vec![(144.0, 16.0)]);
         let restored = file.to_chunks().expect("to_chunks");
         assert_eq!(restored.len(), chunks.len());
         for (original, restored) in chunks.iter().zip(restored.iter()) {
@@ -292,6 +305,7 @@ mod tests {
         let file = MapFile {
             name: "bad".into(),
             spawn_points: vec![],
+            doors: vec![],
             chunks: vec![MapChunkFile {
                 coords: (0, 0),
                 rows: vec![".".to_string()],

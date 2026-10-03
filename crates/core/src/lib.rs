@@ -59,3 +59,14 @@ mod tests {
 /// координаты сетки тайлов (`IVec2`, ADR-8) появятся в фазе 2.
 #[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
 pub struct PlayerPosition(pub [f32; 2]);
+
+/// Дверь (T3.1): состояние меняется только сервером по Interact,
+/// реплицируется клиентам (ADR-4); позиция статична, едет вместе с ней.
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+pub struct Door {
+    pub open: bool,
+    pub position: [f32; 2],
+}
+
+/// Радиус взаимодействия, юниты (PLAN.md T3.1: 1.5 тайла).
+pub const INTERACT_RANGE: f32 = 1.5 * tiles::TILE_PX as f32;

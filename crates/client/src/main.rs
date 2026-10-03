@@ -14,6 +14,7 @@ use lightyear::prelude::client::*;
 use lightyear::prelude::*;
 use ssr_core::{GAME_NAME, PlayerPosition};
 
+mod doors;
 mod rsi;
 mod tiles;
 use ssr_protocol::net::GameChannel;
@@ -78,13 +79,21 @@ fn main() {
             count_replicated,
             tiles::render_map_chunks,
             tiles::camera_edge_scroll,
+            doors::spawn_door_visuals,
+            doors::update_door_visuals,
+            doors::click_interact,
+            doors::auto_interact,
         ),
     );
     // Регистрация реплицируемых компонентов — одинакова на сервере и клиенте (T1.3).
+    // ВАЖНО: порядок регистрации должен совпадать с сервером (иначе replicon
+    // паникует «FnsId should be registered first»): PlayerPosition, TileChunkData, Door.
     app.component::<PlayerPosition>().replicate();
     // Чанки карты приходят с сервера (T2.3).
     app.component::<ssr_core::tiles::TileChunkData>()
         .replicate();
+    // Двери: состояние реплицируется сервером (T3.1).
+    app.component::<ssr_core::Door>().replicate();
     app.run();
 }
 
@@ -158,8 +167,9 @@ fn input_direction(input: &ButtonInput<KeyCode>) -> Vec2 {
 /// прийти до создания сущности игрока на сервере — актуальный ввод самолечится.
 /// Сжатие до тик-рейта сети сделаем в T1.4.
 ///
-/// SSR_AUTO_WALK=1 — тестовый режим: первые 3 секунды после подключения клиент
-/// «держит вправо» (затем отдаёт приоритет клавиатуре). Пригодится ботам в T6.1.
+/// SSR_AUTO_WALK=1 — тестовый режим: после подключения клиент «держит вправо»
+/// SSR_AUTO_WALK_MS миллисекунд (по умолчанию 3000; короткое значение оставляет
+/// игрока у двери для тестов взаимодействия). Пригодится ботам в T6.1.
 fn send_input(
     input: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
@@ -170,7 +180,13 @@ fn send_input(
     if connected.iter().next().is_some() {
         *connected_elapsed += time.delta_secs();
     }
-    let direction = if std::env::var_os("SSR_AUTO_WALK").is_some() && *connected_elapsed < 3.0 {
+    let walk_secs = std::env::var("SSR_AUTO_WALK_MS")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .map(|ms| ms / 1000.0)
+        .unwrap_or(3.0);
+    let direction = if std::env::var_os("SSR_AUTO_WALK").is_some() && *connected_elapsed < walk_secs
+    {
         Vec2::X
     } else {
         input_direction(&input)

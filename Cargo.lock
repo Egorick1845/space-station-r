@@ -7959,6 +7959,7 @@ name = "ssr-client"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "bevy_replicon",
  "image",
  "lightyear",
  "ssr-core",

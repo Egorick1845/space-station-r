@@ -9,6 +9,7 @@ ssr-core = { workspace = true }
 ssr-protocol = { workspace = true, features = ["net"] }
 bevy = { workspace = true }
 lightyear = { workspace = true }
+bevy_replicon = { workspace = true }
 tracing = { workspace = true }
 walkdir = { workspace = true }
 image = { workspace = true }
