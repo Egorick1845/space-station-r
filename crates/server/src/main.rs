@@ -19,6 +19,7 @@ use bevy::prelude::*;
 use lightyear::connection::server::Start;
 use lightyear::prelude::server::*;
 use lightyear::prelude::*;
+use ssr_core::inventory::{Inventory, Item, SLOT_ANY};
 use ssr_core::tiles::{MapFile, TileChunkData, TileType};
 use ssr_core::{
     CHUNK_UNITS, Door, INTERACT_RANGE, PLAYER_MOVE_SPEED, PlayerPosition, TILE_SIZE, chunk_coords,
@@ -107,6 +108,9 @@ fn main() {
     app.component::<TileChunkData>().replicate();
     // Двери: сервер-авторитарное состояние (T3.1).
     app.component::<Door>().replicate();
+    // Инвентарь и предметы (T3.2). Порядок регистрации обязан совпадать с клиентом!
+    app.component::<Inventory>().replicate();
+    app.component::<Item>().replicate();
     app.run();
 }
 
@@ -298,6 +302,7 @@ fn handle_client_messages(
     mut inputs: Query<&mut PlayerInput>,
     positions: Query<&PlayerPosition>,
     mut doors: Query<&mut Door>,
+    mut inventories: Query<&mut Inventory>,
     mut players: ResMut<Players>,
 ) {
     let mut connected: Vec<(Entity, String)> = Vec::new();
@@ -335,6 +340,102 @@ fn handle_client_messages(
                             tracing::warn!(player = ?entry.player, error = %e, "no PlayerInput")
                         }
                     }
+                }
+                ClientMessage::TransferItem {
+                    item,
+                    to_slot,
+                    target_player,
+                } => {
+                    // Перенос предмета между инвентарями (T3.2), сервер-авторитарно:
+                    // предмет должен лежать у отправителя, получатель — рядом.
+                    let Some(sender_entry) = players.entry_by_link_mut(link_entity.to_bits())
+                    else {
+                        continue;
+                    };
+                    let sender_player = sender_entry.player;
+                    let Ok(sender_position) = positions.get(sender_player) else {
+                        continue;
+                    };
+
+                    let receiver_player = if target_player == 0 {
+                        sender_player
+                    } else {
+                        let Some(target) = Entity::try_from_bits(target_player) else {
+                            tracing::warn!(bits = target_player, "transfer: invalid target bits");
+                            continue;
+                        };
+                        if inventories.get(target).is_err() {
+                            tracing::warn!(target = ?target, "transfer: target has no inventory");
+                            continue;
+                        }
+                        // Получатель должен быть рядом (радиус взаимодействия).
+                        let Ok(target_position) = positions.get(target) else {
+                            continue;
+                        };
+                        let dx = target_position.0[0] - sender_position.0[0];
+                        let dy = target_position.0[1] - sender_position.0[1];
+                        if (dx * dx + dy * dy).sqrt() > INTERACT_RANGE + 32.0 {
+                            tracing::warn!(target = ?target, "transfer: too far");
+                            continue;
+                        }
+                        target
+                    };
+
+                    if receiver_player == sender_player {
+                        // Перекладывание внутри своего инвентаря.
+                        let Ok(mut inventory) = inventories.get_mut(sender_player) else {
+                            continue;
+                        };
+                        if !inventory.contains(item) {
+                            tracing::warn!(item, "transfer: item is not in sender inventory");
+                            continue;
+                        }
+                        let Some(from) = inventory.slot_of(item) else {
+                            continue;
+                        };
+                        if to_slot == SLOT_ANY || to_slot == from {
+                            continue;
+                        }
+                        inventory.take(item);
+                        if !inventory.put(to_slot, item) {
+                            // Целевой слот занят — возвращаем предмет на место.
+                            inventory.put(from, item);
+                            tracing::warn!(slot = to_slot, "transfer: slot busy");
+                            continue;
+                        }
+                        tracing::info!(item, from, to = to_slot, "item moved");
+                        continue;
+                    }
+
+                    // Перенос другому игроку: оба инвентаря берём разом.
+                    let Ok([mut sender_inventory, mut receiver_inventory]) =
+                        inventories.get_many_mut([sender_player, receiver_player])
+                    else {
+                        continue;
+                    };
+                    if !sender_inventory.contains(item) {
+                        tracing::warn!(item, "transfer: item is not in sender inventory");
+                        continue;
+                    }
+                    let slot = if to_slot == SLOT_ANY {
+                        receiver_inventory.first_empty()
+                    } else {
+                        Some(to_slot)
+                    };
+                    let Some(slot) = slot else {
+                        tracing::warn!(target = ?receiver_player, "transfer: no free slot");
+                        continue;
+                    };
+                    if !receiver_inventory.put(slot, item) {
+                        tracing::warn!(slot, "transfer: slot busy");
+                        continue;
+                    }
+                    sender_inventory.take(item);
+                    tracing::info!(
+                        item, slot,
+                        from = ?sender_player, to = ?receiver_player,
+                        "item transferred"
+                    );
                 }
                 ClientMessage::Interact {
                     entity: target_bits,
@@ -393,6 +494,22 @@ fn handle_client_messages(
         tracing::info!(name, spawn = ?spawn, "player spawned");
         // Игровая сущность игрока: динамическое тело (T2.2), позиция реплицируется
         // клиентам из интереса (T1.3/T1.4).
+        // Демо-предметы (T3.2): три лома — до спавна игрока, чтобы инвентарь
+        // был заполнен сразу (commands отложены, get_mut после spawn не сработал бы).
+        let mut inventory = Inventory::default();
+        for _ in 0..3 {
+            let item = commands
+                .spawn((
+                    Item {
+                        name: "Crowbar".to_string(),
+                    },
+                    Replicate::to_clients(NetworkTarget::All),
+                    Rooms::default(),
+                ))
+                .id();
+            inventory.put_first_empty(item.to_bits());
+        }
+
         let player = commands
             .spawn((
                 PlayerPosition([spawn.0, spawn.1]),
@@ -403,6 +520,7 @@ fn handle_client_messages(
                 Collider::circle(16.0),
                 Position(Vector::new(spawn.0, spawn.1)),
                 Rotation::default(),
+                inventory,
             ))
             .id();
 

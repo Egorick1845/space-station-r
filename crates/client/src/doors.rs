@@ -212,10 +212,15 @@ pub fn click_interact(
     windows: Query<&Window>,
     camera: Single<(&Camera, &GlobalTransform), With<Camera2d>>,
     doors: Query<(Entity, &Door)>,
+    held: Res<crate::inventory_ui::HeldItem>,
     entity_map: Option<Res<ServerEntityMap>>,
     mut senders: Query<&mut MessageSender<ClientMessage>, With<Connected>>,
 ) {
     if !buttons.just_pressed(MouseButton::Left) {
+        return;
+    }
+    // В руках предмет — клик адресован ему (передача игроку), не двери.
+    if held.0.is_some() {
         return;
     }
     let Ok(window) = windows.single() else {

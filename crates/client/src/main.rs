@@ -18,6 +18,7 @@ use lightyear::prelude::*;
 use ssr_core::{GAME_NAME, PlayerPosition};
 
 mod doors;
+mod inventory_ui;
 mod lobby;
 mod rsi;
 mod tiles;
@@ -66,6 +67,8 @@ fn main() {
     app.init_resource::<PlayerEntity>();
     app.init_resource::<tiles::ChunkRenderState>();
     app.init_resource::<lobby::LobbyState>();
+    app.init_resource::<inventory_ui::HeldItem>();
+    app.init_resource::<inventory_ui::OwnPlayerEntity>();
     // RsiRegistry строится сразу после DefaultPlugins: нужен и игроку (обезьяна),
     // и дверям (closed/open) уже на Startup.
     let rsi_root = Path::new(&assets_file_path()).join("sprites/ss14");
@@ -93,6 +96,13 @@ fn main() {
             doors::click_interact,
             doors::auto_interact,
             doors::hover_outline,
+            inventory_ui::resolve_own_player,
+            inventory_ui::spawn_remote_players,
+            inventory_ui::sync_remote_players,
+            inventory_ui::render_inventory_panel,
+            inventory_ui::inventory_slot_click,
+            inventory_ui::inventory_click_transfer,
+            inventory_ui::inventory_test_mode,
         )
             .run_if(in_game),
     );
@@ -124,6 +134,10 @@ fn main() {
         .replicate();
     // Двери: состояние реплицируется сервером (T3.1).
     app.component::<ssr_core::Door>().replicate();
+    // Инвентарь и предметы (T3.2). Порядок обязан совпадать с сервером!
+    app.component::<ssr_core::inventory::Inventory>()
+        .replicate();
+    app.component::<ssr_core::inventory::Item>().replicate();
     app.run();
 }
 
@@ -324,7 +338,7 @@ fn receive_server(
 }
 
 /// Клиентская сущность своего игрока: bits из Welcome → ServerEntityMap → клиент.
-fn own_player_entity(
+pub(crate) fn own_player_entity(
     player_entity: &PlayerEntity,
     entity_map: &Option<Res<ServerEntityMap>>,
 ) -> Option<Entity> {
