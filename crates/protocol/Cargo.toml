@@ -5,3 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+serde = { workspace = true }
+
+[dev-dependencies]
+postcard = { workspace = true, features = ["alloc"] }
