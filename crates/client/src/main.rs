@@ -67,8 +67,8 @@ fn main() {
     app.init_resource::<PlayerEntity>();
     app.init_resource::<tiles::ChunkRenderState>();
     app.init_resource::<lobby::LobbyState>();
-    app.init_resource::<inventory_ui::HeldItem>();
     app.init_resource::<inventory_ui::OwnPlayerEntity>();
+    app.init_resource::<inventory_ui::ActionMenu>();
     // RsiRegistry строится сразу после DefaultPlugins: нужен и игроку (обезьяна),
     // и дверям (closed/open) уже на Startup.
     let rsi_root = Path::new(&assets_file_path()).join("sprites/ss14");
@@ -93,16 +93,28 @@ fn main() {
             camera_follow_player,
             doors::spawn_door_visuals,
             doors::update_door_visuals,
-            doors::click_interact,
             doors::auto_interact,
             doors::hover_outline,
+        )
+            .run_if(in_game),
+    );
+    app.add_systems(
+        Update,
+        (
             inventory_ui::resolve_own_player,
             inventory_ui::spawn_remote_players,
             inventory_ui::sync_remote_players,
+            inventory_ui::sync_inhand_items,
             inventory_ui::render_inventory_panel,
+            inventory_ui::render_hands_panel,
+            inventory_ui::render_action_menu,
             inventory_ui::inventory_slot_click,
-            inventory_ui::inventory_click_transfer,
+            inventory_ui::hands_ui_click,
+            inventory_ui::world_click,
+            inventory_ui::action_menu_click,
             inventory_ui::inventory_test_mode,
+            inventory_ui::build_test_mode,
+            inventory_ui::attack_test_mode,
         )
             .run_if(in_game),
     );
@@ -138,6 +150,10 @@ fn main() {
     app.component::<ssr_core::inventory::Inventory>()
         .replicate();
     app.component::<ssr_core::inventory::Item>().replicate();
+    // Руки/здоровье/удержание (T3.3+). Тот же порядок, что у сервера!
+    app.component::<ssr_core::inventory::Hands>().replicate();
+    app.component::<ssr_core::inventory::Health>().replicate();
+    app.component::<ssr_core::inventory::HeldBy>().replicate();
     app.run();
 }
 
@@ -284,9 +300,14 @@ fn send_input(
             Some(Vec2::new(x.trim().parse().ok()?, y.trim().parse().ok()?))
         })
         .unwrap_or(Vec2::X);
+    // SSR_BUILD_TEST: с 9-й по 12-ю секунду клиент идёт на восток — в новую стену.
+    let build_test_walk =
+        std::env::var_os("SSR_BUILD_TEST").is_some() && (9.0..12.0).contains(&*connected_elapsed);
     let direction = if std::env::var_os("SSR_AUTO_WALK").is_some() && *connected_elapsed < walk_secs
     {
         walk_dir
+    } else if build_test_walk {
+        Vec2::X
     } else if locked {
         Vec2::ZERO
     } else {
@@ -311,6 +332,7 @@ fn input_ready(player_entity: &PlayerEntity) -> bool {
 fn receive_server(
     mut receivers: Query<&mut MessageReceiver<ServerMessage>, With<Connected>>,
     mut player_entity: ResMut<PlayerEntity>,
+    mut menu: ResMut<inventory_ui::ActionMenu>,
 ) {
     for mut receiver in receivers.iter_mut() {
         for message in receiver.receive() {
@@ -330,6 +352,13 @@ fn receive_server(
                     tracing::info!(player_entity = entity, "Welcome accepted");
                 }
                 ServerMessage::WorldState { .. } => {} // полный снимок — T1.4
+                ServerMessage::Actions { options } => {
+                    // ВАЖНО: список действий обрабатывается ЗДЕСЬ же, потому что
+                    // MessageReceiver осушается одним receive() — вторая система
+                    // отбирала бы у этой сообщения (включая Welcome).
+                    tracing::info!(count = options.len(), "actions received");
+                    menu.options = options;
+                }
                 ServerMessage::EntityDelta { .. } => {} // дельты позиций — T1.3/T1.4
                 ServerMessage::Event { kind } => tracing::info!(kind, "server event"),
             }

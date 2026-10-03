@@ -84,6 +84,99 @@ impl Inventory {
     }
 }
 
+/// Рук у персонажа (как в SS14: две руки, активная переключается).
+pub const HAND_SLOTS: usize = 2;
+
+/// Руки персонажа (SS14-модель): активная рука + предметы в руках.
+/// Действия (атака, инструменты, стройка) идут через АКТИВНУЮ руку (ADR-3).
+#[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Hands {
+    pub active: u8,
+    pub slots: Vec<Option<u64>>,
+}
+
+impl Default for Hands {
+    fn default() -> Self {
+        Self {
+            active: 0,
+            slots: vec![None; HAND_SLOTS],
+        }
+    }
+}
+
+impl Hands {
+    /// Предмет в активной руке.
+    pub fn active_item(&self) -> Option<u64> {
+        self.slots.get(self.active as usize).copied().flatten()
+    }
+
+    /// Переключить активную руку.
+    pub fn switch(&mut self) {
+        self.active = (self.active + 1) % HAND_SLOTS as u8;
+    }
+
+    /// Взять предмет в активную руку (если рука свободна).
+    pub fn take_in_active(&mut self, item: u64) -> bool {
+        let index = self.active as usize;
+        if self.slots.get(index).copied().flatten().is_some() {
+            return false;
+        }
+        self.slots[index] = Some(item);
+        true
+    }
+
+    /// Забрать предмет из любой руки.
+    pub fn take(&mut self, item: u64) -> bool {
+        match self.slots.iter().position(|s| *s == Some(item)) {
+            Some(index) => {
+                self.slots[index] = None;
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn has(&self, item: u64) -> bool {
+        self.slots.contains(&Some(item))
+    }
+
+    pub fn item_in_hand(&self, hand: u8) -> Option<u64> {
+        self.slots.get(hand as usize).copied().flatten()
+    }
+}
+
+/// Здоровье (T4.1, минимум для атаки): урон снижает, смерть — возврат на спавн.
+#[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Health {
+    pub current: i32,
+    pub max: i32,
+}
+
+impl Default for Health {
+    fn default() -> Self {
+        Self {
+            current: 100,
+            max: 100,
+        }
+    }
+}
+
+impl Health {
+    /// Нанести урон; true — цель погибла.
+    pub fn damage(&mut self, amount: i32) -> bool {
+        self.current = (self.current - amount).max(0);
+        self.current == 0
+    }
+}
+
+/// Предмет удерживается игроком (руки/рюкзак): реплицируется, чтобы клиент
+/// рисовал предмет в руке владельца (SS14-модель, T3.3+).
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+pub struct HeldBy {
+    /// bits серверной сущности игрока; `0` — предмет ничей (в мире).
+    pub player: u64,
+}
+
 /// Предмет-сущность (T3.2): имя до появления прототипов в игре (T5.2).
 #[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 pub struct Item {
@@ -115,6 +208,31 @@ mod tests {
         assert!(!inv.contains(42));
         assert_eq!(inv.first_empty(), Some(1));
         assert!(!inv.take(42), "повторное изъятие не проходит");
+    }
+
+    #[test]
+    fn hands_basic() {
+        let mut hands = Hands::default();
+        assert_eq!(hands.active_item(), None);
+        assert!(hands.take_in_active(1));
+        assert!(!hands.take_in_active(2), "активная рука занята");
+        hands.switch();
+        assert!(hands.take_in_active(2));
+        assert_eq!(hands.active_item(), Some(2));
+        assert!(hands.has(1) && hands.has(2));
+        assert!(hands.take(1));
+        assert!(!hands.has(1));
+        hands.switch();
+        assert_eq!(hands.active_item(), None);
+    }
+
+    #[test]
+    fn health_damage() {
+        let mut health = Health::default();
+        assert!(!health.damage(40));
+        assert_eq!(health.current, 60);
+        assert!(health.damage(999));
+        assert_eq!(health.current, 0);
     }
 
     #[test]

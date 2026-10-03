@@ -203,55 +203,6 @@ fn advance_anim(
     apply_door_state(sprite, rsi, frame.min(frames.saturating_sub(1)));
 }
 
-/// Клик левой кнопкой по двери в зоне попадания → `Interact` на сервер.
-///
-/// Клиентская проверка — только выбор цели (ближайшая дверь к курсору);
-/// радиус взаимодействия (1.5 тайла) проверяет сервер.
-pub fn click_interact(
-    buttons: Res<ButtonInput<MouseButton>>,
-    windows: Query<&Window>,
-    camera: Single<(&Camera, &GlobalTransform), With<Camera2d>>,
-    doors: Query<(Entity, &Door)>,
-    held: Res<crate::inventory_ui::HeldItem>,
-    entity_map: Option<Res<ServerEntityMap>>,
-    mut senders: Query<&mut MessageSender<ClientMessage>, With<Connected>>,
-) {
-    if !buttons.just_pressed(MouseButton::Left) {
-        return;
-    }
-    // В руках предмет — клик адресован ему (передача игроку), не двери.
-    if held.0.is_some() {
-        return;
-    }
-    let Ok(window) = windows.single() else {
-        return;
-    };
-    let Some(cursor) = window.cursor_position() else {
-        return;
-    };
-    let (camera, camera_transform) = *camera;
-    let Ok(world) = camera.viewport_to_world_2d(camera_transform, cursor) else {
-        return;
-    };
-
-    let Some(door_entity) = nearest_door(&doors, world) else {
-        return;
-    };
-    send_interact(door_entity, &entity_map, &mut senders);
-}
-
-/// Ближайшая дверь к точке клика в пределах [`CLICK_RADIUS`].
-fn nearest_door(doors: &Query<(Entity, &Door)>, point: Vec2) -> Option<Entity> {
-    doors
-        .iter()
-        .filter_map(|(entity, door)| {
-            let distance = Vec2::from_array(door.position).distance(point);
-            (distance <= CLICK_RADIUS).then_some((entity, distance))
-        })
-        .min_by(|a, b| a.1.total_cmp(&b.1))
-        .map(|(entity, _)| entity)
-}
-
 /// Отправляет Interact для клиентской сущности двери (маппинг → серверные bits).
 pub fn send_interact(
     door_entity: Entity,

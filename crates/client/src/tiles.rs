@@ -204,6 +204,7 @@ pub fn render_map_chunks(
     mut images: ResMut<Assets<Image>>,
     visuals: Option<Res<TileVisuals>>,
     chunks: Query<(Entity, &TileChunkData)>,
+    changed: Query<(), Changed<TileChunkData>>,
     visuals_q: Query<(Entity, &TileChunkVisual)>,
     mut state: ResMut<ChunkRenderState>,
 ) {
@@ -213,6 +214,11 @@ pub fn render_map_chunks(
     let map: HashMap<(i32, i32), &TileChunkData> =
         chunks.iter().map(|(_, data)| (data.coords, data)).collect();
     let coords: BTreeSet<(i32, i32)> = map.keys().copied().collect();
+
+    // Правка тайла (T3.3) прилетает как изменение компонента чанка — перерисовываем.
+    if !changed.is_empty() {
+        state.dirty = true;
+    }
 
     if coords != state.seen {
         // Набор чанков изменился: ждём следующий кадр (возможно, придут соседи).

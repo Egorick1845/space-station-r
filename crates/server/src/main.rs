@@ -19,15 +19,15 @@ use bevy::prelude::*;
 use lightyear::connection::server::Start;
 use lightyear::prelude::server::*;
 use lightyear::prelude::*;
-use ssr_core::inventory::{Inventory, Item, SLOT_ANY};
+use ssr_core::inventory::{Hands, Health, HeldBy, Inventory, Item, SLOT_ANY};
 use ssr_core::tiles::{MapFile, TileChunkData, TileType};
 use ssr_core::{
     CHUNK_UNITS, Door, INTERACT_RANGE, PLAYER_MOVE_SPEED, PlayerPosition, TILE_SIZE, chunk_coords,
 };
 use ssr_protocol::net::GameChannel;
 use ssr_protocol::{
-    ClientMessage, DEFAULT_SERVER_PORT, PROTOCOL_VERSION, ProtocolPlugin, ServerMessage,
-    is_compatible,
+    ActionKind, ActionOption, ClientMessage, DEFAULT_SERVER_PORT, PROTOCOL_VERSION, ProtocolPlugin,
+    ServerMessage, is_compatible,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -77,6 +77,8 @@ fn main() {
     app.init_resource::<TickState>();
     app.init_resource::<ChunkRooms>();
     app.init_resource::<SpawnCursor>();
+    app.init_resource::<MapIndex>();
+    app.init_resource::<ActionQueue>();
     app.add_systems(Startup, startup);
     app.add_systems(
         Startup,
@@ -94,6 +96,7 @@ fn main() {
         (
             tick_logger,
             handle_client_messages,
+            process_actions,
             movement,
             sync_replicated_position,
             update_client_rooms,
@@ -111,6 +114,10 @@ fn main() {
     // Инвентарь и предметы (T3.2). Порядок регистрации обязан совпадать с клиентом!
     app.component::<Inventory>().replicate();
     app.component::<Item>().replicate();
+    // Руки/здоровье/удержание (T3.3+). Тот же порядок, что у клиента!
+    app.component::<Hands>().replicate();
+    app.component::<Health>().replicate();
+    app.component::<HeldBy>().replicate();
     app.run();
 }
 
@@ -162,6 +169,7 @@ fn load_map(
     mut commands: Commands,
     mut chunk_rooms: ResMut<ChunkRooms>,
     mut allocator: ResMut<RoomAllocator>,
+    mut map_index: ResMut<MapIndex>,
 ) {
     // SSR_MAP=imported_aspid.ron — выбрать карту (файлы в assets/maps/).
     let map_name = std::env::var("SSR_MAP").unwrap_or_else(|_| "test.ron".to_string());
@@ -176,11 +184,14 @@ fn load_map(
 
     for data in &chunks {
         let room = chunk_rooms.room_for(data.coords, &mut allocator);
-        commands.spawn((
-            data.clone(),
-            Replicate::to_clients(NetworkTarget::All),
-            Rooms::single(room),
-        ));
+        let entity = commands
+            .spawn((
+                data.clone(),
+                Replicate::to_clients(NetworkTarget::All),
+                Rooms::single(room),
+            ))
+            .id();
+        map_index.chunks.insert(data.coords, entity);
     }
     // Двери (T3.1): статичные тела, закрытые; состояние реплицируется клиентам.
     for &(x, y) in &file.doors {
@@ -242,6 +253,26 @@ impl Players {
     }
 }
 
+/// Индекс чанков карты: координаты → сущность (для правки тайлов, T3.3)
+/// и координаты → сущность коллайдеров чанка (пересобирается при изменениях).
+#[derive(Resource, Default)]
+struct MapIndex {
+    chunks: HashMap<(i32, i32), Entity>,
+    colliders: HashMap<(i32, i32), Entity>,
+}
+
+/// Очередь действий игроков (T3.3+): и прямые сообщения (Interact/UseItem/Attack),
+/// и выбранные из меню verbs. Обрабатывается одной системой, чтобы не нарушать
+/// единственную точку чтения сообщений (handle_client_messages).
+#[derive(Resource, Default)]
+struct ActionQueue(Vec<(Entity, QueuedAction)>);
+
+/// Элемент очереди: выполнить действие или прислать список доступных (verbs).
+enum QueuedAction {
+    Do(ActionKind),
+    RequestActions { entity: u64, tx: i32, ty: i32 },
+}
+
 /// Чанк → комната (T1.4). Комнаты выделяются лениво из RoomAllocator.
 #[derive(Resource, Default)]
 struct ChunkRooms {
@@ -287,11 +318,10 @@ fn on_link_disconnected(
 }
 
 /// Единая точка приёма сообщений клиента: рукопожатие (Connect/Welcome, T1.2)
-/// и ввод (Input → PlayerInput, T1.3).
-///
-/// ВАЖНО: MessageReceiver осушается одним вызовом receive(), поэтому все
-/// обработчики сообщений клиента живут в этой одной системе — иначе системы
-/// конкурировали бы за один буфер и теряли сообщения.
+/// Приём сообщений клиента (единственная точка чтения) + операции над руками
+/// (SS14-модель): переключить руку, взять из рюкзака, убрать в рюкзак. Всё
+/// исполняемое (атака, двери, применение предметов, verbs) уходит в очередь
+/// [`ActionQueue`] и обрабатывается одной системой [`process_actions`].
 #[allow(clippy::too_many_arguments)]
 fn handle_client_messages(
     mut commands: Commands,
@@ -301,8 +331,9 @@ fn handle_client_messages(
     mut senders: Query<(Entity, &mut MessageSender<ServerMessage>), With<Connected>>,
     mut inputs: Query<&mut PlayerInput>,
     positions: Query<&PlayerPosition>,
-    mut doors: Query<&mut Door>,
     mut inventories: Query<&mut Inventory>,
+    mut hands: Query<&mut Hands>,
+    mut actions: ResMut<ActionQueue>,
     mut players: ResMut<Players>,
 ) {
     let mut connected: Vec<(Entity, String)> = Vec::new();
@@ -314,7 +345,6 @@ fn handle_client_messages(
                     name,
                 } => {
                     if !is_compatible(protocol_version) {
-                        // Несовпадение версии = отказ соединения (PLAN.md T1.1).
                         tracing::warn!(
                             client = ?remote_id,
                             peer_version = protocol_version,
@@ -327,18 +357,12 @@ fn handle_client_messages(
                 }
                 ClientMessage::Input { movement } => {
                     let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {
-                        // Штатный случай: ввод пришёл раньше Connect (спавна игрока).
                         tracing::debug!(link = ?link_entity, "input before handshake");
                         continue;
                     };
                     match inputs.get_mut(entry.player) {
-                        Ok(mut input) => {
-                            input.0 = movement;
-                            tracing::debug!(player = ?entry.player, input = ?movement, "input applied");
-                        }
-                        Err(e) => {
-                            tracing::warn!(player = ?entry.player, error = %e, "no PlayerInput")
-                        }
+                        Ok(mut input) => input.0 = movement,
+                        Err(e) => tracing::warn!(error = %e, "no PlayerInput"),
                     }
                 }
                 ClientMessage::TransferItem {
@@ -346,8 +370,6 @@ fn handle_client_messages(
                     to_slot,
                     target_player,
                 } => {
-                    // Перенос предмета между инвентарями (T3.2), сервер-авторитарно:
-                    // предмет должен лежать у отправителя, получатель — рядом.
                     let Some(sender_entry) = players.entry_by_link_mut(link_entity.to_bits())
                     else {
                         continue;
@@ -356,7 +378,6 @@ fn handle_client_messages(
                     let Ok(sender_position) = positions.get(sender_player) else {
                         continue;
                     };
-
                     let receiver_player = if target_player == 0 {
                         sender_player
                     } else {
@@ -368,7 +389,6 @@ fn handle_client_messages(
                             tracing::warn!(target = ?target, "transfer: target has no inventory");
                             continue;
                         }
-                        // Получатель должен быть рядом (радиус взаимодействия).
                         let Ok(target_position) = positions.get(target) else {
                             continue;
                         };
@@ -380,9 +400,7 @@ fn handle_client_messages(
                         }
                         target
                     };
-
                     if receiver_player == sender_player {
-                        // Перекладывание внутри своего инвентаря.
                         let Ok(mut inventory) = inventories.get_mut(sender_player) else {
                             continue;
                         };
@@ -398,7 +416,6 @@ fn handle_client_messages(
                         }
                         inventory.take(item);
                         if !inventory.put(to_slot, item) {
-                            // Целевой слот занят — возвращаем предмет на место.
                             inventory.put(from, item);
                             tracing::warn!(slot = to_slot, "transfer: slot busy");
                             continue;
@@ -406,8 +423,6 @@ fn handle_client_messages(
                         tracing::info!(item, from, to = to_slot, "item moved");
                         continue;
                     }
-
-                    // Перенос другому игроку: оба инвентаря берём разом.
                     let Ok([mut sender_inventory, mut receiver_inventory]) =
                         inventories.get_many_mut([sender_player, receiver_player])
                     else {
@@ -431,59 +446,134 @@ fn handle_client_messages(
                         continue;
                     }
                     sender_inventory.take(item);
-                    tracing::info!(
-                        item, slot,
-                        from = ?sender_player, to = ?receiver_player,
-                        "item transferred"
-                    );
+                    tracing::info!(item, slot, from = ?sender_player, to = ?receiver_player, "item transferred");
                 }
-                ClientMessage::Interact {
-                    entity: target_bits,
-                } => {
-                    // Взаимодействие (T3.1): цель должна быть дверью в радиусе
-                    // INTERACT_RANGE (1.5 тайла) от игрока — сервер-авторитарно.
+                ClientMessage::SwitchHand => {
                     let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {
                         continue;
                     };
-                    let player_entity = entry.player;
-                    let Some(target) = Entity::try_from_bits(target_bits) else {
-                        tracing::warn!(bits = target_bits, "interact: invalid entity bits");
+                    if let Ok(mut hand) = hands.get_mut(entry.player) {
+                        hand.switch();
+                        tracing::info!(active = hand.active, "hand switched");
+                    }
+                }
+                ClientMessage::TakeInHand { slot } => {
+                    let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {
                         continue;
                     };
-                    let Ok(player_position) = positions.get(player_entity) else {
+                    let player = entry.player;
+                    let Ok(mut inventory) = inventories.get_mut(player) else {
                         continue;
                     };
-                    let Ok(mut door) = doors.get_mut(target) else {
-                        tracing::debug!(target = ?target, "interact: target is not a door");
+                    let Ok(mut hand) = hands.get_mut(player) else {
                         continue;
                     };
-                    let dx = door.position[0] - player_position.0[0];
-                    let dy = door.position[1] - player_position.0[1];
-                    let distance = (dx * dx + dy * dy).sqrt();
-                    if distance > INTERACT_RANGE {
-                        tracing::warn!(
-                            player = ?player_entity,
-                            distance,
-                            range = INTERACT_RANGE,
-                            "interact: too far"
-                        );
+                    let Some(item) = inventory.slots.get(slot as usize).copied().flatten() else {
+                        continue;
+                    };
+                    inventory.take(item);
+                    if !hand.take_in_active(item) {
+                        inventory.put(slot, item);
+                        tracing::warn!(slot, "take in hand: active hand busy");
                         continue;
                     }
-                    door.open = !door.open;
-                    // Открытая дверь пропускает: коллайдер отключается маркером.
-                    if door.open {
-                        commands.entity(target).insert(ColliderDisabled);
-                    } else {
-                        commands.entity(target).remove::<ColliderDisabled>();
+                    tracing::info!(item, hand = hand.active, "item taken in hand");
+                }
+                ClientMessage::MoveHandToInventory { item } => {
+                    let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {
+                        continue;
+                    };
+                    let player = entry.player;
+                    let Ok(mut inventory) = inventories.get_mut(player) else {
+                        continue;
+                    };
+                    let Ok(mut hand) = hands.get_mut(player) else {
+                        continue;
+                    };
+                    if !hand.take(item) {
+                        continue;
                     }
-                    tracing::info!(door = ?target, open = door.open, "door toggled");
+                    match inventory.put_first_empty(item) {
+                        Some(slot) => tracing::info!(item, slot, "item stowed"),
+                        None => {
+                            hand.take_in_active(item);
+                            tracing::warn!(item, "stow: inventory full");
+                        }
+                    }
+                }
+                ClientMessage::DropHand => {
+                    let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {
+                        continue;
+                    };
+                    let player = entry.player;
+                    let Ok(mut hand) = hands.get_mut(player) else {
+                        continue;
+                    };
+                    let Some(item) = hand.active_item() else {
+                        continue;
+                    };
+                    hand.take(item);
+                    let Ok(mut inventory) = inventories.get_mut(player) else {
+                        hand.take_in_active(item);
+                        continue;
+                    };
+                    match inventory.put_first_empty(item) {
+                        Some(slot) => tracing::info!(item, slot, "item stowed from hand"),
+                        None => {
+                            hand.take_in_active(item);
+                            tracing::warn!(item, "stow: inventory full");
+                        }
+                    }
+                }
+                ClientMessage::Attack { target } => {
+                    let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {
+                        continue;
+                    };
+                    actions.0.push((
+                        entry.player,
+                        QueuedAction::Do(ActionKind::Attack { target }),
+                    ));
+                }
+                ClientMessage::UseItem { item, tx, ty } => {
+                    let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {
+                        continue;
+                    };
+                    actions.0.push((
+                        entry.player,
+                        QueuedAction::Do(ActionKind::UseItem { item, tx, ty }),
+                    ));
+                }
+                ClientMessage::Interact { entity } => {
+                    let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {
+                        continue;
+                    };
+                    actions.0.push((
+                        entry.player,
+                        QueuedAction::Do(ActionKind::Interact { entity }),
+                    ));
+                }
+                ClientMessage::RequestActions { entity, tx, ty } => {
+                    let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {
+                        continue;
+                    };
+                    actions.0.push((
+                        entry.player,
+                        QueuedAction::RequestActions { entity, tx, ty },
+                    ));
+                }
+                ClientMessage::PerformAction { action } => {
+                    let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {
+                        continue;
+                    };
+                    actions.0.push((entry.player, QueuedAction::Do(action)));
                 }
             }
         }
     }
 
     for (link_entity, name) in connected {
-        // Игрок появляется на следующей точке спавна из файла карты (T2.4).
+        // Точка спавна — до создания сущности (id игрока сразу известен и нужен
+        // демо-предметам: commands отложены, но id уже зарезервирован).
         let spawn = if map.spawn_points.is_empty() {
             (0.0, 0.0)
         } else {
@@ -491,25 +581,6 @@ fn handle_client_messages(
             spawn_cursor.0 += 1;
             point
         };
-        tracing::info!(name, spawn = ?spawn, "player spawned");
-        // Игровая сущность игрока: динамическое тело (T2.2), позиция реплицируется
-        // клиентам из интереса (T1.3/T1.4).
-        // Демо-предметы (T3.2): три лома — до спавна игрока, чтобы инвентарь
-        // был заполнен сразу (commands отложены, get_mut после spawn не сработал бы).
-        let mut inventory = Inventory::default();
-        for _ in 0..3 {
-            let item = commands
-                .spawn((
-                    Item {
-                        name: "Crowbar".to_string(),
-                    },
-                    Replicate::to_clients(NetworkTarget::All),
-                    Rooms::default(),
-                ))
-                .id();
-            inventory.put_first_empty(item.to_bits());
-        }
-
         let player = commands
             .spawn((
                 PlayerPosition([spawn.0, spawn.1]),
@@ -520,18 +591,31 @@ fn handle_client_messages(
                 Collider::circle(16.0),
                 Position(Vector::new(spawn.0, spawn.1)),
                 Rotation::default(),
-                inventory,
+                Hands::default(),
+                Health::default(),
             ))
             .id();
+        let player_bits = player.to_bits();
+        tracing::info!(name, spawn = ?spawn, "player spawned");
 
-        if let Ok((_, mut sender)) = senders.get_mut(link_entity) {
-            sender.send::<GameChannel>(ServerMessage::Welcome {
-                player_entity: player.to_bits(),
-                protocol_version: PROTOCOL_VERSION,
-            });
+        // Демо-предметы: лом + два стальных листа; HeldBy — на игрока (SS14-модель).
+        let mut inventory = Inventory::default();
+        for item_name in ["Crowbar", "SteelSheet", "SteelSheet"] {
+            let item = commands
+                .spawn((
+                    Item {
+                        name: item_name.to_string(),
+                    },
+                    HeldBy {
+                        player: player_bits,
+                    },
+                    Replicate::to_clients(NetworkTarget::All),
+                    Rooms::default(),
+                ))
+                .id();
+            inventory.put_first_empty(item.to_bits());
         }
-
-        // Стартовый чанк (0,0): комнаты выделятся в update_client_rooms.
+        commands.entity(player).insert(inventory);
         players.entries.push(PlayerEntry {
             link: link_entity,
             name,
@@ -539,6 +623,13 @@ fn handle_client_messages(
             chunk: (0, 0),
             rooms: Vec::new(),
         });
+
+        if let Ok((_, mut sender)) = senders.get_mut(link_entity) {
+            sender.send::<GameChannel>(ServerMessage::Welcome {
+                player_entity: player_bits,
+                protocol_version: PROTOCOL_VERSION,
+            });
+        }
     }
 }
 
@@ -628,32 +719,318 @@ fn spawn_load_test(
     tracing::info!(count, "load test entities spawned");
 }
 
-/// Стены карты (T2.2/T2.3): для каждого чанка — одно статическое тело
-/// с составным коллайдером из тайлов-стен загруженной карты.
-fn spawn_walls(mut commands: Commands, map: Res<GameMap>) {
+/// Статическое тело-коллайдер одного чанка (стены тайлами, T2.2/T3.3).
+/// Возвращает None, если в чанке нет стен.
+fn spawn_chunk_collider(commands: &mut Commands, data: &TileChunkData) -> Option<Entity> {
     let tile = TILE_SIZE; // 32 юнита на тайл
-    let mut total = 0usize;
-    for data in &map.chunks {
-        let mut shapes = Vec::new();
-        for (index, tile_type) in data.tiles.iter().enumerate() {
-            if *tile_type != TileType::Wall {
-                continue;
-            }
-            let lx = index as i32 % 32;
-            let ly = index as i32 / 32;
-            let tx = data.coords.0 * 32 + lx;
-            let ty = data.coords.1 * 32 + ly;
-            // Центр тайла в мировых координатах (тело чанка стоит в origin).
-            let offset = Vector::new((tx as f32 + 0.5) * tile, (ty as f32 + 0.5) * tile);
-            shapes.push((offset, Rotation::default(), Collider::rectangle(tile, tile)));
-            total += 1;
-        }
-        if shapes.is_empty() {
+    let mut shapes = Vec::new();
+    for (index, tile_type) in data.tiles.iter().enumerate() {
+        if *tile_type != TileType::Wall {
             continue;
         }
-        commands.spawn((RigidBody::Static, Collider::compound(shapes)));
+        let lx = index as i32 % 32;
+        let ly = index as i32 / 32;
+        let tx = data.coords.0 * 32 + lx;
+        let ty = data.coords.1 * 32 + ly;
+        let offset = Vector::new((tx as f32 + 0.5) * tile, (ty as f32 + 0.5) * tile);
+        shapes.push((offset, Rotation::default(), Collider::rectangle(tile, tile)));
+    }
+    if shapes.is_empty() {
+        return None;
+    }
+    Some(
+        commands
+            .spawn((RigidBody::Static, Collider::compound(shapes)))
+            .id(),
+    )
+}
+
+/// Стены карты (T2.2/T2.3/T3.3): по телу на чанк, индекс — для пересборки при стройке.
+fn spawn_walls(mut commands: Commands, map: Res<GameMap>, mut index: ResMut<MapIndex>) {
+    let mut total = 0usize;
+    for data in &map.chunks {
+        if let Some(entity) = spawn_chunk_collider(&mut commands, data) {
+            index.colliders.insert(data.coords, entity);
+        }
+        total += data.tiles.iter().filter(|t| **t == TileType::Wall).count();
     }
     tracing::info!(walls = total, "map wall colliders spawned");
+}
+
+/// Обрабатывает очередь действий (T3.3+): атака, двери, применение предметов
+/// из активной руки и выдача списка контекстных действий (verbs).
+#[allow(clippy::too_many_arguments)]
+fn process_actions(
+    mut commands: Commands,
+    mut queue: ResMut<ActionQueue>,
+    mut index: ResMut<MapIndex>,
+    mut chunks: Query<&mut TileChunkData>,
+    mut bodies: Query<&mut Position>,
+    positions: Query<&PlayerPosition>,
+    mut inventories: Query<&mut Inventory>,
+    mut hands: Query<&mut Hands>,
+    mut healths: Query<&mut Health>,
+    mut doors: Query<&mut Door>,
+    items: Query<&Item>,
+    mut senders: Query<&mut MessageSender<ServerMessage>, With<Connected>>,
+    map: Res<GameMap>,
+    players: Res<Players>,
+) {
+    if queue.0.is_empty() {
+        return;
+    }
+    let pending = std::mem::take(&mut queue.0);
+    for (player, queued) in pending {
+        let action = match queued {
+            QueuedAction::Do(action) => action,
+            QueuedAction::RequestActions { entity, tx, ty } => {
+                let mut options: Vec<ActionOption> = Vec::new();
+                if entity != 0 {
+                    if let Some(target) = Entity::try_from_bits(entity) {
+                        if healths.get(target).is_ok() {
+                            options.push(ActionOption {
+                                label: "Ударить".into(),
+                                action: ActionKind::Attack { target: entity },
+                            });
+                        }
+                        if let Ok(door) = doors.get_mut(target) {
+                            options.push(ActionOption {
+                                label: if door.open {
+                                    "Закрыть"
+                                } else {
+                                    "Открыть"
+                                }
+                                .into(),
+                                action: ActionKind::Interact { entity },
+                            });
+                        }
+                    }
+                } else {
+                    let hand_item = hands.get(player).ok().and_then(|h| h.active_item());
+                    let item_name = hand_item
+                        .and_then(Entity::try_from_bits)
+                        .and_then(|e| items.get(e).ok())
+                        .map(|i| i.name.clone())
+                        .unwrap_or_default();
+                    let chunk_tiles = ssr_core::tiles::CHUNK_TILES as i32;
+                    let tile = index
+                        .chunks
+                        .get(&(tx.div_euclid(chunk_tiles), ty.div_euclid(chunk_tiles)))
+                        .and_then(|e| chunks.get(*e).ok())
+                        .map(|c| {
+                            let lx = (tx - tx.div_euclid(chunk_tiles) * chunk_tiles) as usize;
+                            let ly = (ty - ty.div_euclid(chunk_tiles) * chunk_tiles) as usize;
+                            c.tiles[ly * ssr_core::tiles::CHUNK_TILES as usize + lx]
+                        });
+                    if let (Some(item), Some(tile)) = (hand_item, tile) {
+                        if item_name == "SteelSheet" && tile == TileType::Floor {
+                            options.push(ActionOption {
+                                label: "Построить стену".into(),
+                                action: ActionKind::UseItem { item, tx, ty },
+                            });
+                        }
+                        if item_name == "Crowbar" && tile == TileType::Wall {
+                            options.push(ActionOption {
+                                label: "Разобрать стену".into(),
+                                action: ActionKind::UseItem { item, tx, ty },
+                            });
+                        }
+                    }
+                }
+                if !options.is_empty()
+                    && let Some(link) = players
+                        .entries
+                        .iter()
+                        .find(|e| e.player == player)
+                        .map(|e| e.link)
+                    && let Ok(mut sender) = senders.get_mut(link)
+                {
+                    sender.send::<GameChannel>(ServerMessage::Actions { options });
+                }
+                continue;
+            }
+        };
+        match action {
+            ActionKind::Attack { target } => {
+                let Some(target_entity) = Entity::try_from_bits(target) else {
+                    continue;
+                };
+                let Ok(player_position) = positions.get(player) else {
+                    continue;
+                };
+                let Ok(target_position) = positions.get(target_entity) else {
+                    tracing::warn!(?target_entity, "attack: target is not a player");
+                    continue;
+                };
+                let dx = target_position.0[0] - player_position.0[0];
+                let dy = target_position.0[1] - player_position.0[1];
+                if (dx * dx + dy * dy).sqrt() > INTERACT_RANGE + 32.0 {
+                    tracing::warn!(?target_entity, "attack: too far");
+                    continue;
+                }
+                let Ok(mut health) = healths.get_mut(target_entity) else {
+                    tracing::warn!(?target_entity, "attack: target has no health");
+                    continue;
+                };
+                // Урон по предмету в активной руке: лом — 15, кулак — 5 (T4.1-мини).
+                let weapon = hands
+                    .get(player)
+                    .ok()
+                    .and_then(|h| h.active_item())
+                    .and_then(Entity::try_from_bits)
+                    .and_then(|e| items.get(e).ok())
+                    .map(|i| i.name.clone());
+                let damage = if weapon.as_deref() == Some("Crowbar") {
+                    15
+                } else {
+                    5
+                };
+                let dead = health.damage(damage);
+                tracing::info!(
+                    ?player,
+                    ?target_entity,
+                    damage,
+                    hp = health.current,
+                    "attack hit"
+                );
+                if dead {
+                    health.current = health.max;
+                    let spawn = map.spawn_points.first().copied().unwrap_or((0.0, 0.0));
+                    if let Ok(mut body) = bodies.get_mut(target_entity) {
+                        body.0 = Vector::new(spawn.0, spawn.1);
+                    }
+                    tracing::info!(?target_entity, "player died and respawned");
+                }
+            }
+            ActionKind::Interact { entity } => {
+                let Some(target) = Entity::try_from_bits(entity) else {
+                    tracing::warn!(bits = entity, "interact: invalid entity bits");
+                    continue;
+                };
+                let Ok(player_position) = positions.get(player) else {
+                    continue;
+                };
+                let Ok(mut door) = doors.get_mut(target) else {
+                    tracing::debug!(target = ?target, "interact: target is not a door");
+                    continue;
+                };
+                let dx = door.position[0] - player_position.0[0];
+                let dy = door.position[1] - player_position.0[1];
+                if (dx * dx + dy * dy).sqrt() > INTERACT_RANGE {
+                    tracing::warn!(?player, "interact: too far");
+                    continue;
+                }
+                door.open = !door.open;
+                if door.open {
+                    commands.entity(target).insert(ColliderDisabled);
+                } else {
+                    commands.entity(target).remove::<ColliderDisabled>();
+                }
+                tracing::info!(door = ?target, open = door.open, "door toggled");
+            }
+            ActionKind::UseItem { item, tx, ty } => {
+                let Ok(player_position) = positions.get(player) else {
+                    continue;
+                };
+                let center =
+                    Vec2::new((tx as f32 + 0.5) * TILE_SIZE, (ty as f32 + 0.5) * TILE_SIZE);
+                let player_pos = Vec2::from_array(player_position.0);
+                if center.distance(player_pos) > INTERACT_RANGE + TILE_SIZE {
+                    tracing::warn!(tx, ty, "use item: too far");
+                    continue;
+                }
+                let chunk_tiles = ssr_core::tiles::CHUNK_TILES as i32;
+                let chunk_coords = (tx.div_euclid(chunk_tiles), ty.div_euclid(chunk_tiles));
+                let Some(&chunk_entity) = index.chunks.get(&chunk_coords) else {
+                    tracing::warn!(?chunk_coords, "use item: no chunk");
+                    continue;
+                };
+                let Ok(mut chunk) = chunks.get_mut(chunk_entity) else {
+                    continue;
+                };
+                let lx = (tx - chunk_coords.0 * chunk_tiles) as usize;
+                let ly = (ty - chunk_coords.1 * chunk_tiles) as usize;
+                let cell = ly * ssr_core::tiles::CHUNK_TILES as usize + lx;
+
+                // Предмет обязан быть в АКТИВНОЙ руке (SS14-модель).
+                let in_hand = hands
+                    .get(player)
+                    .ok()
+                    .and_then(|h| h.active_item())
+                    .is_some_and(|hand_item| hand_item == item);
+                if !in_hand {
+                    tracing::warn!(item, "use item: not in active hand");
+                    continue;
+                }
+                let item_name = Entity::try_from_bits(item)
+                    .and_then(|e| items.get(e).ok())
+                    .map(|i| i.name.clone())
+                    .unwrap_or_default();
+
+                if item_name == "SteelSheet" {
+                    if chunk.tiles[cell] != TileType::Floor {
+                        tracing::warn!(tx, ty, "build: tile is not empty floor");
+                        continue;
+                    }
+                    // Запрет стройки на тайле, где стоит любой игрок (в т.ч. сам).
+                    let occupied = positions.iter().any(|p| {
+                        (
+                            (p.0[0] / TILE_SIZE).floor() as i32,
+                            (p.0[1] / TILE_SIZE).floor() as i32,
+                        ) == (tx, ty)
+                    });
+                    if occupied {
+                        tracing::warn!(tx, ty, "build: tile occupied by a player");
+                        continue;
+                    }
+                    let Ok(mut hand) = hands.get_mut(player) else {
+                        continue;
+                    };
+                    hand.take(item);
+                    if let Some(entity) = Entity::try_from_bits(item) {
+                        commands.entity(entity).despawn();
+                    }
+                    chunk.tiles[cell] = TileType::Wall;
+                    tracing::info!(tx, ty, "tile built");
+                } else if item_name == "Crowbar" {
+                    if chunk.tiles[cell] != TileType::Wall {
+                        tracing::warn!(tx, ty, "deconstruct: tile is not a wall");
+                        continue;
+                    }
+                    chunk.tiles[cell] = TileType::Floor;
+                    if let Ok(mut inventory) = inventories.get_mut(player) {
+                        let sheet = commands
+                            .spawn((
+                                Item {
+                                    name: "SteelSheet".to_string(),
+                                },
+                                HeldBy {
+                                    player: player.to_bits(),
+                                },
+                                Replicate::to_clients(NetworkTarget::All),
+                                Rooms::default(),
+                            ))
+                            .id();
+                        let sheet_bits = sheet.to_bits();
+                        if let Some(slot) = inventory.put_first_empty(sheet_bits) {
+                            tracing::info!(slot, "deconstruct: material returned");
+                        }
+                    }
+                    tracing::info!(tx, ty, "tile destroyed");
+                } else {
+                    tracing::warn!(item, name = %item_name, "use item: unknown item");
+                    continue;
+                }
+
+                if let Some(old) = index.colliders.remove(&chunk_coords) {
+                    commands.entity(old).despawn();
+                }
+                if let Some(new_entity) = spawn_chunk_collider(&mut commands, &chunk) {
+                    index.colliders.insert(chunk_coords, new_entity);
+                }
+            }
+        }
+    }
 }
 
 /// Тест коллизии T2.2: SSR_COLLISION_TEST=1 ставит стену 32×4096 с центром
