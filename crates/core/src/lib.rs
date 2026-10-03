@@ -12,6 +12,20 @@ pub const GAME_NAME: &str = "Space Station R";
 pub mod rsi;
 pub mod tiles;
 
+/// Корень workspace (для доступа к assets/ из инструментов и headless-сервера).
+/// Работает благодаря compile-time CARGO_MANIFEST_DIR крейтов workspace.
+pub fn repo_root() -> &'static std::path::Path {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("workspace root")
+}
+
+/// Каталог ассетов.
+pub fn assets_root() -> std::path::PathBuf {
+    repo_root().join("assets")
+}
+
 /// Скорость игрока, пикселей в секунду (сервер применяет ввод по ADR-3).
 pub const PLAYER_MOVE_SPEED: f32 = 300.0;
 

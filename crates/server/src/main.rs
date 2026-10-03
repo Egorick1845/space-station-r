@@ -18,7 +18,7 @@ use bevy::prelude::*;
 use lightyear::connection::server::Start;
 use lightyear::prelude::server::*;
 use lightyear::prelude::*;
-use ssr_core::tiles::gen_test_map;
+use ssr_core::tiles::{MapFile, TileChunkData, TileType};
 use ssr_core::{CHUNK_SIZE, PLAYER_MOVE_SPEED, PlayerPosition, chunk_coords};
 use ssr_protocol::net::GameChannel;
 use ssr_protocol::{
@@ -73,9 +73,10 @@ fn main() {
     app.init_resource::<TickState>();
     app.init_resource::<ChunkRooms>();
     app.add_systems(Startup, startup);
-    app.add_systems(Startup, spawn_walls);
-    app.add_systems(Startup, spawn_load_test);
-    app.add_systems(Startup, spawn_collision_test);
+    app.add_systems(
+        Startup,
+        (load_map, spawn_walls, spawn_load_test, spawn_collision_test).chain(),
+    );
     app.add_systems(
         Update,
         (
@@ -91,6 +92,8 @@ fn main() {
     app.add_observer(on_link_disconnected);
     // Регистрация реплицируемых компонентов — одинакова на сервере и клиенте (T1.3).
     app.component::<PlayerPosition>().replicate();
+    // Чанки карты реплицируются с учётом интереса (T2.3).
+    app.component::<TileChunkData>().replicate();
     app.run();
 }
 
@@ -103,6 +106,50 @@ fn startup(mut commands: Commands) -> Result {
     commands.trigger(Start { entity: server });
     tracing::info!(%SERVER_ADDR, "server listening");
     Ok(())
+}
+
+/// Загруженная карта (T2.3): чанки для репликации и точки спавна.
+#[derive(Resource)]
+struct GameMap {
+    spawn_points: Vec<(f32, f32)>,
+    chunks: Vec<TileChunkData>,
+}
+
+/// Загрузка карты из `assets/maps/test.ron` (T2.3): правка файла + рестарт
+/// сервера меняют мир без перекомпиляции. Чанки спавнятся сущностями
+/// и реплицируются с учётом интереса (комната = чанк).
+fn load_map(
+    mut commands: Commands,
+    mut chunk_rooms: ResMut<ChunkRooms>,
+    mut allocator: ResMut<RoomAllocator>,
+) {
+    let path = ssr_core::assets_root().join("maps/test.ron");
+    let file = MapFile::load(&path).unwrap_or_else(|e| panic!("{e}"));
+    let chunks: Vec<TileChunkData> = file
+        .to_chunks()
+        .unwrap_or_else(|e| panic!("{e}"))
+        .iter()
+        .map(Into::into)
+        .collect();
+
+    for data in &chunks {
+        let room = chunk_rooms.room_for(data.coords, &mut allocator);
+        commands.spawn((
+            data.clone(),
+            Replicate::to_clients(NetworkTarget::All),
+            Rooms::single(room),
+        ));
+    }
+    tracing::info!(
+        name = %file.name,
+        chunks = chunks.len(),
+        spawns = file.spawn_points.len(),
+        "map loaded"
+    );
+    commands.insert_resource(GameMap {
+        spawn_points: file.spawn_points,
+        chunks,
+    });
 }
 
 /// Игрок на сервере: линк, имя, игровая сущность и текущий набор комнат интереса.
@@ -188,6 +235,7 @@ fn on_link_disconnected(
 /// конкурировали бы за один буфер и теряли сообщения.
 fn handle_client_messages(
     mut commands: Commands,
+    map: Res<GameMap>,
     mut receivers: Query<(Entity, &RemoteId, &mut MessageReceiver<ClientMessage>), With<Connected>>,
     mut senders: Query<(Entity, &mut MessageSender<ServerMessage>), With<Connected>>,
     mut inputs: Query<&mut PlayerInput>,
@@ -234,17 +282,19 @@ fn handle_client_messages(
     }
 
     for (link_entity, name) in connected {
+        // Игрок появляется на первой точке спавна из файла карты (T2.3).
+        let spawn = map.spawn_points.first().copied().unwrap_or((0.0, 0.0));
         // Игровая сущность игрока: динамическое тело (T2.2), позиция реплицируется
         // клиентам из интереса (T1.3/T1.4).
         let player = commands
             .spawn((
-                PlayerPosition::default(),
+                PlayerPosition([spawn.0, spawn.1]),
                 PlayerInput::default(),
                 Replicate::to_clients(NetworkTarget::All),
                 Rooms::default(),
                 RigidBody::Dynamic,
                 Collider::circle(16.0),
-                Position(Vector::ZERO),
+                Position(Vector::new(spawn.0, spawn.1)),
                 Rotation::default(),
             ))
             .id();
@@ -352,27 +402,25 @@ fn spawn_load_test(
     tracing::info!(count, "load test entities spawned");
 }
 
-/// Стены карты (T2.2): для каждого чанка — одно статическое тело с составным
-/// коллайдером из тайлов-стен. Карта та же, что генерирует клиент (T2.3
-/// заменит на реплицируемую из файла).
-fn spawn_walls(mut commands: Commands) {
-    let chunks = gen_test_map();
+/// Стены карты (T2.2/T2.3): для каждого чанка — одно статическое тело
+/// с составным коллайдером из тайлов-стен загруженной карты.
+fn spawn_walls(mut commands: Commands, map: Res<GameMap>) {
     let tile = CHUNK_SIZE; // 32 юнита на тайл
     let mut total = 0usize;
-    for chunk in &chunks {
+    for data in &map.chunks {
         let mut shapes = Vec::new();
-        for ly in 0..32u32 {
-            for lx in 0..32u32 {
-                if chunk.get_local(lx, ly) != ssr_core::tiles::TileType::Wall {
-                    continue;
-                }
-                let tx = chunk.coords.x * 32 + lx as i32;
-                let ty = chunk.coords.y * 32 + ly as i32;
-                // Центр тайла в мировых координатах (тело чанка стоит в origin).
-                let offset = Vector::new((tx as f32 + 0.5) * tile, (ty as f32 + 0.5) * tile);
-                shapes.push((offset, Rotation::default(), Collider::rectangle(tile, tile)));
-                total += 1;
+        for (index, tile_type) in data.tiles.iter().enumerate() {
+            if *tile_type != TileType::Wall {
+                continue;
             }
+            let lx = index as i32 % 32;
+            let ly = index as i32 / 32;
+            let tx = data.coords.0 * 32 + lx;
+            let ty = data.coords.1 * 32 + ly;
+            // Центр тайла в мировых координатах (тело чанка стоит в origin).
+            let offset = Vector::new((tx as f32 + 0.5) * tile, (ty as f32 + 0.5) * tile);
+            shapes.push((offset, Rotation::default(), Collider::rectangle(tile, tile)));
+            total += 1;
         }
         if shapes.is_empty() {
             continue;

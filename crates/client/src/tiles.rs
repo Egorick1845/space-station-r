@@ -10,13 +10,20 @@ use bevy::asset::RenderAssetUsages;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use image::RgbaImage;
-use ssr_core::tiles::{CHUNK_TILES, TILE_PX, TileChunk, TileProto, TilePrototypes};
+use ssr_core::tiles::{CHUNK_TILES, TILE_PX, TileChunkData, TileProto, TilePrototypes};
 
-/// Загружает прототипы тайлов и декодирует их спрайты (полосы вариантов).
-fn load_visuals(root: &Path) -> HashMap<String, RgbaImage> {
+/// Прототипы и декодированные спрайты тайлов (грузятся один раз при старте).
+#[derive(Resource)]
+pub struct TileVisuals {
+    protos: TilePrototypes,
+    sprites: HashMap<String, RgbaImage>,
+}
+
+/// Грузит прототипы и спрайты тайлов из каталога ассетов.
+pub fn load_tile_visuals(root: &Path) -> TileVisuals {
     let protos = TilePrototypes::load(&root.join("prototypes/tiles.ron"))
         .expect("parse assets/prototypes/tiles.ron");
-    let mut visuals = HashMap::new();
+    let mut sprites = HashMap::new();
     for (key, proto) in &protos.tiles {
         let Some(rel) = &proto.sprite else { continue };
         let bytes = std::fs::read(root.join(rel.trim_start_matches('/')))
@@ -24,9 +31,9 @@ fn load_visuals(root: &Path) -> HashMap<String, RgbaImage> {
         let image = image::load_from_memory(&bytes)
             .unwrap_or_else(|e| panic!("decode tile sprite {rel}: {e}"))
             .to_rgba8();
-        visuals.insert(key.clone(), image);
+        sprites.insert(key.clone(), image);
     }
-    visuals
+    TileVisuals { protos, sprites }
 }
 
 /// Выбирает вариант спрайта тайла детерминированно по координатам
@@ -35,24 +42,25 @@ fn variant_index(tx: i32, ty: i32, variants: u32) -> u32 {
     ((tx as i64 * 7 + ty as i64 * 13).rem_euclid(variants as i64)) as u32
 }
 
-/// Собирает картинку чанка 1024×1024 px из спрайтов тайлов.
-fn compose_chunk(
-    chunk: &TileChunk,
-    visuals: &HashMap<String, RgbaImage>,
-    protos: &TilePrototypes,
-) -> RgbaImage {
+/// Собирает картинку чанка 1024×1024 px из реплицированных тайлов (T2.3).
+fn compose_chunk(data: &TileChunkData, visuals: &TileVisuals) -> RgbaImage {
     let side = CHUNK_TILES * TILE_PX;
     let mut canvas = RgbaImage::new(side, side);
     for ly in 0..CHUNK_TILES {
         for lx in 0..CHUNK_TILES {
-            let tile = chunk.get_local(lx, ly);
-            let proto: &TileProto = protos.get(tile);
-            let Some(_rel) = &proto.sprite else { continue };
-            let sprite = &visuals[tile.key()];
+            let tile = data.get_local(lx, ly);
+            let proto: &TileProto = visuals.protos.get(tile);
+            let Some(sprite) = proto
+                .sprite
+                .as_ref()
+                .and_then(|_| visuals.sprites.get(tile.key()))
+            else {
+                continue;
+            };
             let variants = (sprite.width() / TILE_PX).max(1);
             let variant = variant_index(
-                chunk.coords.x * CHUNK_TILES as i32 + lx as i32,
-                chunk.coords.y * CHUNK_TILES as i32 + ly as i32,
+                data.coords.0 * CHUNK_TILES as i32 + lx as i32,
+                data.coords.1 * CHUNK_TILES as i32 + ly as i32,
                 variants,
             );
             let view = image::imageops::crop_imm(sprite, variant * TILE_PX, 0, TILE_PX, TILE_PX);
@@ -69,22 +77,20 @@ fn compose_chunk(
     canvas
 }
 
-/// Генерирует тестовую карту, собирает чанки и спавнит их спрайты.
-/// Возвращает число заспавненных чанков (для проверки в тесте).
-pub fn spawn_map(
-    commands: &mut Commands,
-    images: &mut Assets<Image>,
-    root: &Path,
-    origin: Vec3,
-) -> usize {
-    let protos = TilePrototypes::load(&root.join("prototypes/tiles.ron"))
-        .expect("parse assets/prototypes/tiles.ron");
-    let visuals = load_visuals(root);
-    let chunks = ssr_core::tiles::gen_test_map();
-
-    let mut spawned = 0;
-    for chunk in &chunks {
-        let canvas = compose_chunk(chunk, &visuals, &protos);
+/// Рендерит реплицированные чанки карты (T2.3): на каждый `Added<TileChunkData>`
+/// собирается картинка чанка и спавнится спрайт.
+pub fn render_map_chunks(
+    mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
+    visuals: Option<Res<TileVisuals>>,
+    new_chunks: Query<(Entity, &TileChunkData), Added<TileChunkData>>,
+) {
+    let Some(visuals) = visuals else {
+        return;
+    };
+    let chunk_px = (CHUNK_TILES * TILE_PX) as f32;
+    for (_, data) in new_chunks.iter() {
+        let canvas = compose_chunk(data, &visuals);
         let image = Image::new(
             Extent3d {
                 width: canvas.width(),
@@ -97,22 +103,18 @@ pub fn spawn_map(
             RenderAssetUsages::default(),
         );
         let handle = images.add(image);
-        // Центр чанка в мировых координатах (тайл (0,0) карты — угол чанка (0,0)).
-        let chunk_px = (CHUNK_TILES * TILE_PX) as f32;
-        let center = origin
-            + Vec3::new(
-                (chunk.coords.x as f32 + 0.5) * chunk_px,
-                (chunk.coords.y as f32 + 0.5) * chunk_px,
-                0.0,
-            );
+        let center = Vec3::new(
+            (data.coords.0 as f32 + 0.5) * chunk_px,
+            (data.coords.1 as f32 + 0.5) * chunk_px,
+            0.0,
+        );
         commands.spawn((
             TileChunkVisual,
             Sprite::from_image(handle),
             Transform::from_translation(center),
         ));
-        spawned += 1;
+        tracing::debug!(coords = ?data.coords, "map chunk rendered");
     }
-    spawned
 }
 
 /// Маркер визуального чанка карты.

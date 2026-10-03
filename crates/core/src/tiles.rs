@@ -103,6 +103,137 @@ impl TileChunk {
     pub fn tiles(&self) -> &[TileType] {
         &self.tiles
     }
+
+    /// Текстовые строки чанка для файла карты (T2.3).
+    pub fn rows(&self) -> Vec<String> {
+        self.tiles
+            .chunks(CHUNK_TILES as usize)
+            .map(|row| row.iter().map(|t| tile_to_char(*t)).collect())
+            .collect()
+    }
+}
+
+/// Символ тайла в файле карты: ' ' — космос, '.' — пол, '#' — стена.
+fn tile_to_char(tile: TileType) -> char {
+    match tile {
+        TileType::Space => ' ',
+        TileType::Floor => '.',
+        TileType::Wall => '#',
+    }
+}
+
+fn tile_from_char(c: char) -> Result<TileType, String> {
+    match c {
+        ' ' => Ok(TileType::Space),
+        '.' => Ok(TileType::Floor),
+        '#' => Ok(TileType::Wall),
+        other => Err(format!("unknown tile char {other:?}")),
+    }
+}
+
+/// Реплицируемый чанк карты: сервер → клиент (T2.3, ADR-7).
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TileChunkData {
+    /// Координата чанка в сетке чанков.
+    pub coords: (i32, i32),
+    /// Тайлы построчно, `ly * CHUNK_TILES + lx`.
+    pub tiles: Vec<TileType>,
+}
+
+impl From<&TileChunk> for TileChunkData {
+    fn from(chunk: &TileChunk) -> Self {
+        Self {
+            coords: (chunk.coords.x, chunk.coords.y),
+            tiles: chunk.tiles().to_vec(),
+        }
+    }
+}
+
+impl TileChunkData {
+    pub fn get_local(&self, lx: u32, ly: u32) -> TileType {
+        self.tiles[(ly * CHUNK_TILES + lx) as usize]
+    }
+}
+
+/// Файл карты `assets/maps/<name>.ron` (T2.3, ADR-6): правится руками,
+/// перезапуска сервера достаточно — без перекомпиляции.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MapFile {
+    pub name: String,
+    /// Точки спавна в юнитах мира (центр тайла).
+    #[serde(default)]
+    pub spawn_points: Vec<(f32, f32)>,
+    pub chunks: Vec<MapChunkFile>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MapChunkFile {
+    /// Координата чанка в сетке чанков.
+    pub coords: (i32, i32),
+    /// 32 строки по 32 символа: ' ' космос, '.' пол, '#' стена.
+    pub rows: Vec<String>,
+}
+
+impl MapFile {
+    pub fn load(path: &Path) -> Result<Self, String> {
+        let text =
+            std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        ron::from_str(&text).map_err(|e| format!("parse {}: {e}", path.display()))
+    }
+
+    pub fn save(
+        path: &Path,
+        name: &str,
+        spawn_points: Vec<(f32, f32)>,
+        chunks: &[TileChunk],
+    ) -> Result<(), String> {
+        let file = Self {
+            name: name.to_string(),
+            spawn_points,
+            chunks: chunks
+                .iter()
+                .map(|c| MapChunkFile {
+                    coords: (c.coords.x, c.coords.y),
+                    rows: c.rows(),
+                })
+                .collect(),
+        };
+        let text = ron::ser::to_string_pretty(&file, ron::ser::PrettyConfig::default())
+            .map_err(|e| format!("serialize: {e}"))?;
+        std::fs::write(path, text).map_err(|e| format!("write {}: {e}", path.display()))
+    }
+
+    /// Разбирает файл в чанки (валидация размеров и символов).
+    pub fn to_chunks(&self) -> Result<Vec<TileChunk>, String> {
+        self.chunks
+            .iter()
+            .map(|file_chunk| {
+                if file_chunk.rows.len() != CHUNK_TILES as usize {
+                    return Err(format!(
+                        "chunk {:?}: {} строк, ожидается {CHUNK_TILES}",
+                        file_chunk.coords,
+                        file_chunk.rows.len()
+                    ));
+                }
+                let mut chunk =
+                    TileChunk::new(IVec2::new(file_chunk.coords.0, file_chunk.coords.1));
+                for (ly, row) in file_chunk.rows.iter().enumerate() {
+                    let chars: Vec<char> = row.chars().collect();
+                    if chars.len() != CHUNK_TILES as usize {
+                        return Err(format!(
+                            "chunk {:?} строка {ly}: {} символов, ожидается {CHUNK_TILES}",
+                            file_chunk.coords,
+                            chars.len()
+                        ));
+                    }
+                    for (lx, c) in chars.iter().enumerate() {
+                        chunk.set_local(lx as u32, ly as u32, tile_from_char(*c)?);
+                    }
+                }
+                Ok(chunk)
+            })
+            .collect()
+    }
 }
 
 /// Тестовая карта 128×128 тайлов (чанки −2..1): космос по краю, стена-рамка,
@@ -136,6 +267,38 @@ pub fn gen_test_map() -> Vec<TileChunk> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn map_file_round_trip() {
+        let chunks = gen_test_map();
+        let dir = std::env::temp_dir().join("ssr-map-test");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("round-trip.ron");
+
+        MapFile::save(&path, "test", vec![(16.0, 16.0)], &chunks).expect("save");
+        let file = MapFile::load(&path).expect("load");
+        assert_eq!(file.name, "test");
+        assert_eq!(file.spawn_points, vec![(16.0, 16.0)]);
+        let restored = file.to_chunks().expect("to_chunks");
+        assert_eq!(restored.len(), chunks.len());
+        for (original, restored) in chunks.iter().zip(restored.iter()) {
+            assert_eq!(original.coords, restored.coords);
+            assert_eq!(original.tiles(), restored.tiles());
+        }
+    }
+
+    #[test]
+    fn map_file_rejects_bad_size() {
+        let file = MapFile {
+            name: "bad".into(),
+            spawn_points: vec![],
+            chunks: vec![MapChunkFile {
+                coords: (0, 0),
+                rows: vec![".".to_string()],
+            }],
+        };
+        assert!(file.to_chunks().is_err());
+    }
 
     #[test]
     fn prototypes_parse_from_assets() {

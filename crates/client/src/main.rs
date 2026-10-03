@@ -76,11 +76,15 @@ fn main() {
             receive_server,
             apply_position,
             count_replicated,
+            tiles::render_map_chunks,
             tiles::camera_edge_scroll,
         ),
     );
     // Регистрация реплицируемых компонентов — одинакова на сервере и клиенте (T1.3).
     app.component::<PlayerPosition>().replicate();
+    // Чанки карты приходят с сервера (T2.3).
+    app.component::<ssr_core::tiles::TileChunkData>()
+        .replicate();
     app.run();
 }
 
@@ -273,11 +277,11 @@ fn spawn_player(mut commands: Commands, assets: Res<AssetServer>) {
     ));
 }
 
-/// Генерирует тестовую карту 128×128 и спавнит её чанки (критерий T2.1).
-fn startup_map(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
+/// Грузит прототипы/спрайты тайлов; сами чанки приходят с сервера (T2.3).
+fn startup_map(mut commands: Commands) {
     let root = Path::new(&assets_file_path()).to_path_buf();
-    let spawned = tiles::spawn_map(&mut commands, &mut images, &root, Vec3::ZERO);
-    tracing::info!(chunks = spawned, "test map spawned");
+    let visuals = tiles::load_tile_visuals(&root);
+    commands.insert_resource(visuals);
 }
 
 /// Строит RsiRegistry и спавнит лом из SS14 (критерий IMP.1: лом виден в окне).
