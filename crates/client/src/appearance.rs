@@ -467,6 +467,86 @@ pub fn appearance_scroll_anim(time: Res<Time>, mut state: ResMut<AppearanceUi>) 
     state.beard_scroll += (state.beard_scroll_target - state.beard_scroll) * k;
 }
 
+/// Перетаскивание граббера: список, курсор в момент захвата, прокрутка.
+#[derive(Resource, Default)]
+pub struct ScrollDrag {
+    active: Option<(crate::hud::ScrollList, f32, f32)>,
+}
+
+/// Тянется ТОЛЬКО граббер (в движке клик по дорожке ничего не делает):
+/// `value = старт + Δy / (h − 10) · (контент − вьюпорт)`, как в `ScrollBar.cs`.
+pub fn appearance_scrollbar_drag(
+    mut drag: ResMut<ScrollDrag>,
+    mut state: ResMut<AppearanceUi>,
+    mut hud: ResMut<crate::hud::HudState>,
+    content: Res<crate::content::ClientContent>,
+    grabbers: Query<(&Interaction, &crate::hud::ScrollbarGrabber), Changed<Interaction>>,
+    windows: Query<&Window>,
+    mouse: Res<ButtonInput<MouseButton>>,
+) {
+    use crate::hud::ScrollList;
+    let cursor_y = windows
+        .iter()
+        .next()
+        .and_then(|window| window.cursor_position())
+        .map(|position| position.y);
+    // Захват: нажатие ровно по грабберу.
+    for (interaction, grabber) in grabbers.iter() {
+        if *interaction != Interaction::Pressed || drag.active.is_some() {
+            continue;
+        }
+        let Some(y) = cursor_y else { continue };
+        let scroll = match grabber.list {
+            ScrollList::AppearanceHair => state.hair_scroll,
+            ScrollList::AppearanceBeard => state.beard_scroll,
+            ScrollList::SpawnMenu => hud.spawn_scroll,
+        };
+        drag.active = Some((grabber.list, y, scroll));
+    }
+    let Some((list, start_y, start_scroll)) = drag.active else {
+        return;
+    };
+    if !mouse.pressed(MouseButton::Left) {
+        drag.active = None;
+        return;
+    }
+    let Some(y) = cursor_y else { return };
+    let (content_h, view_h) = match list {
+        ScrollList::AppearanceHair => (
+            list_content_h(filtered_hair(&state.search).len()),
+            list_view_h(HAIR_ROWS),
+        ),
+        ScrollList::AppearanceBeard => (
+            list_content_h(filtered_beard(&state.search).len()),
+            list_view_h(BEARD_ROWS),
+        ),
+        ScrollList::SpawnMenu => (
+            crate::hud::spawn_content_h(crate::hud::spawn_matched_count(&hud.search, &content)),
+            crate::hud::spawn_view_h(),
+        ),
+    };
+    let track = (view_h - ui::SCROLLBAR_MIN_GRABBER).max(0.0);
+    if track <= 0.0 {
+        return;
+    }
+    let max = (content_h - view_h).max(0.0);
+    let value = (start_scroll + (y - start_y) / track * max).clamp(0.0, max);
+    match list {
+        ScrollList::AppearanceHair => {
+            state.hair_scroll = value;
+            state.hair_scroll_target = value;
+        }
+        ScrollList::AppearanceBeard => {
+            state.beard_scroll = value;
+            state.beard_scroll_target = value;
+        }
+        ScrollList::SpawnMenu => {
+            hud.spawn_scroll = value;
+            hud.spawn_scroll_target = value;
+        }
+    }
+}
+
 /// Список стилей: строки «иконка состояния RSI + имя», выбранная подсвечена.
 /// Прокрутка непрерывная (`ScrollContainer` в SS14): вьюпорт фиксированной
 /// высоты с обрезкой, строки сдвинуты на дробную часть прокрутки, справа —
@@ -590,7 +670,12 @@ fn style_list(
             });
             // Полоса прокрутки — как `ScrollContainer`: только при контенте
             // выше вьюпорта, прижата вправо.
-            crate::hud::spawn_scrollbar(list, content_h, view_h, scroll);
+            let kind = if beard {
+                crate::hud::ScrollList::AppearanceBeard
+            } else {
+                crate::hud::ScrollList::AppearanceHair
+            };
+            crate::hud::spawn_scrollbar(list, content_h, view_h, scroll, kind);
         });
 }
 

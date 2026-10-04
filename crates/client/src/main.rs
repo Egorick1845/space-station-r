@@ -138,10 +138,13 @@ fn main() {
     app.init_resource::<hud::HudState>();
     app.init_resource::<hud::Placement>();
     app.init_resource::<appearance::AppearanceUi>();
+    app.init_resource::<appearance::ScrollDrag>();
     app.init_resource::<inventory_ui::InventoryUi>();
     app.init_resource::<audio::SoundRequests>();
     // Ленивая подгрузка RSI (T5.3): обрабатываем заявки из реестра каждый кадр.
     app.add_systems(Update, rsi::load_requested_rsi);
+    // Спавн-меню: прокрутка догоняет цель (rate 15, как ScrollBar в SS14).
+    app.add_systems(Update, hud::spawn_scroll_anim);
     // Кадр мира как в SS14: ограничение видимой области (ScalingViewport).
     app.add_systems(Update, fit_world_viewport);
     // Окно выбора внешности (P) — отдельной группой: у кортежей есть предел.
@@ -154,6 +157,7 @@ fn main() {
             appearance::appearance_search_input,
             appearance::appearance_scroll,
             appearance::appearance_scroll_anim,
+            appearance::appearance_scrollbar_drag,
             appearance::appearance_click,
             appearance::render_appearance_menu,
             hud::tint_scrollbar_grabber,

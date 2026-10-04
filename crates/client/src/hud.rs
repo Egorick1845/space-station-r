@@ -43,8 +43,10 @@ pub struct HudState {
     pub warp_open: bool,
     pub combat: bool,
     pub search: String,
-    /// Прокрутка списка спавн-меню (строк).
-    pub spawn_scroll: usize,
+    /// Прокрутка списка спавн-меню в пикселях (непрерывная, как `ScrollContainer`);
+    /// текущее значение догоняет `spawn_scroll_target` с rate 15.
+    pub spawn_scroll: f32,
+    pub spawn_scroll_target: f32,
     /// Поле поиска в фокусе (включается кликом — иначе буквы «съедались» при
     /// открытии F5 во время игры).
     pub search_focused: bool,
@@ -839,6 +841,7 @@ pub(crate) fn spawn_scrollbar(
     content_h: f32,
     viewport_h: f32,
     scroll: f32,
+    list: ScrollList,
 ) -> Option<Entity> {
     use crate::ui_theme as ui;
     if content_h <= viewport_h + 1e-3 {
@@ -859,7 +862,7 @@ pub(crate) fn spawn_scrollbar(
                 ..default()
             })
             .with_child((
-                ScrollbarGrabber,
+                ScrollbarGrabber { list },
                 Interaction::default(),
                 Node {
                     position_type: PositionType::Absolute,
@@ -875,10 +878,21 @@ pub(crate) fn spawn_scrollbar(
     )
 }
 
+/// Какой список прокручивает полоса (нужно перетаскиванию граббера: у каждого
+/// списка своё состояние прокрутки).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ScrollList {
+    AppearanceHair,
+    AppearanceBeard,
+    SpawnMenu,
+}
+
 /// Граббер полосы прокрутки (маркер нужен, чтобы подсветка не трогала другие
 /// кнопки: у них тоже есть `Interaction`).
-#[derive(Component)]
-pub struct ScrollbarGrabber;
+#[derive(Component, Clone, Copy)]
+pub struct ScrollbarGrabber {
+    pub list: ScrollList,
+}
 
 /// Грабберы, у которых сменилось состояние наведения.
 type GrabberCursor<'w, 's> = Query<
@@ -888,13 +902,15 @@ type GrabberCursor<'w, 's> = Query<
     (Changed<Interaction>, With<ScrollbarGrabber>),
 >;
 
-/// Цвет граббера по наведению (покой `#80808059`, hover `#8C8C8C59`).
+/// Цвет граббера по состоянию (покой `#80808059`, hover `#8C8C8C59`,
+/// перетаскивание `#A0A0A059` — псевдоклассы `hover`/`grabbed` в `ScrollBar.cs`).
 pub fn tint_scrollbar_grabber(mut grabbers: GrabberCursor) {
     use crate::ui_theme as ui;
     for (interaction, mut color) in grabbers.iter_mut() {
         let target = match interaction {
             Interaction::None => ui::SCROLLBAR_GRABBER,
-            Interaction::Hovered | Interaction::Pressed => ui::SCROLLBAR_GRABBER_HOVERED,
+            Interaction::Hovered => ui::SCROLLBAR_GRABBER_HOVERED,
+            Interaction::Pressed => ui::SCROLLBAR_GRABBER_GRABBED,
         };
         color.0 = target;
     }
@@ -939,9 +955,47 @@ pub(crate) fn menu_panel(
 /// Сколько строк помещается в спавн-меню (SS14 прокручивает список, у нас
 /// список ограничен — остальное уточняется поиском).
 const SPAWN_MENU_ROWS: usize = 11;
+/// Ширина окна спавна (`SetSize="350 400"` в `EntitySpawnWindow.xaml`) и
+/// ширина списка внутри тела окна (минус отступы `WINDOW_CONTENT_MARGIN`).
+const SPAWN_WINDOW_W: f32 = 350.0;
+const SPAWN_LIST_W: f32 = SPAWN_WINDOW_W - 2.0 * crate::ui_theme::WINDOW_CONTENT_MARGIN;
+/// Шаг строки списка спавн-меню (строка 32 px + зазор 2 px).
+const SPAWN_ROW_STEP: f32 = 34.0;
+
+/// Высота вьюпорта списка спавн-меню (последний зазор не считаем).
+pub(crate) fn spawn_view_h() -> f32 {
+    SPAWN_MENU_ROWS as f32 * SPAWN_ROW_STEP - 2.0
+}
+
+/// Высота контента списка спавн-меню.
+pub(crate) fn spawn_content_h(total: usize) -> f32 {
+    total as f32 * SPAWN_ROW_STEP
+}
+
+/// Сколько предметов проходит фильтр поиска (для полосы прокрутки и колеса).
+pub(crate) fn spawn_matched_count(search: &str, content: &ClientContent) -> usize {
+    let query = search.to_lowercase();
+    content
+        .items
+        .items
+        .iter()
+        .filter(|item| {
+            query.is_empty()
+                || format!("{} {}", item.id.to_lowercase(), item.name.to_lowercase())
+                    .contains(&query)
+        })
+        .count()
+}
+
+/// Догоняет цель прокрутки экспонентой (`LerpAnimate(rate: 15)` в движке).
+pub fn spawn_scroll_anim(time: Res<Time>, mut state: ResMut<HudState>) {
+    use crate::ui_theme as ui;
+    let k = 1.0 - (-ui::SCROLLBAR_ANIM_RATE * time.delta_secs()).exp();
+    state.spawn_scroll += (state.spawn_scroll_target - state.spawn_scroll) * k;
+}
 
 /// Отпечаток состояния спавн-меню (открыто, поиск, спрайты, режим размещения).
-type SpawnMenuSignature = (bool, String, u32, Option<String>, usize);
+type SpawnMenuSignature = (bool, String, u32, Option<String>, i32);
 
 /// Перерисовывает спавн-меню (F5) по образцу `EntitySpawnWindow.xaml`:
 /// окно 350×400 у левого края, поле поиска с кнопкой «Очистить», список
@@ -963,7 +1017,9 @@ pub fn render_spawn_menu(
         state.search.clone(),
         registry.generation(),
         placement.item.clone(),
-        state.spawn_scroll,
+        // Округляем: анимация приближается к цели асимптотически, без округления
+        // окно перерисовывалось бы каждый кадр вечно.
+        state.spawn_scroll.round() as i32,
     );
     if last.as_ref() == Some(&signature) {
         return;
@@ -989,11 +1045,21 @@ pub fn render_spawn_menu(
         .collect();
     matched.sort_by(|a, b| a.1.cmp(&b.1));
     let total = matched.len();
-    // Прокрутка колесом (`EntitySpawnWindow` прокручивается целиком).
-    let max_scroll = total.saturating_sub(SPAWN_MENU_ROWS);
-    let scroll = state.spawn_scroll.min(max_scroll);
-    matched = matched.split_off(scroll);
-    matched.truncate(SPAWN_MENU_ROWS);
+    // Прокрутка непрерывная, как в `EntitySpawnWindow`/`ScrollContainer`.
+    let view_h = spawn_view_h();
+    let content_h = spawn_content_h(total);
+    let max_scroll = (content_h - view_h).max(0.0);
+    let scroll = state.spawn_scroll.clamp(0.0, max_scroll);
+    let first = ((scroll / SPAWN_ROW_STEP).floor() as usize).min(total);
+    let offset = scroll - first as f32 * SPAWN_ROW_STEP;
+    // Как `ScrollContainer`: при видимой полосе контент ужимается на её ширину.
+    let bar_width = if content_h > view_h + 1e-3 {
+        crate::ui_theme::SCROLLBAR_WIDTH
+    } else {
+        0.0
+    };
+    matched = matched.split_off(first);
+    matched.truncate(SPAWN_MENU_ROWS + 1);
     let icons: Vec<Option<ImageNode>> = matched
         .iter()
         .map(|(id, _)| {
@@ -1011,7 +1077,7 @@ pub fn render_spawn_menu(
                 position_type: PositionType::Absolute,
                 left: px(10),
                 top: Val::Percent(50.0),
-                width: px(350),
+                width: px(SPAWN_WINDOW_W),
                 max_height: px(400),
                 flex_direction: FlexDirection::Column,
                 ..default()
@@ -1063,76 +1129,93 @@ pub fn render_spawn_menu(
                         TextColor(ui::TEXT),
                     ));
                 });
-                // Список: строка = иконка 32×32 + имя, зазор 2 px.
+                // Список: строка = иконка 32×32 + имя, зазор 2 px; прокрутка
+                // непрерывная (`ScrollContainer`), справа — полоса прокрутки.
                 body.spawn(Node {
                     width: Val::Percent(100.0),
-                    flex_direction: FlexDirection::Column,
-                    row_gap: px(2),
+                    height: px(view_h),
+                    overflow: Overflow::clip(),
                     ..default()
                 })
                 .with_children(|list| {
-                    for ((id, name), icon) in matched.into_iter().zip(icons) {
-                        let selected = placement.item.as_deref() == Some(id.as_str());
-                        let tint = if selected {
-                            HudTint {
-                                normal: ui::GLASS_BUTTON_PRESSED,
-                                hovered: ui::GLASS_BUTTON_PRESSED,
-                                pressed: ui::GLASS_BUTTON_PRESSED,
-                            }
-                        } else {
-                            HudTint::button()
-                        };
-                        list.spawn((
-                            HudAction::SpawnItem(id.clone()),
-                            Button,
-                            tint,
-                            BackgroundColor(if selected {
-                                ui::GLASS_BUTTON_PRESSED
-                            } else {
-                                ui::GLASS_BUTTON
-                            }),
-                            Node {
-                                width: Val::Percent(100.0),
-                                height: px(32),
-                                align_items: AlignItems::Center,
-                                column_gap: px(6),
-                                padding: UiRect::horizontal(px(6)),
-                                ..default()
-                            },
-                        ))
-                        .with_children(|row| {
-                            // Иконка 32×32, как EntityPrototypeView в SS14.
-                            row.spawn(Node {
-                                width: px(32),
-                                height: px(32),
-                                align_items: AlignItems::Center,
-                                justify_content: JustifyContent::Center,
-                                ..default()
-                            })
-                            .with_children(|cell| {
-                                if let Some(icon) = icon {
-                                    cell.spawn((
-                                        icon,
-                                        Node {
-                                            width: px(28),
-                                            height: px(28),
-                                            ..default()
-                                        },
-                                    ));
+                    list.spawn((
+                        Node {
+                            position_type: PositionType::Absolute,
+                            left: px(0),
+                            top: px(0),
+                            width: px(SPAWN_LIST_W - bar_width),
+                            flex_direction: FlexDirection::Column,
+                            row_gap: px(2),
+                            ..default()
+                        },
+                        UiTransform::from_translation(Val2::new(Val::Px(0.0), Val::Px(-offset))),
+                    ))
+                    .with_children(|inner| {
+                        for ((id, name), icon) in matched.into_iter().zip(icons) {
+                            let selected = placement.item.as_deref() == Some(id.as_str());
+                            let tint = if selected {
+                                HudTint {
+                                    normal: ui::GLASS_BUTTON_PRESSED,
+                                    hovered: ui::GLASS_BUTTON_PRESSED,
+                                    pressed: ui::GLASS_BUTTON_PRESSED,
                                 }
-                            });
-                            row.spawn((
-                                Text::new(name),
-                                TextFont::from_font_size(ui::FONT_BASE),
-                                TextColor(ui::TEXT),
-                            ));
-                            row.spawn((
-                                Text::new(id),
-                                TextFont::from_font_size(ui::FONT_SMALL),
-                                TextColor(ui::TEXT_MUTED),
-                            ));
-                        });
-                    }
+                            } else {
+                                HudTint::button()
+                            };
+                            inner
+                                .spawn((
+                                    HudAction::SpawnItem(id.clone()),
+                                    Button,
+                                    tint,
+                                    BackgroundColor(if selected {
+                                        ui::GLASS_BUTTON_PRESSED
+                                    } else {
+                                        ui::GLASS_BUTTON
+                                    }),
+                                    Node {
+                                        width: Val::Percent(100.0),
+                                        height: px(32),
+                                        align_items: AlignItems::Center,
+                                        column_gap: px(6),
+                                        padding: UiRect::horizontal(px(6)),
+                                        ..default()
+                                    },
+                                ))
+                                .with_children(|row| {
+                                    // Иконка 32×32, как EntityPrototypeView в SS14.
+                                    row.spawn(Node {
+                                        width: px(32),
+                                        height: px(32),
+                                        align_items: AlignItems::Center,
+                                        justify_content: JustifyContent::Center,
+                                        ..default()
+                                    })
+                                    .with_children(|cell| {
+                                        if let Some(icon) = icon {
+                                            cell.spawn((
+                                                icon,
+                                                Node {
+                                                    width: px(28),
+                                                    height: px(28),
+                                                    ..default()
+                                                },
+                                            ));
+                                        }
+                                    });
+                                    row.spawn((
+                                        Text::new(name),
+                                        TextFont::from_font_size(ui::FONT_BASE),
+                                        TextColor(ui::TEXT),
+                                    ));
+                                    row.spawn((
+                                        Text::new(id),
+                                        TextFont::from_font_size(ui::FONT_SMALL),
+                                        TextColor(ui::TEXT_MUTED),
+                                    ));
+                                });
+                        }
+                    });
+                    spawn_scrollbar(list, content_h, view_h, scroll, ScrollList::SpawnMenu);
                 });
                 // Подсказка снизу: счётчик и режим размещения.
                 let hint = match &placement.item {
@@ -1530,15 +1613,18 @@ pub fn spawn_menu_input(
         match &event.logical_key {
             Key::Backspace => {
                 state.search.pop();
-                state.spawn_scroll = 0;
+                state.spawn_scroll = 0.0;
+                state.spawn_scroll_target = 0.0;
             }
             Key::Space => {
                 state.search.push(' ');
-                state.spawn_scroll = 0;
+                state.spawn_scroll = 0.0;
+                state.spawn_scroll_target = 0.0;
             }
             Key::Character(text) => {
                 state.search.push_str(text);
-                state.spawn_scroll = 0;
+                state.spawn_scroll = 0.0;
+                state.spawn_scroll_target = 0.0;
             }
             _ => {}
         }
@@ -1570,13 +1656,12 @@ pub fn menu_scroll(
                     .contains(&query)
         })
         .count();
-    let max_scroll = total.saturating_sub(SPAWN_MENU_ROWS);
+    let max_scroll = (spawn_content_h(total) - spawn_view_h()).max(0.0);
     for event in wheel.read() {
-        if event.y > 0.0 {
-            state.spawn_scroll = (state.spawn_scroll + 1).min(max_scroll);
-        } else if event.y < 0.0 {
-            state.spawn_scroll = state.spawn_scroll.saturating_sub(1);
-        }
+        // Шаг 50 px за щелчок, как `ScrollContainer.ScrollSpeedY`.
+        state.spawn_scroll_target = (state.spawn_scroll_target
+            - event.y * crate::ui_theme::SCROLLBAR_WHEEL_STEP)
+            .clamp(0.0, max_scroll);
     }
 }
 

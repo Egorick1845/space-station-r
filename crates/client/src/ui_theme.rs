@@ -335,8 +335,7 @@ pub const SCROLLBAR_MIN_GRABBER: f32 = 10.0;
 pub const SCROLLBAR_GRABBER: Color = Color::srgba(0.502, 0.502, 0.502, 0.35);
 /// Граббер под курсором (`#8C8C8C59`).
 pub const SCROLLBAR_GRABBER_HOVERED: Color = Color::srgba(0.549, 0.549, 0.549, 0.35);
-/// Граббер при перетаскивании (`#A0A0A059`) — задел под drag (T7.2).
-#[allow(dead_code)]
+/// Граббер при перетаскивании (`#A0A0A059`).
 pub const SCROLLBAR_GRABBER_GRABBED: Color = Color::srgba(0.627, 0.627, 0.627, 0.35);
 /// `ScrollContainer.ScrollSpeedY` — шаг колеса, px за щелчок.
 pub const SCROLLBAR_WHEEL_STEP: f32 = 50.0;
