@@ -706,15 +706,18 @@ fn apply_player_state(
         interp.target = target;
         interp.started = true;
     } else if target != interp.target {
-        // Новая серверная позиция: продолжаем путь от текущей отрисованной точки.
-        interp.prev = interp
-            .prev
-            .lerp(interp.target, (interp.elapsed / NET_TICK_SECS).min(1.0));
+        // Новая серверная позиция: продолжаем путь от текущей отрисованной точки
+        // и стартуем с задержкой в один тик — путь всегда проигрывается целиком
+        // и с постоянной скоростью (рывки шли от раннего/позднего прихода пакетов).
+        interp.prev = interp.prev.lerp(
+            interp.target,
+            (interp.elapsed / NET_TICK_SECS).clamp(0.0, 1.0),
+        );
         interp.target = target;
-        interp.elapsed = 0.0;
+        interp.elapsed = -NET_TICK_SECS;
     }
     interp.elapsed += time.delta_secs();
-    let alpha = (interp.elapsed / NET_TICK_SECS).min(1.0);
+    let alpha = (interp.elapsed / NET_TICK_SECS).clamp(0.0, 1.0);
     let current = interp.prev.lerp(interp.target, alpha);
 
     // Направление — по серверному смещению за последний снимок.
@@ -882,4 +885,26 @@ fn screenshot_test_mode(mut commands: Commands, time: Res<Time>, mut state: Loca
         .spawn(bevy::render::view::screenshot::Screenshot::primary_window())
         .observe(bevy::render::view::screenshot::save_to_disk(path.clone()));
     tracing::info!(path, "screenshot requested");
+}
+
+/// Ограничивает видимую область мира как `ScalingViewport` в SS14: на большом
+/// окне масштаб увеличивается, чтобы в кадр попадало не больше ~1920×1080
+/// единиц (60×34 тайла), иначе на широком мониторе видно лишнее.
+pub fn fit_world_viewport(
+    windows: Query<&Window>,
+    mut camera: Single<&mut Projection, With<Camera2d>>,
+) {
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let Projection::Orthographic(orthographic) = &mut **camera else {
+        return;
+    };
+    let scale = (window.resolution.width() / 1920.0)
+        .max(window.resolution.height() / 1080.0)
+        .max(1.0);
+    if (orthographic.scale - scale).abs() > f32::EPSILON {
+        orthographic.scale = scale;
+        tracing::info!(scale, "world viewport scale updated");
+    }
 }
