@@ -54,6 +54,8 @@ lightyear = { version = "0.30.1", default-features = false, features = [
     "udp",
     "raw_connection",
     "replication",
+    # Метрики транспорта (T6.1): байты/пакеты для нагрузочного теста.
+    "metrics",
 ] }
 
 # Физика 2D (PLAN.md §2): avian2d 0.7 — под bevy 0.19; только на сервере (ADR-3)

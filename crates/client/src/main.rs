@@ -18,6 +18,7 @@ use lightyear::prelude::*;
 use ssr_core::{GAME_NAME, PlayerPosition};
 
 mod audio;
+mod bot;
 mod console;
 mod containers;
 mod content;
@@ -80,6 +81,12 @@ const DEV_PLAYER_NAME: &str = "SSR-dev";
 const NET_TICK_SECS: f32 = 1.0 / NET_TPS as f32;
 
 fn main() {
+    // SSR_BOT=<имя> — headless-бот для нагрузочного теста (T6.1).
+    if let Ok(bot_name) = std::env::var("SSR_BOT") {
+        bot::run_bot(bot_name);
+        return;
+    }
+
     // SSR_DUMP_ONLY=1 — офлайн-дамп чанков карты в PNG (без окна и сети):
     // глазами проверить сглаживание стен и тайлы.
     if std::env::var_os("SSR_DUMP_ONLY").is_some() {
@@ -272,41 +279,8 @@ fn main() {
         app.insert_resource(lobby::LobbyState::Playing);
         app.add_systems(Update, enter_game);
     }
-    // Регистрация реплицируемых компонентов — одинакова на сервере и клиенте (T1.3).
-    // ВАЖНО: порядок регистрации должен совпадать с сервером (иначе replicon
-    // паникует «FnsId should be registered first»): PlayerPosition, TileChunkData, Door.
-    app.component::<PlayerPosition>().replicate();
-    // Чанки карты приходят с сервера (T2.3).
-    app.component::<ssr_core::tiles::TileChunkData>()
-        .replicate();
-    // Двери: состояние реплицируется сервером (T3.1).
-    app.component::<ssr_core::Door>().replicate();
-    // Инвентарь и предметы (T3.2). Порядок обязан совпадать с сервером!
-    app.component::<ssr_core::inventory::Inventory>()
-        .replicate();
-    app.component::<ssr_core::inventory::Item>().replicate();
-    // Руки/здоровье/удержание (T3.3+). Тот же порядок, что у сервера!
-    app.component::<ssr_core::inventory::Hands>().replicate();
-    app.component::<ssr_core::inventory::Health>().replicate();
-    app.component::<ssr_core::inventory::HeldBy>().replicate();
-    // Контейнеры (T3.4). Тот же порядок, что у сервера!
-    app.component::<ssr_core::inventory::Container>()
-        .replicate();
-    app.component::<ssr_core::inventory::ItemPosition>()
-        .replicate();
-    // Роли (T4.2). Тот же порядок, что у сервера!
-    app.component::<ssr_core::roles::PlayerRole>().replicate();
-    // Расы (T5.3). Тот же порядок, что у сервера!
-    app.component::<ssr_core::Species>().replicate();
-    // Атмосфера (T4.3). Тот же порядок, что у сервера!
-    app.component::<ssr_core::atmosphere::ChunkAtmosphere>()
-        .replicate();
-    // Электрика (T4.4). Тот же порядок, что у сервера!
-    app.component::<ssr_core::power::Cable>().replicate();
-    app.component::<ssr_core::power::Generator>().replicate();
-    app.component::<ssr_core::power::Consumer>().replicate();
-    app.component::<ssr_core::power::Light>().replicate();
-    app.component::<ssr_core::power::Powered>().replicate();
+    // Репликация — см. register_replication (тот же список у бота).
+    register_replication(&mut app);
     app.run();
 }
 
@@ -389,9 +363,10 @@ fn send_connect(
         return;
     }
     for mut sender in senders.iter_mut() {
-        // Имя из настроек (T5.4); SSR_NAME перекрывает (тесты);
+        // Имя: SSR_BOT/SSR_NAME перекрывают настройки (боты и тесты);
         // пустое — техническое.
-        let name = std::env::var("SSR_NAME")
+        let name = std::env::var("SSR_BOT")
+            .or_else(|_| std::env::var("SSR_NAME"))
             .ok()
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| {
@@ -437,12 +412,14 @@ fn input_direction(input: &ButtonInput<KeyCode>) -> Vec2 {
 /// SSR_AUTO_WALK=1 — тестовый режим: после подключения клиент «держит вправо»
 /// SSR_AUTO_WALK_MS миллисекунд (по умолчанию 3000; короткое значение оставляет
 /// игрока у двери для тестов взаимодействия). Пригодится ботам в T6.1.
+#[allow(clippy::too_many_arguments)]
 fn send_input(
     input: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
     player_entity: Res<PlayerEntity>,
     console: Res<console::Console>,
     mut connected_elapsed: Local<f32>,
+    mut state: Local<InputSendState>,
     connected: Query<(), With<Connected>>,
     mut senders: Query<&mut MessageSender<ClientMessage>, With<Connected>>,
 ) {
@@ -483,10 +460,18 @@ fn send_input(
     } else {
         input_direction(&input)
     };
+    // Ввод шлём с частотой тика сети (T6.1): каждый кадр — это до тысяч
+    // сообщений в секунду и лишний трафик. Смена направления уходит сразу.
+    let movement = direction.to_array();
+    state.elapsed += time.delta_secs();
+    let changed = state.last != movement;
+    if !changed && state.elapsed < NET_TICK_SECS {
+        return;
+    }
+    state.elapsed = 0.0;
+    state.last = movement;
     for mut sender in senders.iter_mut() {
-        sender.send::<GameChannel>(ClientMessage::Input {
-            movement: direction.to_array(),
-        });
+        sender.send::<GameChannel>(ClientMessage::Input { movement });
     }
 }
 
@@ -502,6 +487,13 @@ fn hotkeys(
     for mut sender in senders.iter_mut() {
         sender.send::<GameChannel>(ClientMessage::SwitchHand);
     }
+}
+
+/// Состояние отправки ввода: таймер до следующего пакета и последнее направление.
+#[derive(Default)]
+struct InputSendState {
+    elapsed: f32,
+    last: [f32; 2],
 }
 
 /// Готов ли клиент слать ввод: сервер создал игрока (Welcome получен).
@@ -756,4 +748,33 @@ fn assets_file_path() -> String {
         return root.join("assets").to_string_lossy().into_owned();
     }
     "assets".into()
+}
+
+/// Регистрация реплицируемых компонентов клиента. Порядок обязан совпадать
+/// с сервером — иначе replicon паникует «FnsId should be registered first».
+/// Используется и обычным клиентом, и headless-ботом (T6.1).
+pub fn register_replication(app: &mut App) {
+    app.component::<PlayerPosition>().replicate();
+    app.component::<ssr_core::tiles::TileChunkData>()
+        .replicate();
+    app.component::<ssr_core::Door>().replicate();
+    app.component::<ssr_core::inventory::Inventory>()
+        .replicate();
+    app.component::<ssr_core::inventory::Item>().replicate();
+    app.component::<ssr_core::inventory::Hands>().replicate();
+    app.component::<ssr_core::inventory::Health>().replicate();
+    app.component::<ssr_core::inventory::HeldBy>().replicate();
+    app.component::<ssr_core::inventory::Container>()
+        .replicate();
+    app.component::<ssr_core::inventory::ItemPosition>()
+        .replicate();
+    app.component::<ssr_core::roles::PlayerRole>().replicate();
+    app.component::<ssr_core::Species>().replicate();
+    app.component::<ssr_core::atmosphere::ChunkAtmosphere>()
+        .replicate();
+    app.component::<ssr_core::power::Cable>().replicate();
+    app.component::<ssr_core::power::Generator>().replicate();
+    app.component::<ssr_core::power::Consumer>().replicate();
+    app.component::<ssr_core::power::Light>().replicate();
+    app.component::<ssr_core::power::Powered>().replicate();
 }

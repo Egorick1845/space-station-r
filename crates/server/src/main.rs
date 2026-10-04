@@ -78,6 +78,11 @@ fn main() {
         tick_duration: Duration::from_secs_f64(1.0 / TPS),
     });
     app.add_plugins(ProtocolPlugin);
+    // Метрики транспорта (T6.1): копим байты/пакеты для нагрузочного лога.
+    // Регистр — глобальный GLOBAL_RECORDER, из него читает perf_logger.
+    app.add_plugins(lightyear::metrics::prelude::MetricsPlugin::with_registry(
+        lightyear::metrics::prelude::GLOBAL_RECORDER.clone(),
+    ));
     // Interest management через комнаты (T1.4): сущность видна клиенту,
     // если они делят хотя бы одну комнату.
     app.add_plugins(RoomPlugin);
@@ -95,6 +100,7 @@ fn main() {
     app.init_resource::<RoleCursor>();
     app.init_resource::<Atmospheres>();
     app.init_resource::<ContentCatalog>();
+    app.init_resource::<NetStats>();
     app.add_systems(Startup, startup);
     app.add_systems(
         Startup,
@@ -125,16 +131,23 @@ fn main() {
             sync_replicated_position,
             update_client_rooms,
             log_player_position,
-            damage_test,
-            // Атмосфера (T4.3): диффузия, урон от разгерметизации, тесты.
+            // Атмосфера (T4.3): диффузия, урон от разгерметизации.
             simulate_atmosphere,
             suffocation,
             auto_doors,
             power_grid,
+        ),
+    );
+    // Тест-режимы и нагрузочный лог (SSR_*_TEST / SSR_PERF_LOG) — отдельно.
+    app.add_systems(
+        Update,
+        (
+            damage_test,
             power_test,
             breach_test,
             vacuum_test,
             log_atmosphere,
+            perf_logger,
         ),
     );
     app.add_observer(on_link_connected);
@@ -277,6 +290,22 @@ struct SpawnCursor(usize);
 /// Роли (T4.2): прототипы из `assets/prototypes/roles.ron`.
 #[derive(Resource, Default)]
 struct GameRoles(RoleSet);
+
+/// Ресурсы контента и статистики для обработки сообщений (T5.2/T6.1):
+/// одним параметром — у функций-систем лимит 16 параметров.
+#[derive(bevy::ecs::system::SystemParam)]
+struct ServerContent<'w> {
+    roles: Res<'w, GameRoles>,
+    role_cursor: ResMut<'w, RoleCursor>,
+    catalogs: Res<'w, ContentCatalog>,
+    stats: ResMut<'w, NetStats>,
+}
+
+/// Счётчики входящих сообщений (T6.1): сколько клиентских сообщений приняли.
+#[derive(Resource, Default)]
+struct NetStats {
+    messages_in: u64,
+}
 
 /// Админы сервера (T5.5): имена через запятую в `SSR_ADMINS`
 /// (пусто — админ-команд нет; `SSR_OPEN_ADMIN=1` — все админы, для тестов).
@@ -928,6 +957,57 @@ fn breach_test(
     }
 }
 
+/// Нагрузочный лог (T6.1): раз в секунду TPS, интервал тика, игроки и трафик
+/// (байты отправлено/получено из метрик транспорта lightyear).
+/// Предыдущий срез нагрузочного лога: время, тики, байты, сообщения.
+type PerfSample = (std::time::Instant, u64, f64, f64, u64);
+
+fn perf_logger(
+    tick_state: Res<TickState>,
+    stats: Res<NetStats>,
+    players: Res<Players>,
+    replicated: Query<(), With<Replicate>>,
+    mut last: Local<Option<PerfSample>>,
+) {
+    if std::env::var_os("SSR_PERF_LOG").is_none() {
+        return;
+    }
+    let now = std::time::Instant::now();
+    let ticks = tick_state.tick;
+    let metric = |name: &'static str| {
+        lightyear::metrics::prelude::GLOBAL_RECORDER
+            .get_gauge_value(&lightyear::metrics::metrics::Key::from_name(name))
+            .unwrap_or(0.0)
+    };
+    let sent = metric("transport/send_bytes");
+    let recv = metric("transport/recv_bytes");
+    let messages = stats.messages_in;
+    let Some((previous_time, previous_ticks, previous_sent, previous_recv, previous_messages)) =
+        *last
+    else {
+        *last = Some((now, ticks, sent, recv, messages));
+        return;
+    };
+    let elapsed = now.duration_since(previous_time).as_secs_f64();
+    if elapsed < 1.0 {
+        return;
+    }
+    *last = Some((now, ticks, sent, recv, messages));
+    let tps = (ticks - previous_ticks) as f64 / elapsed;
+    let tick_ms = elapsed * 1000.0 / (ticks - previous_ticks).max(1) as f64;
+    tracing::info!(
+        tps = format!("{tps:.1}"),
+        tick_ms = format!("{tick_ms:.2}"),
+        players = players.entries.len(),
+        replicated = replicated.iter().count(),
+        sent_kbps = format!("{:.1}", (sent - previous_sent) / 1024.0 / elapsed),
+        recv_kbps = format!("{:.1}", (recv - previous_recv) / 1024.0 / elapsed),
+        msgs_in = messages - previous_messages,
+        "perf"
+    );
+    // Тики в TickState растут: сбрасываем локальный счётчик через разницу ✓.
+}
+
 /// Раз в секунду логирует давление у спавна (для проверки T4.3 без клиента).
 fn log_atmosphere(time: Res<Time>, mut next_log: Local<f32>, atmospheres: Res<Atmospheres>) {
     if std::env::var_os("SSR_ATMOS_LOG").is_none() {
@@ -1327,8 +1407,7 @@ fn item_size_of(catalogs: &ContentCatalog, items: &Query<&Item>, bits: u64) -> (
 fn handle_client_messages(
     mut commands: Commands,
     map: Res<GameMap>,
-    roles: Res<GameRoles>,
-    mut role_cursor: ResMut<RoleCursor>,
+    mut content: ServerContent,
     mut spawn_cursor: ResMut<SpawnCursor>,
     mut receivers: Query<(Entity, &RemoteId, &mut MessageReceiver<ClientMessage>), With<Connected>>,
     mut senders: Query<(Entity, &mut MessageSender<ServerMessage>), With<Connected>>,
@@ -1338,18 +1417,18 @@ fn handle_client_messages(
     mut hands: Query<&mut Hands>,
     containers: Query<(Entity, &Container, &ItemPosition)>,
     items: Query<&Item>,
-    catalogs: Res<ContentCatalog>,
     mut actions: ResMut<ActionQueue>,
     mut players: ResMut<Players>,
 ) {
     // Новый раунд (никого нет): выдача ролей с начала списка — первый игрок
     // сессии снова получает инженера (и его доступы к дверям).
     if players.entries.is_empty() {
-        role_cursor.0 = 0;
+        content.role_cursor.0 = 0;
     }
     let mut connected: Vec<(Entity, String)> = Vec::new();
     for (link_entity, remote_id, mut receiver) in receivers.iter_mut() {
         for message in receiver.receive() {
+            content.stats.messages_in += 1;
             match message {
                 ClientMessage::Connect {
                     protocol_version,
@@ -1476,7 +1555,7 @@ fn handle_client_messages(
                     let Ok(mut dest_inventory) = inventories.get_mut(dest_entity) else {
                         continue;
                     };
-                    let (w, h) = item_size_of(&catalogs, &items, item);
+                    let (w, h) = item_size_of(&content.catalogs, &items, item);
                     let anchor = (to_slot != SLOT_ANY).then_some(to_slot);
                     let Some(index) = dest_inventory.find_place(w, h, anchor) else {
                         tracing::warn!(?dest_entity, w, h, "transfer: no room for item");
@@ -1505,7 +1584,7 @@ fn handle_client_messages(
                         continue;
                     };
                     let player = entry.player;
-                    let Some(recipe) = catalogs.recipes.by_id(&recipe).cloned() else {
+                    let Some(recipe) = content.catalogs.recipes.by_id(&recipe).cloned() else {
                         tracing::warn!(recipe, "craft: unknown recipe");
                         continue;
                     };
@@ -1551,7 +1630,7 @@ fn handle_client_messages(
                     }
                     // Выдаём результат (по размеру из каталога, тетрис).
                     let (output_id, count) = recipe.output.clone();
-                    let (w, h) = catalogs.items.size_of(&output_id);
+                    let (w, h) = content.catalogs.items.size_of(&output_id);
                     let mut produced = 0usize;
                     for _ in 0..count {
                         let entity = commands
@@ -1598,7 +1677,7 @@ fn handle_client_messages(
                         &players,
                         &mut commands,
                         &mut inventories,
-                        &catalogs,
+                        &content.catalogs,
                     );
                     tracing::info!(%name, command = %command, reply = %reply, "admin command");
                     if let Ok((_, mut sender)) = senders.get_mut(link_entity) {
@@ -1631,7 +1710,7 @@ fn handle_client_messages(
                         continue;
                     };
                     let anchor = inventory.anchor_of(item).unwrap_or(slot);
-                    let (w, h) = item_size_of(&catalogs, &items, item);
+                    let (w, h) = item_size_of(&content.catalogs, &items, item);
                     inventory.take(item);
                     if !hand.take_in_active(item) {
                         inventory.place(item, w, h, anchor);
@@ -1654,7 +1733,7 @@ fn handle_client_messages(
                     if !hand.take(item) {
                         continue;
                     }
-                    let (w, h) = item_size_of(&catalogs, &items, item);
+                    let (w, h) = item_size_of(&content.catalogs, &items, item);
                     match inventory.put_first_fit(item, w, h) {
                         Some(slot) => tracing::info!(item, slot, "item stowed"),
                         None => {
@@ -1679,7 +1758,7 @@ fn handle_client_messages(
                         hand.take_in_active(item);
                         continue;
                     };
-                    let (w, h) = item_size_of(&catalogs, &items, item);
+                    let (w, h) = item_size_of(&content.catalogs, &items, item);
                     match inventory.put_first_fit(item, w, h) {
                         Some(slot) => tracing::info!(item, slot, "item stowed from hand"),
                         None => {
@@ -1770,14 +1849,14 @@ fn handle_client_messages(
         // выдача по кругу, чтобы в раунде были разные роли.
         let role = std::env::var("SSR_ROLE")
             .ok()
-            .and_then(|id| roles.0.by_id(&id).cloned())
+            .and_then(|id| content.roles.0.by_id(&id).cloned())
             .or_else(|| {
-                let list = &roles.0.roles;
+                let list = &content.roles.0.roles;
                 if list.is_empty() {
                     return None;
                 }
-                let role = list[role_cursor.0 % list.len()].clone();
-                role_cursor.0 += 1;
+                let role = list[content.role_cursor.0 % list.len()].clone();
+                content.role_cursor.0 += 1;
                 Some(role)
             });
 
@@ -1805,7 +1884,7 @@ fn handle_client_messages(
                     Rooms::default(),
                 ))
                 .id();
-            let (w, h) = catalogs.items.size_of(item_name);
+            let (w, h) = content.catalogs.items.size_of(item_name);
             if inventory.put_first_fit(item.to_bits(), w, h).is_none() {
                 tracing::warn!(item = %item_name, "inventory: no room for starting item");
             }
