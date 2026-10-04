@@ -25,7 +25,7 @@ use ssr_core::inventory::{
     Container, Hands, Health, HeldBy, Inventory, Item, ItemPosition, SLOT_ANY,
 };
 use ssr_core::mechanics::{FacialHair, Hair, Sex, facial_hair_style_names, hair_style_names};
-use ssr_core::mechanics::{Ghost, KNOCKDOWN_SECS, KnockedDown};
+use ssr_core::mechanics::{Ghost, KNOCKDOWN_SECS, KnockedDown, Sprinting};
 use ssr_core::power::{Cable, Consumer, Generator, Light, Powered};
 use ssr_core::roles::{Access, PlayerRole, RoleSet};
 use ssr_core::tiles::{MapFile, TileChunkData, TileType};
@@ -105,6 +105,7 @@ fn main() {
     app.init_resource::<MapIndex>();
     app.init_resource::<ActionQueue>();
     app.init_resource::<StaminaClock>();
+    app.init_resource::<SprintCooldowns>();
     app.init_resource::<GameRoles>();
     app.init_resource::<RoleCursor>();
     app.init_resource::<Atmospheres>();
@@ -1329,6 +1330,7 @@ struct AuxParams<'w, 's> {
     time: Res<'w, Time>,
     cooldowns: ResMut<'w, ChatCooldowns>,
     clothings: Query<'w, 's, &'static mut Clothing>,
+    spawn_cursor: ResMut<'w, SpawnCursor>,
 }
 
 /// Индекс из времени: без внешних RNG-зависимостей.
@@ -1693,7 +1695,7 @@ fn handle_client_messages(
     mut commands: Commands,
     map: Res<GameMap>,
     mut content: ServerContent,
-    mut spawn_cursor: ResMut<SpawnCursor>,
+    mut sprint_state: SprintState,
     mut receivers: Query<(Entity, &RemoteId, &mut MessageReceiver<ClientMessage>), With<Connected>>,
     mut senders: Query<(Entity, &mut MessageSender<ServerMessage>), With<Connected>>,
     mut inputs: Query<&mut PlayerInput>,
@@ -1739,6 +1741,36 @@ fn handle_client_messages(
                     actions
                         .0
                         .push((entry.player, QueuedAction::Examine { entity, tx, ty }));
+                }
+                ClientMessage::ToggleSprint { sprint } => {
+                    let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {
+                        continue;
+                    };
+                    let player = entry.player;
+                    let now = sprint_state.clock.seconds;
+                    // Запреты из сборки (`SprintAttemptEvent`): лежание и призрак.
+                    // Невесомость у нас пока не моделируется по игроку — отметить
+                    // как отклонение при переносе атмосферы (PORT_PLAN 3.1).
+                    let blocked = sprint_state.knockeds.get(player).is_ok()
+                        || sprint_state.ghosts.get(player).is_ok();
+                    // Пауза между спринтами (`TimeBetweenSprints = 3` с).
+                    let cooling = sprint_state
+                        .cooldowns
+                        .0
+                        .get(&player)
+                        .is_some_and(|until| now < *until);
+                    if sprint && (blocked || cooling) {
+                        tracing::info!(?player, blocked, cooling, "sprint denied");
+                        continue;
+                    }
+                    commands.entity(player).insert(Sprinting(sprint));
+                    if !sprint {
+                        sprint_state
+                            .cooldowns
+                            .0
+                            .insert(player, now + ssr_core::stamina::TIME_BETWEEN_SPRINTS);
+                    }
+                    tracing::info!(?player, sprint, "sprint toggled");
                 }
                 ClientMessage::SetCombat { combat } => {
                     let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {
@@ -2392,8 +2424,8 @@ fn handle_client_messages(
         let spawn = if map.spawn_points.is_empty() {
             (0.0, 0.0)
         } else {
-            let point = map.spawn_points[spawn_cursor.0 % map.spawn_points.len()];
-            spawn_cursor.0 += 1;
+            let point = map.spawn_points[aux.spawn_cursor.0 % map.spawn_points.len()];
+            aux.spawn_cursor.0 += 1;
             point
         };
         let player = commands
@@ -2402,6 +2434,7 @@ fn handle_client_messages(
                 PlayerInput::default(),
                 MoveVel::default(),
                 ssr_core::stamina::Stamina::default(),
+                Sprinting(false),
                 Replicate::to_clients(NetworkTarget::All),
                 Rooms::default(),
                 RigidBody::Dynamic,
@@ -2578,7 +2611,9 @@ fn movement(
     let dt = time.delta_secs().min(0.1);
     clock.seconds += dt;
     let now = clock.seconds;
-    for (player, input, mut velocity, mut move_vel, knocked, stamina) in players.iter_mut() {
+    for (player, input, mut velocity, mut move_vel, knocked, stamina, sprinting_flag) in
+        players.iter_mut()
+    {
         // Лежачего не двигаем (падение/стан, T-мех).
         if knocked.is_some() {
             move_vel.0 = Vector::ZERO;
@@ -2586,11 +2621,15 @@ fn movement(
             continue;
         }
         let wish = Vec2::from_array(input.direction).normalize_or_zero();
+        // Спринт-тоггл (`SprinterComponent.Sprinting`) умножает обе скорости
+        // на ×1.45 — как в сборке.
+        let sprinting = sprinting_flag.is_some_and(|flag| flag.0);
         // Выносливость (PORT_PLAN 2.3, числа из StaminaComponent/SharedStaminaSystem):
         // бег тратит 8/с, восстановление 5/с и только через 5 с после траты,
         // крит — падение на 6 с и Blunt 10.
         if let Some(mut stamina) = stamina {
-            let sprinting = !input.running && wish != Vec2::ZERO;
+            // Трата идёт от спринт-тоггла (`SprinterComponent`), а не от бега
+            // по умолчанию: бег у человека бесплатный, платит он за спринт.
             let crit = stamina.tick(dt, now, sprinting, wish != Vec2::ZERO);
             if crit {
                 let stun = stamina.enter_crit(now);
@@ -2608,11 +2647,17 @@ fn movement(
             }
         }
         // В SS14 спринт по умолчанию: Shift включает ХОДЬБУ, а не бег.
-        let wish_speed = if input.running {
+        let base_speed = if input.running {
             PLAYER_WALK_SPEED
         } else {
             PLAYER_MOVE_SPEED
         };
+        let wish_speed = base_speed
+            * if sprinting {
+                ssr_core::stamina::SPRINT_SPEED_MULT
+            } else {
+                1.0
+            };
         // Quake: friction (при движении клампится до accel = 20/с), затем accelerate.
         let friction = if wish != Vec2::ZERO {
             PLAYER_ACCEL / 32.0 // 20/с, как min(friction, accel) в SS14
@@ -2828,8 +2873,25 @@ type MovingPlayers<'w, 's> = Query<
         &'static mut MoveVel,
         Option<&'static KnockedDown>,
         Option<&'static mut ssr_core::stamina::Stamina>,
+        Option<&'static Sprinting>,
     ),
 >;
+
+/// Состояние спринта для обработчика сообщений: часы, кулдауны и блокирующие
+/// состояния (лежание, призрак) — одним `SystemParam`, иначе у системы
+/// превышается предел числа параметров.
+#[derive(bevy::ecs::system::SystemParam)]
+struct SprintState<'w, 's> {
+    clock: Res<'w, StaminaClock>,
+    cooldowns: ResMut<'w, SprintCooldowns>,
+    knockeds: Query<'w, 's, &'static KnockedDown>,
+    ghosts: Query<'w, 's, &'static Ghost>,
+}
+
+/// Пауза между спринтами (`SprinterComponent.TimeBetweenSprints = 3` с):
+/// когда игроку снова можно включить спринт.
+#[derive(Resource, Default)]
+struct SprintCooldowns(std::collections::HashMap<Entity, f32>);
 
 /// Часы выносливости: единая шкала времени для трат, пауз и буферов
 /// (`SharedStaminaSystem` работает по `Timing.CurTime`).

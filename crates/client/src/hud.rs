@@ -610,6 +610,30 @@ fn send_interact(
     }
 }
 
+/// Space — спринт-тоггл (`Sprint` в `keybinds.yml` сборки): отправляем намерение,
+/// сервер проверит запреты (лежание, призрак) и паузу 3 с между спринтами.
+pub fn sprint_hotkey(
+    keys: Res<ButtonInput<KeyCode>>,
+    console: Res<Console>,
+    chat: Res<crate::chat::ChatState>,
+    own: Res<OwnPlayerEntity>,
+    sprintings: Query<&ssr_core::mechanics::Sprinting>,
+    mut senders: Query<&mut MessageSender<ClientMessage>, With<Connected>>,
+) {
+    if console.open || chat.focused || !keys.just_pressed(KeyCode::Space) {
+        return;
+    }
+    let Some(sprinting) = own.0.and_then(|entity| sprintings.get(entity).ok()) else {
+        return;
+    };
+    for mut sender in senders.iter_mut() {
+        sender.send::<GameChannel>(ClientMessage::ToggleSprint {
+            sprint: !sprinting.0,
+        });
+    }
+    tracing::info!(sprint = !sprinting.0, "sprint toggle sent");
+}
+
 /// Отправляет осмотр тайла по мировым координатам.
 fn send_examine(
     senders: &mut Query<&mut MessageSender<ClientMessage>, With<Connected>>,

@@ -172,6 +172,8 @@ fn main() {
     );
     // Процедурная анимация шага (PORT_PLAN 2.4, `FootWalkAnimationSystem`).
     app.add_systems(Update, humanoid::foot_walk_animation);
+    // Space — спринт-тоггл (PORT_PLAN 2.2).
+    app.add_systems(Update, hud::sprint_hotkey);
     // Текстуры интерфейса SS14 (слоты, Storage, Nano-кнопки) — сразу на старте.
     app.add_systems(Startup, ui_theme::load_ui_theme);
     // Текстуры GPU-конвейера света (карты теней/FOV/света) — один раз на старте.

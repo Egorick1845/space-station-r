@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Версия протокола. Несовпадение при рукопожатии = отказ соединения (проверка в T1.2).
-pub const PROTOCOL_VERSION: u32 = 11;
+pub const PROTOCOL_VERSION: u32 = 12;
 
 /// Порт игрового сервера по умолчанию (T1.2).
 pub const DEFAULT_SERVER_PORT: u16 = 7777;
@@ -85,6 +85,9 @@ pub enum ClientMessage {
     Unequip { slot: String },
     /// Переключить боевой режим: обычные клики начинают бить, а не использовать.
     SetCombat { combat: bool },
+    /// Переключить спринт (Space у человека, как `Sprint` в `keybinds.yml`).
+    /// Сервер проверяет запреты (лежание, наручники, невесомость) и кулдаун.
+    ToggleSprint { sprint: bool },
     /// Взять предмет из рюкзака в активную руку.
     TakeInHand {
         /// Слот рюкзака.

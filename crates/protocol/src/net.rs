@@ -19,7 +19,7 @@ pub fn register_replication(app: &mut bevy_app::App) {
     use ssr_core::atmosphere::ChunkAtmosphere;
     use ssr_core::clothing::Clothing;
     use ssr_core::inventory::{Container, Hands, Health, HeldBy, Inventory, Item, ItemPosition};
-    use ssr_core::mechanics::{FacialHair, Ghost, Hair, KnockedDown, PlayerName, Sex};
+    use ssr_core::mechanics::{FacialHair, Ghost, Hair, KnockedDown, PlayerName, Sex, Sprinting};
     use ssr_core::power::{Cable, Consumer, Generator, Light, Powered};
     use ssr_core::roles::PlayerRole;
     use ssr_core::tiles::TileChunkData;
@@ -36,6 +36,7 @@ pub fn register_replication(app: &mut bevy_app::App) {
     app.component::<Container>().replicate();
     app.component::<ItemPosition>().replicate();
     app.component::<Clothing>().replicate();
+    app.component::<Sprinting>().replicate();
     app.component::<Sex>().replicate();
     app.component::<PlayerRole>().replicate();
     app.component::<Species>().replicate();

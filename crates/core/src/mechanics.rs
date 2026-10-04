@@ -18,6 +18,12 @@ pub struct KnockedDown {
     pub seconds: f32,
 }
 
+/// Спринт-тоггл (`InputMoverComponent.Sprinting` + `SprinterComponent` в сборке):
+/// у человека включается Space, множитель скорости ×1.45, пауза между спринтами
+/// 3 с. Реплицируется — клиенту нужен флаг для анимации шага и HUD.
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+pub struct Sprinting(pub bool);
+
 /// Имя игрока (реплицируется для админ-меню и осмотра).
 #[derive(Component, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct PlayerName(pub String);
