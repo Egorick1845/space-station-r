@@ -59,10 +59,10 @@ pub fn spawn_power_visuals(
             layout: sprite.layout.clone(),
             index: 0,
         });
-        // Под полом с покрытием провод не видно (T4.4+).
-        let covered = matches!(
+        // Под покрытием провод не видно (T4.4+): только техпол и космос.
+        let covered = !matches!(
             tile_under(&chunks, position.0[0], position.0[1]),
-            TileType::Floor
+            TileType::Plating | TileType::Space
         );
         commands.spawn((
             CableVisual,
@@ -144,10 +144,11 @@ pub fn update_cables(
     let tiles: Vec<(i32, i32)> = cables.iter().map(tile_of).collect();
 
     for (position, mut sprite, mut visibility) in visuals.iter_mut() {
-        // Видимость по покрытию тайла.
-        let covered = matches!(
+        // Видимость по покрытию: провод виден только на техполе и в космосе
+        // (под полом и внутри стен его не видно).
+        let covered = !matches!(
             tile_under(&chunks, position.0[0], position.0[1]),
-            TileType::Floor
+            TileType::Plating | TileType::Space
         );
         let target = if covered {
             Visibility::Hidden

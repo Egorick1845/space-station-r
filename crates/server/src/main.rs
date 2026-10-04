@@ -965,7 +965,7 @@ fn load_map(
     mut map_index: ResMut<MapIndex>,
 ) {
     // SSR_MAP=imported_aspid.ron — выбрать карту (файлы в assets/maps/).
-    let map_name = std::env::var("SSR_MAP").unwrap_or_else(|_| "test.ron".to_string());
+    let map_name = std::env::var("SSR_MAP").unwrap_or_else(|_| "station.ron".to_string());
     let path = ssr_core::assets_root().join("maps").join(&map_name);
     let file = MapFile::load(&path).unwrap_or_else(|e| panic!("{e}"));
     let chunks: Vec<TileChunkData> = file
