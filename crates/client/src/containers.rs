@@ -151,14 +151,14 @@ fn open_container_in_reach<'a>(
 
 /// Рисует панель открытого ящика (слоты и содержимое).
 #[allow(clippy::too_many_arguments)]
-#[allow(unreachable_code)]
+#[allow(unreachable_code, unused_variables)]
 pub fn render_container_panel(
     mut commands: Commands,
     sprites: crate::inventory_ui::ItemSprites,
-    _theme: Res<crate::ui_theme::UiTheme>,
+    theme: Res<crate::ui_theme::UiTheme>,
     own: Res<crate::inventory_ui::OwnPlayerEntity>,
     positions: Query<&PlayerPosition>,
-    _window_positions: Res<crate::windows::WindowPositions>,
+    window_positions: Res<crate::windows::WindowPositions>,
     containers: WorldContainers,
     inventories: Query<&Inventory>,
     root: Query<Entity, With<ContainerPanel>>,
