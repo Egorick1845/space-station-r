@@ -145,6 +145,8 @@ fn main() {
     app.init_resource::<audio::SoundRequests>();
     // Ленивая подгрузка RSI (T5.3): обрабатываем заявки из реестра каждый кадр.
     app.add_systems(Update, rsi::load_requested_rsi);
+    // Боевой режим: иконка кнопки действия и маркер у курсора.
+    app.add_systems(Update, (hud::sync_combat_button, hud::combat_cursor_marker));
     // Спавн-меню: прокрутка догоняет цель (rate 15, как ScrollBar в SS14).
     app.add_systems(Update, hud::spawn_scroll_anim);
     // Кадр мира как в SS14: ограничение видимой области (ScalingViewport).

@@ -101,6 +101,78 @@ pub struct AdminMenuRoot;
 #[derive(Component)]
 pub struct AppearanceRoot;
 
+/// Иконка кнопки боевого режима (меняется по состоянию режима).
+#[derive(Component)]
+pub struct CombatButtonIcon;
+
+/// Маркер у курсора в боевом режиме (в сборке в бою курсор помечается, а ПКМ
+/// не открывает контекстное меню — сам запрет ПКМ уже сделан в verb-ветке).
+#[derive(Component)]
+pub struct CombatCursor;
+
+/// Меняет иконку кнопки боевого режима: включён — `harm.png`, выключен —
+/// `harmOff.png` (`Interface/Actions/harm*.png` сборки).
+pub fn sync_combat_button(
+    state: Res<HudState>,
+    theme: Res<crate::ui_theme::UiTheme>,
+    mut buttons: Query<&mut ImageNode, With<CombatButtonIcon>>,
+) {
+    let wanted = theme.action_icons.get(if state.combat { 2 } else { 3 });
+    let Some(wanted) = wanted else {
+        return;
+    };
+    for mut image in buttons.iter_mut() {
+        if image.image != *wanted {
+            image.image = wanted.clone();
+        }
+    }
+}
+
+/// Рисует маркер у курсора в боевом режиме и убирает его вне боя.
+pub fn combat_cursor_marker(
+    mut commands: Commands,
+    state: Res<HudState>,
+    theme: Res<crate::ui_theme::UiTheme>,
+    windows: Query<&Window>,
+    markers: Query<Entity, With<CombatCursor>>,
+) {
+    let cursor = windows
+        .iter()
+        .next()
+        .and_then(|window| window.cursor_position());
+    let existing: Vec<Entity> = markers.iter().collect();
+    let (Some(cursor), true) = (cursor, state.combat) else {
+        for entity in existing {
+            commands.entity(entity).despawn();
+        }
+        return;
+    };
+    let icon = theme.action_icons.get(2).cloned().unwrap_or_default();
+    if let Some(entity) = existing.first() {
+        commands.entity(*entity).insert(Node {
+            position_type: PositionType::Absolute,
+            left: px(cursor.x - 12.0),
+            top: px(cursor.y - 12.0),
+            width: px(24),
+            height: px(24),
+            ..default()
+        });
+    } else {
+        commands.spawn((
+            CombatCursor,
+            crate::ui_theme::stretched(&icon),
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(cursor.x - 12.0),
+                top: px(cursor.y - 12.0),
+                width: px(24),
+                height: px(24),
+                ..default()
+            },
+        ));
+    }
+}
+
 /// Строка списка игроков в админ-меню.
 #[derive(Component, Clone, PartialEq)]
 pub struct AdminPlayerButton {
@@ -352,6 +424,10 @@ pub fn spawn_hud(
                     .get(icon_index)
                     .cloned()
                     .unwrap_or_default();
+                // Боевой режим: иконка кнопки меняется по состоянию
+                // (`harm.png` включён / `harmOff.png` выключен — как ActionButton
+                // в сборке, где иконка берётся из состояния режима).
+                let combat_button = matches!(action, HudAction::ToggleCombat);
                 column
                     .spawn((
                         action,
@@ -372,14 +448,26 @@ pub fn spawn_hud(
                         },
                     ))
                     .with_children(|slot| {
-                        slot.spawn((
-                            ImageNode::new(icon),
-                            Node {
-                                width: px(64),
-                                height: px(64),
-                                ..default()
-                            },
-                        ));
+                        if combat_button {
+                            slot.spawn((
+                                CombatButtonIcon,
+                                ImageNode::new(icon),
+                                Node {
+                                    width: px(64),
+                                    height: px(64),
+                                    ..default()
+                                },
+                            ));
+                        } else {
+                            slot.spawn((
+                                ImageNode::new(icon),
+                                Node {
+                                    width: px(64),
+                                    height: px(64),
+                                    ..default()
+                                },
+                            ));
+                        }
                         slot.spawn((
                             Text::new(key),
                             TextFont::from_font_size(13.0),
