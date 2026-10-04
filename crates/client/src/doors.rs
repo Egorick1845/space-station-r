@@ -27,13 +27,63 @@ const DOOR_CLOSED: &str = "sprites/ss14/Structures/Doors/Airlocks/Standard/basic
 const DOOR_OPEN: &str = "sprites/ss14/Structures/Doors/Airlocks/Standard/basic.rsi#open";
 const DOOR_OPENING: &str = "sprites/ss14/Structures/Doors/Airlocks/Standard/basic.rsi#opening";
 const DOOR_CLOSING: &str = "sprites/ss14/Structures/Doors/Airlocks/Standard/basic.rsi#closing";
+/// Красная лампа «доступ запрещён» (как в SS14: мигающий красный индикатор).
+const DOOR_DENY: &str = "sprites/ss14/Structures/Doors/Airlocks/Standard/basic.rsi#deny_unlit";
 
 /// Анимация двери: проигрывание opening/closing по delays из RSI.
 #[derive(Clone, Copy, PartialEq)]
 enum DoorAnim {
     Idle,
-    Opening { frame: u32, elapsed: f32 },
-    Closing { frame: u32, elapsed: f32 },
+    Opening {
+        frame: u32,
+        elapsed: f32,
+    },
+    Closing {
+        frame: u32,
+        elapsed: f32,
+    },
+    /// Отказ доступа: мигает красная лампа, затем состояние двери.
+    Deny {
+        frame: u32,
+        elapsed: f32,
+    },
+}
+
+/// Двери, которым сервер отказал в доступе (bits) — клиент показывает
+/// красную лампу (T4.2). Заполняется в `receive_server`.
+#[derive(Resource, Default)]
+pub struct DeniedDoors(pub Vec<u64>);
+
+/// Включает красную лампу на двери, которой сервер отказал в доступе.
+pub fn apply_denied_doors(
+    mut denied: ResMut<DeniedDoors>,
+    entity_map: Option<Res<ServerEntityMap>>,
+    mut visuals: Query<&mut DoorVisual>,
+) {
+    if denied.0.is_empty() {
+        return;
+    }
+    let Some(map) = entity_map.as_deref() else {
+        return;
+    };
+    let requests = std::mem::take(&mut denied.0);
+    for bits in requests {
+        let Some(server_entity) = Entity::try_from_bits(bits) else {
+            continue;
+        };
+        let Some(client_entity) = map.to_client().get(&server_entity).copied() else {
+            continue;
+        };
+        for mut visual in visuals.iter_mut() {
+            if visual.door == client_entity {
+                visual.anim = DoorAnim::Deny {
+                    frame: 0,
+                    elapsed: 0.0,
+                };
+                tracing::info!(door = ?visual.door, "access denied: red light");
+            }
+        }
+    }
 }
 
 /// Визуальный спрайт двери, привязанный к реплицированной сущности.
@@ -96,11 +146,12 @@ pub fn update_door_visuals(
     mut visuals: Query<(Entity, &mut DoorVisual, &mut Sprite)>,
     registry: Res<RsiRegistry>,
 ) {
-    let (Some(closed), Some(open), Some(opening), Some(closing)) = (
+    let (Some(closed), Some(open), Some(opening), Some(closing), Some(deny)) = (
         registry.get(DOOR_CLOSED),
         registry.get(DOOR_OPEN),
         registry.get(DOOR_OPENING),
         registry.get(DOOR_CLOSING),
+        registry.get(DOOR_DENY),
     ) else {
         return;
     };
@@ -157,6 +208,18 @@ pub fn update_door_visuals(
                     elapsed,
                     dt,
                     false,
+                );
+            }
+            // Мигаем красной лампой, затем возвращаемся к состоянию двери.
+            DoorAnim::Deny { frame, elapsed } => {
+                advance_anim(
+                    &mut visual.anim,
+                    &mut sprite,
+                    deny,
+                    frame,
+                    elapsed,
+                    dt,
+                    door.open,
                 );
             }
         }

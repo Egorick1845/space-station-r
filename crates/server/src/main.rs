@@ -1197,6 +1197,18 @@ fn process_actions(
                         required = door.access.as_deref().unwrap_or(""),
                         "door access denied"
                     );
+                    // Клиенту — сигнал красной лампы (как deny в SS14).
+                    if let Some(link) = players
+                        .entries
+                        .iter()
+                        .find(|entry| entry.player == player)
+                        .map(|entry| entry.link)
+                        && let Ok(mut sender) = senders.get_mut(link)
+                    {
+                        sender.send::<GameChannel>(ServerMessage::Event {
+                            kind: format!("door_denied:{}", target.to_bits()),
+                        });
+                    }
                     continue;
                 }
                 door.open = !door.open;

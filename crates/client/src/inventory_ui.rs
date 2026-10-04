@@ -143,11 +143,16 @@ fn own_hands<'a>(own: &OwnPlayerEntity, hands: &'a Query<&Hands>) -> Option<&'a 
 /// Спавнит визуалы других игроков (тело собирает `humanoid::sync_bodies`).
 pub fn spawn_remote_players(
     mut commands: Commands,
+    own_resource: Res<OwnPlayerEntity>,
     player_entity: Res<PlayerEntity>,
     entity_map: Option<Res<ServerEntityMap>>,
     added: AddedPositions,
 ) {
-    let own = crate::own_player_entity(&player_entity, &entity_map);
+    // Свой игрок рисуется отдельной сущностью Player: если не отсеять его тут,
+    // появится второй (немгновенный) визуал — «дёргающаяся кукла».
+    let own = own_resource
+        .0
+        .or_else(|| crate::own_player_entity(&player_entity, &entity_map));
     for (entity, position) in added.iter() {
         if Some(entity) == own {
             continue;
@@ -155,6 +160,8 @@ pub fn spawn_remote_players(
         commands.spawn((
             RemotePlayerVisual { player: entity },
             crate::humanoid::Facing(0),
+            // Родителю нужна Visibility, иначе части тела-дети не видны (B0004).
+            Visibility::default(),
             Transform::from_xyz(position.0[0], position.0[1], 0.9),
         ));
         tracing::info!(player = ?entity, "remote player visual spawned");
@@ -165,6 +172,7 @@ pub fn spawn_remote_players(
 /// сторону по смещению и убирает «осиротевшие» (игрок вышел из интереса).
 pub fn sync_remote_players(
     mut commands: Commands,
+    own: Res<OwnPlayerEntity>,
     positions: Query<&PlayerPosition>,
     mut visuals: Query<(
         Entity,
@@ -174,6 +182,11 @@ pub fn sync_remote_players(
     )>,
 ) {
     for (visual_entity, visual, mut transform, mut facing) in visuals.iter_mut() {
+        // Дубль своего игрока (успел появиться до маппинга) — убираем.
+        if Some(visual.player) == own.0 {
+            commands.entity(visual_entity).despawn();
+            continue;
+        }
         let Ok(position) = positions.get(visual.player) else {
             commands.entity(visual_entity).despawn();
             continue;

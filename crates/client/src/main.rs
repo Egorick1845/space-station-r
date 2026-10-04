@@ -96,6 +96,7 @@ fn main() {
     app.init_resource::<console::Console>();
     app.init_resource::<windows::WindowPositions>();
     app.init_resource::<settings::Settings>();
+    app.init_resource::<doors::DeniedDoors>();
     // FPS-диагностика нужна строке FPS в углу (включается в настройках).
     app.add_plugins(bevy::diagnostic::FrameTimeDiagnosticsPlugin::default());
     // RsiRegistry строится сразу после DefaultPlugins: нужен и игроку (обезьяна),
@@ -133,6 +134,7 @@ fn main() {
             camera_follow_player,
             doors::spawn_door_visuals,
             doors::update_door_visuals,
+            doors::apply_denied_doors,
             doors::auto_interact,
             doors::hover_outline,
         )
@@ -435,10 +437,24 @@ fn receive_server(
     mut receivers: Query<&mut MessageReceiver<ServerMessage>, With<Connected>>,
     mut player_entity: ResMut<PlayerEntity>,
     mut menu: ResMut<inventory_ui::ActionMenu>,
+    mut denied: ResMut<doors::DeniedDoors>,
 ) {
     for mut receiver in receivers.iter_mut() {
         for message in receiver.receive() {
             match message {
+                // Отказ доступа: сервер присылает bits двери — мигаем красной лампой.
+                ServerMessage::Event { kind } => {
+                    match kind
+                        .strip_prefix("door_denied:")
+                        .and_then(|value| value.parse::<u64>().ok())
+                    {
+                        Some(bits) => {
+                            denied.0.push(bits);
+                            tracing::info!(bits, "door denied event");
+                        }
+                        None => tracing::info!(kind, "server event"),
+                    }
+                }
                 ServerMessage::Welcome {
                     player_entity: entity,
                     protocol_version,
@@ -462,7 +478,6 @@ fn receive_server(
                     menu.options = options;
                 }
                 ServerMessage::EntityDelta { .. } => {} // дельты позиций — T1.3/T1.4
-                ServerMessage::Event { kind } => tracing::info!(kind, "server event"),
             }
         }
     }
@@ -579,24 +594,38 @@ fn setup_camera(mut commands: Commands) {
 /// (`humanoid::sync_bodies`), здесь только трансформ и направление.
 fn spawn_player_sprite(commands: &mut Commands) {
     // z = 1: игрок рисуется поверх тайлов карты.
+    // Visibility обязателен родителю: без него части тела-дети не получают
+    // видимость (B0004) и рисуются рвано.
     commands.spawn((
         Player,
         humanoid::Facing(0), // старт: смотрит на юг
+        Visibility::default(),
         Transform::from_xyz(0.0, 0.0, 1.0),
     ));
 }
 
+/// Визуалы игрока (для камеры).
+type PlayerTransforms<'w, 's> =
+    Query<'w, 's, (Entity, &'static Transform), (With<Player>, Without<Camera2d>)>;
+
 /// Камера жёстко следует за отрисованной позицией игрока: никакого второго
 /// сглаживания — иначе мир «дрожит» относительно персонажа.
 fn camera_follow_player(
-    player: Query<&Transform, (With<Player>, Without<Camera2d>)>,
+    player: PlayerTransforms,
     mut camera: Single<&mut Transform, With<Camera2d>>,
+    mut state: Local<(f32, f32)>,
 ) {
-    let Ok(target) = player.single() else {
+    let count = player.iter().count();
+    let Ok((_, target)) = player.single() else {
+        tracing::warn!(count, "camera follow: Player entity is not single");
         return;
     };
     camera.translation.x = target.translation.x;
     camera.translation.y = target.translation.y;
+    if (state.0, state.1) != (camera.translation.x, camera.translation.y) {
+        *state = (camera.translation.x, camera.translation.y);
+        tracing::debug!(camera = ?state, "camera moved");
+    }
 }
 
 /// Грузит прототипы/спрайты тайлов; сами чанки приходят с сервера (T2.3).
