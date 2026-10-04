@@ -62,10 +62,21 @@ impl Stamina {
         self.damage > BREATHING_THRESHOLD
     }
 
-    /// Уровень алерты 0..6 (`RoundToLevels` из `SharedStaminaSystem`): 0 — полон.
+    /// Уровень алерты (severity) — точный перенос `RoundToLevels`
+    /// (`ContentHelpers.cs` сборки): actual = остаток выносливости, max =
+    /// порог, levels = 7. При `actual >= max` — уровень 6, при `<= 0` — 0,
+    /// иначе `ceil(actual / max × (levels − 2))`. Плюс в движке показывается
+    /// и severity 0 (иконка stamina0 мерцает) — а не «алерта нет».
     pub fn alert_level(&self) -> u8 {
-        let remaining = self.remaining() / CRIT_THRESHOLD;
-        ((1.0 - remaining) * 6.0).round().clamp(0.0, 6.0) as u8
+        let actual = self.remaining() as f64;
+        let max = CRIT_THRESHOLD as f64;
+        if actual >= max {
+            return 6;
+        }
+        if actual <= 0.0 {
+            return 0;
+        }
+        (actual / max * 5.0).ceil().clamp(0.0, 5.0) as u8
     }
 
     /// Наносит урон выносливости (удар, срыв спринта) и отодвигает реген.
@@ -181,11 +192,24 @@ mod tests {
             damage: 0.0,
             ..Default::default()
         };
-        assert_eq!(stamina.alert_level(), 0);
+        // Полная выносливость: severity 6 (иконка stamina6 — самая спокойная),
+        // но ИНДИКАТОР ПОКАЗЫВАЕТСЯ (в сборке алерт стамины виден всегда).
+        assert_eq!(stamina.alert_level(), 6);
         assert!(!stamina.breathing());
         stamina.damage = BREATHING_THRESHOLD + 1.0;
         assert!(stamina.breathing(), "дыхание включается после порога 50");
+        // Примеры `RoundToLevels`: 89.99 из 100 → ceil(0.8999×5)=5, 95/100 → 5.
+        stamina.damage = 10.01;
+        assert_eq!(stamina.alert_level(), 5);
+        stamina.damage = 40.0; // остаток 60 → ceil(0.6×5)=3
+        assert_eq!(stamina.alert_level(), 3);
+        stamina.damage = CRIT_THRESHOLD - 0.01; // остаток 0.01 → ceil(0.0005)=1
+        assert_eq!(stamina.alert_level(), 1, "почти крит — почти пустая иконка");
         stamina.damage = CRIT_THRESHOLD;
-        assert_eq!(stamina.alert_level(), 6, "шесть уровней на крите");
+        assert_eq!(
+            stamina.alert_level(),
+            6,
+            "на крите — уровень 6 (максимальный)"
+        );
     }
 }

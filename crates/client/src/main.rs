@@ -260,10 +260,12 @@ fn main() {
             inventory_ui::sync_inhand_items,
             inventory_ui::render_inventory_panel,
             inventory_ui::render_hands_panel,
-            inventory_ui::spawn_health_hud,
-            inventory_ui::update_health_hud,
+            // Блок «HP / Атм» убран (владелец: «он в сс14 по другому сделан»):
+            // в сборке нет постоянного HUD с давлением — здоровье показывает
+            // алерт `Health` в правой колонке (5 иконок human_alive.rsi),
+            // давление — алерты Low/HighPressure только при опасности
+            // (`BarotraumaSystem`), точные цифры — газоанализатор.
             inventory_ui::update_role_hud,
-            inventory_ui::update_atmos_hud,
             inventory_ui::render_action_menu,
             inventory_ui::inventory_slot_click,
             inventory_ui::hands_ui_click,

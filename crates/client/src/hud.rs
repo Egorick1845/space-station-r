@@ -637,32 +637,33 @@ pub fn render_stamina_alert(
     for entity in root.iter() {
         commands.entity(entity).despawn();
     }
-    if level == 0 {
-        return; // полная выносливость — алерта нет (severity 0 в SS14 скрыт)
-    }
+    // Алерт стамины виден ВСЕГДА (в сборке он показывается и при полной
+    // выносливости — иконка stamina6, а при близком к нулю stamina0 мерцает).
     let key = format!("sprites/ss14/Interface/Alerts/stamina.rsi#stamina{level}");
     let Some(sprite) = registry.get(&key) else {
         return; // RSI подгрузится следующим кадром (реестр ленивый)
     };
     let icon = crate::inventory_ui::icon_node(sprite);
+    // Размер и позиция как в сборке: иконка 32×32 рисуется в масштабе ×2
+    // (`AlertControl`: Scale = (2,2), MaxSize = 64×64), алерты — правый
+    // верхний угол, столбцом (`AlertsUI.xaml`: Right + Top, Columns = 1).
     commands
         .spawn((
             AlertRoot,
             Node {
                 position_type: PositionType::Absolute,
                 right: px(10),
-                top: Val::Percent(50.0),
-                width: px(32),
-                height: px(32),
+                top: px(10),
+                width: px(64),
+                height: px(64),
                 ..default()
             },
-            UiTransform::from_translation(Val2::new(Val::Px(0.0), Val::Percent(-50.0))),
         ))
         .with_child((
             icon,
             Node {
-                width: px(32),
-                height: px(32),
+                width: px(64),
+                height: px(64),
                 ..default()
             },
         ));
