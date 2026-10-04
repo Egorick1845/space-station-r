@@ -5,6 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+bytemuck = { workspace = true }
 ssr-core = { workspace = true }
 ssr-protocol = { workspace = true, features = ["net"] }
 bevy = { workspace = true, features = ["webp"] }

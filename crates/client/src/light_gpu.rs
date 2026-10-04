@@ -128,7 +128,7 @@ fn light_texture() -> Image {
 /// (шейдер читал бы чужие числа).
 #[repr(C)]
 #[allow(dead_code)]
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct LightParams {
     pub tile: f32,
     /// Выравнивание `camera` до 8 байт (правило раскладки WGSL).
@@ -149,7 +149,7 @@ pub struct LightParams {
 /// Источник света в раскладке `Light` из шейдера.
 #[repr(C)]
 #[allow(dead_code)]
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuLightUniform {
     /// (x, y, radius, energy) — как `data` в WGSL.
     pub data: [f32; 4],
@@ -162,9 +162,64 @@ pub struct GpuLightUniform {
 /// Отрезок окклюдера в раскладке `Wall` из шейдера: (ax, ay, bx, by).
 #[repr(C)]
 #[allow(dead_code)]
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuWallUniform {
     pub ab: [f32; 4],
+}
+
+/// Готовые к загрузке в GPU данные конвейера света: байты буферов стен и
+/// источников плюс униформа кадра (источник — `crate::lighting::LightScene`,
+/// которая заполняется при пересчёте карты света).
+#[derive(Default)]
+pub struct PackedScene {
+    pub walls: Vec<u8>,
+    pub lights: Vec<u8>,
+    pub params: LightParams,
+}
+
+/// Упаковывает сцену света в байты сторадж-буферов (раскладка — как в
+/// `assets/shaders/light.wgsl`, за ней следит тест раскладки выше).
+pub fn pack_scene(scene: &crate::lighting::LightScene, tile: f32) -> PackedScene {
+    let walls: Vec<GpuWallUniform> = scene
+        .walls
+        .iter()
+        .map(|segment| GpuWallUniform {
+            ab: [segment.a.0, segment.a.1, segment.b.0, segment.b.1],
+        })
+        .collect();
+    let lights: Vec<GpuLightUniform> = scene
+        .lights
+        .iter()
+        .map(|light| GpuLightUniform {
+            data: [
+                light.position.0,
+                light.position.1,
+                light.radius,
+                light.energy,
+            ],
+            params: [light.falloff, light.curve, 0.0, 0.0],
+            color: [light.color[0], light.color[1], light.color[2], 0.0],
+        })
+        .collect();
+    PackedScene {
+        walls: bytemuck::cast_slice(&walls).to_vec(),
+        lights: bytemuck::cast_slice(&lights).to_vec(),
+        params: LightParams {
+            tile,
+            _pad0: 0.0,
+            camera: [scene.camera.0, scene.camera.1],
+            light_count: lights.len() as u32,
+            wall_count: walls.len() as u32,
+            map_size: [LIGHT_MAP_SIZE.0 as f32, LIGHT_MAP_SIZE.1 as f32],
+            viewport: [scene.viewport.0, scene.viewport.1],
+            eye: [scene.eye.0, scene.eye.1],
+            fov_range: 0.0,
+            ambient: 0.082,
+            blur_radius: 0.0,
+            blur_boost: 1.0,
+            blur_dir: [1.0, 0.0],
+        },
+    }
 }
 
 #[cfg(test)]
@@ -185,6 +240,32 @@ mod tests {
         assert_eq!(std::mem::offset_of!(LightParams, fov_range), 48);
         assert_eq!(std::mem::offset_of!(LightParams, blur_boost), 60);
         assert_eq!(std::mem::offset_of!(LightParams, blur_dir), 64);
+    }
+
+    /// Упаковка сцены: размеры буферов соответствуют числу элементов, а
+    /// униформа несёт число источников и стен (шейдер по ним идёт циклом).
+    #[test]
+    fn pack_scene_matches_element_sizes() {
+        let mut scene = crate::lighting::LightScene::default();
+        scene.walls.push(ssr_core::occluders::OccluderSegment {
+            a: (1.0, 2.0),
+            b: (3.0, 4.0),
+        });
+        scene.lights.push(crate::lighting::GpuLight {
+            position: (10.0, 20.0),
+            radius: 320.0,
+            energy: 0.8,
+            falloff: 6.8,
+            curve: 0.0,
+            color: [1.0, 0.78, 0.62],
+        });
+        let packed = pack_scene(&scene, 32.0);
+        assert_eq!(packed.walls.len(), size_of::<GpuWallUniform>());
+        assert_eq!(packed.lights.len(), size_of::<GpuLightUniform>());
+        assert_eq!(packed.params.wall_count, 1);
+        assert_eq!(packed.params.light_count, 1);
+        assert_eq!(packed.params.tile, 32.0);
+        assert_eq!(packed.params.camera, [0.0, 0.0]);
     }
 
     /// Источник и отрезок — массивы по 48 и 16 байт (`vec4<f32>` в WGSL).

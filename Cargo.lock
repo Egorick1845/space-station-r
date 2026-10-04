@@ -7993,6 +7993,7 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "bevy_replicon",
+ "bytemuck",
  "image",
  "lightyear",
  "ron",
