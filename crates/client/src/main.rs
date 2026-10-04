@@ -143,6 +143,18 @@ fn main() {
     app.init_resource::<audio::SoundRequests>();
     // Ленивая подгрузка RSI (T5.3): обрабатываем заявки из реестра каждый кадр.
     app.add_systems(Update, rsi::load_requested_rsi);
+    // Кадр мира как в SS14: ограничение видимой области (ScalingViewport).
+    app.add_systems(Update, fit_world_viewport);
+    // Окно выбора внешности (P) — отдельной группой: у кортежей есть предел.
+    app.add_systems(
+        Update,
+        (
+            appearance::appearance_hotkey,
+            appearance::render_appearance_menu,
+            appearance::appearance_click,
+        )
+            .chain(),
+    );
     // Текстуры интерфейса SS14 (слоты, Storage, Nano-кнопки) — сразу на старте.
     app.add_systems(Startup, ui_theme::load_ui_theme);
     // FPS-диагностика нужна строке FPS в углу (включается в настройках).
