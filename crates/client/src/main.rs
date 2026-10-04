@@ -274,7 +274,6 @@ fn main() {
             // алерт `Health` в правой колонке (5 иконок human_alive.rsi),
             // давление — алерты Low/HighPressure только при опасности
             // (`BarotraumaSystem`), точные цифры — газоанализатор.
-            inventory_ui::update_role_hud,
             inventory_ui::render_action_menu,
             inventory_ui::inventory_slot_click,
             inventory_ui::hands_ui_click,

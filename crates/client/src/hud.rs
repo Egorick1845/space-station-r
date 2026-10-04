@@ -619,10 +619,14 @@ pub struct AlertRoot;
 /// health0..health4. Уровень — как `MobThresholdSystem`: лерп от 0 (максимальная
 /// тяжесть) до 4 (здоров) по проценту до следующего порога состояния.
 pub fn health_alert_level(health: &ssr_core::inventory::Health) -> u8 {
+    // `MobThresholdSystem` сборки: `severity = round(lerp(0, 4, доля урона до
+    // следующего состояния))`, иконки HumanHealth — health0..health4 по
+    // возрастанию severity. То есть 0 урона → health0 («ХОРОШО», зелёная) и
+    // порог крита → health4 («ОПАСНО!», красная). Раньше у нас было наоборот:
+    // полностью здоровый игрок показывал красную иконку опасности.
     let damage = (health.max - health.current).max(0) as f32;
-    let percentage = (damage / health.max.max(1) as f32).clamp(0.0, 1.0);
-    // 0 урона → severity 4 (здоров), у смерти → 0.
-    (4.0 * (1.0 - percentage)).round().clamp(0.0, 4.0) as u8
+    let fraction = (damage / health.max.max(1) as f32).clamp(0.0, 1.0);
+    (4.0 * fraction).round().clamp(0.0, 4.0) as u8
 }
 
 /// Рисует колонку алертов: Health (5 иконок human_alive) и Stamina
@@ -640,7 +644,7 @@ pub fn render_alerts_column(
         .0
         .and_then(|entity| healths.get(entity).ok())
         .map(health_alert_level)
-        .unwrap_or(4);
+        .unwrap_or(0);
     let level_stamina = own
         .0
         .and_then(|entity| staminas.get(entity).ok())
@@ -649,21 +653,30 @@ pub fn render_alerts_column(
     if last.as_ref() == Some(&(level_health, level_stamina)) {
         return;
     }
-    *last = Some((level_health, level_stamina));
-    for entity in root.iter() {
-        commands.entity(entity).despawn();
-    }
     let icons = [
         format!("sprites/ss14/Interface/Alerts/human_alive.rsi#health{level_health}"),
         format!("sprites/ss14/Interface/Alerts/stamina.rsi#stamina{level_stamina}"),
     ];
+    // Реестр RSI ленивый: в первый кадр спрайтов ещё нет. Без этой проверки
+    // колонка один раз собиралась пустой, а `last` уже запрещал повтор — алерты
+    // не появлялись вообще (владелец: «индикатор стамины работает неправильно»).
+    if icons.iter().any(|key| registry.get(key).is_none()) {
+        return;
+    }
+    *last = Some((level_health, level_stamina));
+    for entity in root.iter() {
+        commands.entity(entity).despawn();
+    }
     commands
         .spawn((
             AlertRoot,
             Node {
                 position_type: PositionType::Absolute,
                 right: px(10),
-                top: px(10),
+                // В сборке чат и алерты оба `TopRight`, но алерты сдвинуты вниз
+                // на высоту чата (`DefaultGameScreen`: `SetMarginTop(Alerts, …)`),
+                // иначе колонка прячется за окном чата.
+                top: px(crate::chat::CHAT_HEIGHT + 20.0),
                 flex_direction: FlexDirection::Column,
                 row_gap: px(4),
                 ..default()

@@ -24,9 +24,9 @@ const CHAT_VISIBLE: usize = 9;
 /// Сколько строк храним в истории.
 const CHAT_HISTORY: usize = 200;
 /// Ширина панели (`ChatBox.xaml`: `MinSize 465×225`).
-const CHAT_WIDTH: f32 = 465.0;
+pub const CHAT_WIDTH: f32 = 465.0;
 /// Высота всего блока чата (`ChatBox.xaml`: `MinSize 465×225`).
-const CHAT_HEIGHT: f32 = 225.0;
+pub const CHAT_HEIGHT: f32 = 225.0;
 /// Отступ области сообщений (`Margin="8 8 8 4"`).
 const CHAT_OUTPUT_MARGIN: f32 = 8.0;
 

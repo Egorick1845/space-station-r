@@ -11,7 +11,6 @@ use ssr_core::PlayerPosition;
 use ssr_core::inventory::{
     Container, Hands, HeldBy, INVENTORY_COLS, INVENTORY_ROWS, Inventory, Item, SLOT_ANY,
 };
-use ssr_core::roles::PlayerRole;
 use ssr_protocol::net::GameChannel;
 use ssr_protocol::{ActionOption, ClientMessage};
 
@@ -1001,35 +1000,6 @@ fn hand_slot(
 /// Открыто ли окно рюкзака (доступ к ресурсу через `Res<InventoryUi>`).
 fn ui_open(ui: &InventoryUi) -> bool {
     ui.open
-}
-
-/// Строка роли в HUD (T4.2).
-#[derive(Component)]
-pub struct RoleHudText;
-
-/// Показывает роль своего игрока (T4.2): у антагониста — ещё и цель.
-pub fn update_role_hud(
-    own: Res<OwnPlayerEntity>,
-    roles: Query<&PlayerRole>,
-    mut texts: Query<&mut Text, With<RoleHudText>>,
-) {
-    let Some(entity) = own.0 else {
-        return;
-    };
-    let Ok(role) = roles.get(entity) else {
-        return;
-    };
-    let value = if role.antagonist && !role.goal.is_empty() {
-        format!("Роль: {} — цель: {}", role.name, role.goal)
-    } else {
-        format!("Роль: {}", role.name)
-    };
-    for mut text in &mut texts {
-        if text.0 != value {
-            text.0 = value.clone();
-            tracing::info!(role = %role.id, antagonist = role.antagonist, "own role received");
-        }
-    }
 }
 
 /// Меню действий: строится из ответа сервера, позиционируется у курсора.
