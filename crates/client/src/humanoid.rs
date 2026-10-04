@@ -388,6 +388,9 @@ pub fn sync_worn_clothes(
     )>,
     visuals: Query<(Entity, &crate::inventory_ui::RemotePlayerVisual)>,
     own_visual: Res<crate::inventory_ui::OwnPlayerEntity>,
+    body_owners: Query<Entity, With<crate::Player>>,
+    parts: Query<&HumanoidPart>,
+    children_of: Query<&Children>,
     worn: Query<(Entity, &WornLayer)>,
     mut last: Local<std::collections::HashMap<Entity, WornSignature>>,
 ) {
@@ -402,10 +405,12 @@ pub fn sync_worn_clothes(
         // Визуал игрока: у своего — сама сущность (если уже разрешена), у чужого —
         // его визуал. Дубль визуала своего игрока брать нельзя: он удаляется
         // в sync_remote_players вместе с детьми, и одежда исчезала («кукла голая»).
+        // Тело рисуется на сущности с маркером `Player` (свой) или на визуале
+        // чужого игрока — одежда обязана висеть на ТОЙ ЖЕ сущности, иначе её
+        // слои уходят в мировое начало координат (тело-родитель другой).
         let visual = if Some(entity) == own_visual.0 {
-            Some(entity)
+            body_owners.iter().next()
         } else if own_visual.0.is_none() {
-            // Свой игрок ещё не разрешён — подождём следующий кадр.
             None
         } else {
             visuals
@@ -414,11 +419,18 @@ pub fn sync_worn_clothes(
                 .find(|(_, remote)| remote.player == entity)
                 .map(|(visual, _)| visual)
         };
-        let Some(visual) = visual else {
-            // Не кэшируем: вернёмся к этому игроку, когда визуал появится.
+        // Проверяем, что на цели действительно собрано тело: иначе ждём.
+        let has_body = visual.is_some_and(|target| {
+            children_of
+                .get(target)
+                .map(|children| children.iter().any(|child| parts.get(child).is_ok()))
+                .unwrap_or(false)
+        });
+        let Some(visual) = visual.filter(|_| has_body) else {
             last.remove(&entity);
             continue;
         };
+        tracing::debug!(?entity, ?visual, "worn clothes target resolved");
         for (layer, worn) in worn.iter() {
             if worn.owner == visual {
                 commands.entity(layer).despawn();

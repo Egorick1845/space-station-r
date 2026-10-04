@@ -487,7 +487,7 @@ fn spawn_power(
     for &(x, y) in &map.lights {
         let room = chunk_rooms.room_for(chunk_coords(x, y), &mut allocator);
         commands.spawn((
-            Light,
+            Light::default(),
             Consumer {
                 draw_kw: ssr_core::power::LIGHT_DRAW_KW,
             },

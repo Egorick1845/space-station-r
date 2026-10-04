@@ -27,8 +27,27 @@ pub struct Consumer {
 }
 
 /// Лампа (T4.4): потребитель со спрайтом света (отличает его от дверей).
-#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
-pub struct Light;
+/// Параметры — как `PointLight` в SS14 (`base_lighting.yml`: коридорный
+/// светильник даёт `radius: 10`, `energy: 0.8`, цвет `#FFE4CE` — 5000K).
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct Light {
+    /// Радиус света в тайлах (`PointLight.radius`).
+    pub radius: f32,
+    /// Яркость (`PointLight.energy`).
+    pub energy: f32,
+    /// Цвет света (`PointLight.color`).
+    pub color: [u8; 3],
+}
+
+impl Default for Light {
+    fn default() -> Self {
+        Self {
+            radius: 10.0,
+            energy: 0.8,
+            color: [0xff, 0xe4, 0xce],
+        }
+    }
+}
 
 /// Питание (T4.4, реплицируется): подключён ли потребитель к запитанной сети.
 /// Двери без питания не открываются, лампы не светят (как `*_unlit` в SS14).

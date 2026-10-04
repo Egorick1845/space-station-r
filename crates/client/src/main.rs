@@ -29,6 +29,7 @@ mod fov;
 mod hud;
 mod humanoid;
 mod inventory_ui;
+mod lighting;
 mod lobby;
 mod power_view;
 mod rsi;
@@ -160,6 +161,7 @@ fn main() {
             setup_camera,
             startup_map,
             fov::setup_fog,
+            lighting::setup_lighting,
             install_default_font,
             settings::load_settings,
             settings::apply_saved_window_mode,
@@ -180,6 +182,7 @@ fn main() {
             tiles::despawn_orphan_chunks,
             camera_follow_player,
             fov::update_fog,
+            lighting::update_lighting,
             doors::spawn_door_visuals,
             doors::update_door_visuals,
             doors::apply_denied_doors,
