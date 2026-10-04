@@ -39,10 +39,7 @@ pub fn build_occluders(chunks: &[&TileChunkData], doors: &[(i32, i32)]) -> Vec<O
         let coords = (tx.div_euclid(size), ty.div_euclid(size));
         map.get(&coords)
             .map(|chunk| {
-                chunk.get_local(
-                    (tx - coords.0 * size) as u32,
-                    (ty - coords.1 * size) as u32,
-                )
+                chunk.get_local((tx - coords.0 * size) as u32, (ty - coords.1 * size) as u32)
             })
             .unwrap_or(TileType::Space)
     };

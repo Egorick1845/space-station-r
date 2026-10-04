@@ -828,6 +828,78 @@ fn glass_field() -> (Node, BackgroundColor) {
     )
 }
 
+/// Полоса прокрутки как в SS14 (`ScrollBar.cs` + `StyleBase`): текстуры нет,
+/// дорожка не рисуется, граббер 10 px шириной и минимум 10 px длиной, прижат
+/// вправо на всю высоту списка. Появляется только при контенте выше вьюпорта.
+///
+/// Геометрия ровно из движка: `track = h − 10`, `grab_h = (viewport/content)·track + 10`,
+/// `grab_y = (scroll/content)·track`, всё округляется до целых px.
+pub(crate) fn spawn_scrollbar(
+    parent: &mut ChildSpawnerCommands,
+    content_h: f32,
+    viewport_h: f32,
+    scroll: f32,
+) -> Option<Entity> {
+    use crate::ui_theme as ui;
+    if content_h <= viewport_h + 1e-3 {
+        return None;
+    }
+    let track = (viewport_h - ui::SCROLLBAR_MIN_GRABBER).max(0.0);
+    let ratio = (scroll / content_h).clamp(0.0, 1.0);
+    let grab_h = ((viewport_h / content_h) * track).round() + ui::SCROLLBAR_MIN_GRABBER;
+    let grab_y = (ratio * track).round();
+    Some(
+        parent
+            .spawn(Node {
+                position_type: PositionType::Absolute,
+                right: px(0),
+                top: px(0),
+                width: px(ui::SCROLLBAR_WIDTH),
+                height: px(viewport_h),
+                ..default()
+            })
+            .with_child((
+                ScrollbarGrabber,
+                Interaction::default(),
+                Node {
+                    position_type: PositionType::Absolute,
+                    top: px(grab_y),
+                    left: px(0),
+                    width: px(ui::SCROLLBAR_WIDTH),
+                    height: px(grab_h),
+                    ..default()
+                },
+                BackgroundColor(ui::SCROLLBAR_GRABBER),
+            ))
+            .id(),
+    )
+}
+
+/// Граббер полосы прокрутки (маркер нужен, чтобы подсветка не трогала другие
+/// кнопки: у них тоже есть `Interaction`).
+#[derive(Component)]
+pub struct ScrollbarGrabber;
+
+/// Грабберы, у которых сменилось состояние наведения.
+type GrabberCursor<'w, 's> = Query<
+    'w,
+    's,
+    (&'static Interaction, &'static mut BackgroundColor),
+    (Changed<Interaction>, With<ScrollbarGrabber>),
+>;
+
+/// Цвет граббера по наведению (покой `#80808059`, hover `#8C8C8C59`).
+pub fn tint_scrollbar_grabber(mut grabbers: GrabberCursor) {
+    use crate::ui_theme as ui;
+    for (interaction, mut color) in grabbers.iter_mut() {
+        let target = match interaction {
+            Interaction::None => ui::SCROLLBAR_GRABBER,
+            Interaction::Hovered | Interaction::Pressed => ui::SCROLLBAR_GRABBER_HOVERED,
+        };
+        color.0 = target;
+    }
+}
+
 /// Каркас окна меню — как `DefaultWindow` в SS14: шапка `window_header`,
 /// заголовок цветом `NanoGold`, крестик `cross.svg` с модуляцией `#4B596A`
 /// и фон `window_background_bordered`. Возвращает корень окна: вызывающий
@@ -842,7 +914,7 @@ pub(crate) fn menu_panel(
     width: f32,
     build: impl FnOnce(&mut ChildSpawnerCommands),
 ) -> Entity {
-    let root = commands
+    commands
         .spawn((
             HudMenuRoot,
             Node {
@@ -861,8 +933,7 @@ pub(crate) fn menu_panel(
             let (node, background) = window_body();
             window.spawn((node, background)).with_children(build);
         })
-        .id();
-    root
+        .id()
 }
 
 /// Сколько строк помещается в спавн-меню (SS14 прокручивает список, у нас

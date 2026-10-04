@@ -322,3 +322,23 @@ impl UiButtonState {
         }
     }
 }
+
+// ------------------------------------------------------------------ скроллбар
+
+// Скроллбар SS14 (StyleBase/ScrollBar.cs): текстуры НЕТ — плоский StyleBoxFlat,
+// дорожка не рисуется, стрелок нет. Граббер 10 px, минимум 10 px в длину.
+/// `StyleBase.DefaultGrabberSize` — толщина полосы.
+pub const SCROLLBAR_WIDTH: f32 = 10.0;
+/// `ContentMarginTopOverride` — минимальная длина граббера.
+pub const SCROLLBAR_MIN_GRABBER: f32 = 10.0;
+/// Граббер в покое (`Color.Gray` с альфой 0.35 = `#80808059`).
+pub const SCROLLBAR_GRABBER: Color = Color::srgba(0.502, 0.502, 0.502, 0.35);
+/// Граббер под курсором (`#8C8C8C59`).
+pub const SCROLLBAR_GRABBER_HOVERED: Color = Color::srgba(0.549, 0.549, 0.549, 0.35);
+/// Граббер при перетаскивании (`#A0A0A059`) — задел под drag (T7.2).
+#[allow(dead_code)]
+pub const SCROLLBAR_GRABBER_GRABBED: Color = Color::srgba(0.627, 0.627, 0.627, 0.35);
+/// `ScrollContainer.ScrollSpeedY` — шаг колеса, px за щелчок.
+pub const SCROLLBAR_WHEEL_STEP: f32 = 50.0;
+/// `LerpAnimate(rate: 15)` — скорость догоняния цели прокруткой.
+pub const SCROLLBAR_ANIM_RATE: f32 = 15.0;

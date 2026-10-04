@@ -153,8 +153,10 @@ fn main() {
             appearance::appearance_search_click,
             appearance::appearance_search_input,
             appearance::appearance_scroll,
+            appearance::appearance_scroll_anim,
             appearance::appearance_click,
             appearance::render_appearance_menu,
+            hud::tint_scrollbar_grabber,
         )
             .chain(),
     );

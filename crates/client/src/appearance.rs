@@ -48,8 +48,12 @@ pub struct AppearanceUi {
     pub beard: usize,
     pub color: usize,
     pub female: bool,
-    pub hair_scroll: usize,
-    pub beard_scroll: usize,
+    /// Прокрутка списков в пикселях (непрерывная, как `ScrollContainer` в SS14);
+    /// `*_target` — цель, текущее значение догоняет её с rate 15.
+    pub hair_scroll: f32,
+    pub hair_scroll_target: f32,
+    pub beard_scroll: f32,
+    pub beard_scroll_target: f32,
     pub search: String,
     pub search_focused: bool,
     /// Текущая внешность подтянута из компонентов игрока (на первое открытие).
@@ -89,7 +93,7 @@ pub struct AppearanceSearchField;
 pub struct AppearanceClearButton;
 
 /// Отпечаток окна внешности для сравнения при перерисовке.
-type AppearanceSignature = (bool, usize, usize, bool, usize, usize, usize, String, u32);
+type AppearanceSignature = (bool, usize, usize, bool, usize, i32, i32, String, u32);
 
 /// Клики по строкам списков, квадратикам и стрелкам окна внешности.
 type AppearanceClicks<'w, 's> = Query<
@@ -216,8 +220,8 @@ pub fn render_appearance_menu(
         state.beard,
         state.female,
         state.color,
-        state.hair_scroll,
-        state.beard_scroll,
+        state.hair_scroll.round() as i32,
+        state.beard_scroll.round() as i32,
         state.search.clone(),
         registry.generation(),
     );
@@ -248,27 +252,11 @@ pub fn render_appearance_menu(
     };
     let sex = if state.female { "female" } else { "male" };
 
-    // Списки с поиском: видимое окно строк — как список ItemList в SS14.
+    // Списки: прокрутка в пикселях (непрерывная), как `ScrollContainer` в SS14.
     let hair_all = filtered_hair(&state.search);
-    let hair_scroll = state
-        .hair_scroll
-        .min(hair_all.len().saturating_sub(HAIR_ROWS));
-    let hair_visible: Vec<(usize, &str)> = hair_all
-        .iter()
-        .skip(hair_scroll)
-        .take(HAIR_ROWS)
-        .cloned()
-        .collect();
     let beard_all = filtered_beard(&state.search);
-    let beard_scroll = state
-        .beard_scroll
-        .min(beard_all.len().saturating_sub(BEARD_ROWS));
-    let beard_visible: Vec<(usize, &str)> = beard_all
-        .iter()
-        .skip(beard_scroll)
-        .take(BEARD_ROWS)
-        .cloned()
-        .collect();
+    let hair_scroll = clamp_scroll(&state.hair_scroll, hair_all.len(), HAIR_ROWS);
+    let beard_scroll = clamp_scroll(&state.beard_scroll, beard_all.len(), BEARD_ROWS);
 
     let window = crate::hud::menu_panel(
         &mut commands,
@@ -276,7 +264,7 @@ pub fn render_appearance_menu(
         "Внешность",
         50.0,
         50.0,
-        430.0,
+        WINDOW_W,
         |panel| {
             // Строка пола: подпись + стрелки (в SS14 — выпадающий список).
             panel
@@ -381,9 +369,10 @@ pub fn render_appearance_menu(
                 &registry,
                 HAIR_RSI,
                 false,
-                &hair_visible,
+                &hair_all,
                 state.hair,
                 HAIR_ROWS,
+                hair_scroll,
             );
             panel.spawn((
                 Text::new(format!("Борода: {beard_name}")),
@@ -395,9 +384,10 @@ pub fn render_appearance_menu(
                 &registry,
                 FACIAL_HAIR_RSI,
                 true,
-                &beard_visible,
+                &beard_all,
                 state.beard,
                 BEARD_ROWS,
+                beard_scroll,
             );
             // Палитра: квадратики цвета, выбранный обведён акцентом.
             panel
@@ -447,104 +437,160 @@ pub fn render_appearance_menu(
     commands.entity(window).insert(crate::hud::AppearanceRoot);
 }
 
+/// Шаг строки списка (высота строки + зазор 2 px, как зазор в `ItemList`).
+const STYLE_ROW_STEP: f32 = STYLE_ROW_H + 2.0;
+/// Ширина окна внешности и ширина контента внутри тела окна (минус отступы
+/// `WINDOW_CONTENT_MARGIN`, как в `window_body`).
+const WINDOW_W: f32 = 430.0;
+const LIST_CONTENT_W: f32 = WINDOW_W - 2.0 * ui::WINDOW_CONTENT_MARGIN;
+
+/// Высота вьюпорта списка на N строк (последний зазор не считаем).
+fn list_view_h(visible_rows: usize) -> f32 {
+    visible_rows as f32 * STYLE_ROW_STEP - 2.0
+}
+
+/// Высота контента списка на `rows` строк.
+fn list_content_h(rows: usize) -> f32 {
+    rows as f32 * STYLE_ROW_STEP
+}
+
+/// Прокрутка, зажатая в `0..(контент − вьюпорт)` (как `Range` в `ScrollBar.cs`).
+fn clamp_scroll(scroll: &f32, rows: usize, visible_rows: usize) -> f32 {
+    let max = (list_content_h(rows) - list_view_h(visible_rows)).max(0.0);
+    scroll.clamp(0.0, max)
+}
+
+/// Догоняет цель прокрутки экспонентой (в движке `LerpAnimate(rate: 15)`).
+pub fn appearance_scroll_anim(time: Res<Time>, mut state: ResMut<AppearanceUi>) {
+    let k = 1.0 - (-ui::SCROLLBAR_ANIM_RATE * time.delta_secs()).exp();
+    state.hair_scroll += (state.hair_scroll_target - state.hair_scroll) * k;
+    state.beard_scroll += (state.beard_scroll_target - state.beard_scroll) * k;
+}
+
 /// Список стилей: строки «иконка состояния RSI + имя», выбранная подсвечена.
+/// Прокрутка непрерывная (`ScrollContainer` в SS14): вьюпорт фиксированной
+/// высоты с обрезкой, строки сдвинуты на дробную часть прокрутки, справа —
+/// полоса прокрутки (`spawn_scrollbar`).
 #[allow(clippy::too_many_arguments)]
 fn style_list(
     panel: &mut ChildSpawnerCommands,
     registry: &crate::rsi::RsiRegistry,
     rsi: &str,
     beard: bool,
-    visible: &[(usize, &str)],
+    rows: &[(usize, &str)],
     selected: usize,
-    rows: usize,
+    visible_rows: usize,
+    scroll: f32,
 ) {
-    // Свободные строки добиваем пустыми, чтобы окно не «прыгало» по высоте.
-    let blank = rows.saturating_sub(visible.len());
+    let view_h = list_view_h(visible_rows);
+    let content_h = list_content_h(rows.len());
+    let scroll = scroll.clamp(0.0, (content_h - view_h).max(0.0));
+    let first = ((scroll / STYLE_ROW_STEP).floor() as usize).min(rows.len());
+    let offset = scroll - first as f32 * STYLE_ROW_STEP;
+    let visible = rows.iter().skip(first).take(visible_rows + 1);
+    // Как `ScrollContainer` в SS14: при видимой полосе контент ужимается на её
+    // ширину, чтобы полоса не закрывала текст.
+    let bar_width = if content_h > view_h + 1e-3 {
+        ui::SCROLLBAR_WIDTH
+    } else {
+        0.0
+    };
     panel
         .spawn((
             AppearanceList { beard },
             Interaction::default(),
             Node {
                 width: Val::Percent(100.0),
-                flex_direction: FlexDirection::Column,
-                row_gap: px(2),
+                height: px(view_h),
+                overflow: Overflow::clip(),
                 ..default()
             },
         ))
         .with_children(|list| {
-            for (index, name) in visible {
-                let is_selected = *index == selected;
-                let tint = if is_selected {
-                    crate::hud::HudTint {
-                        normal: ui::GLASS_BUTTON_PRESSED,
-                        hovered: ui::GLASS_BUTTON_PRESSED,
-                        pressed: ui::GLASS_BUTTON_PRESSED,
-                    }
-                } else {
-                    crate::hud::HudTint::button()
-                };
-                let icon = if *index == 0 && beard {
-                    None // «нет бороды» — строка без иконки
-                } else {
-                    registry
-                        .get(&format!("{rsi}#{name}"))
-                        .map(crate::inventory_ui::icon_node)
-                };
-                list.spawn((
-                    AppearancePick {
-                        beard,
-                        index: *index,
-                    },
-                    Button,
-                    tint,
-                    BackgroundColor(if is_selected {
-                        ui::GLASS_BUTTON_PRESSED
-                    } else {
-                        ui::GLASS_BUTTON
-                    }),
-                    Node {
-                        width: Val::Percent(100.0),
-                        height: px(STYLE_ROW_H),
-                        align_items: AlignItems::Center,
-                        column_gap: px(6),
-                        padding: UiRect::horizontal(px(6)),
-                        ..default()
-                    },
-                ))
-                .with_children(|row| {
-                    row.spawn(Node {
-                        width: px(STYLE_ROW_H),
-                        height: px(STYLE_ROW_H),
-                        align_items: AlignItems::Center,
-                        justify_content: JustifyContent::Center,
-                        ..default()
-                    })
-                    .with_children(|cell| {
-                        if let Some(icon) = icon {
-                            cell.spawn((
-                                icon,
-                                Node {
-                                    width: px(28),
-                                    height: px(28),
-                                    ..default()
-                                },
-                            ));
-                        }
-                    });
-                    row.spawn((
-                        Text::new((*name).to_string()),
-                        TextFont::from_font_size(ui::FONT_BASE),
-                        TextColor(if is_selected { ui::ACCENT } else { ui::TEXT }),
-                    ));
-                });
-            }
-            for _ in 0..blank {
-                list.spawn(Node {
-                    width: Val::Percent(100.0),
-                    height: px(STYLE_ROW_H),
+            list.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: px(0),
+                    top: px(0),
+                    width: px(LIST_CONTENT_W - bar_width),
+                    flex_direction: FlexDirection::Column,
+                    row_gap: px(2),
                     ..default()
-                });
-            }
+                },
+                UiTransform::from_translation(Val2::new(Val::Px(0.0), Val::Px(-offset))),
+            ))
+            .with_children(|inner| {
+                for (index, name) in visible {
+                    let is_selected = *index == selected;
+                    let tint = if is_selected {
+                        crate::hud::HudTint {
+                            normal: ui::GLASS_BUTTON_PRESSED,
+                            hovered: ui::GLASS_BUTTON_PRESSED,
+                            pressed: ui::GLASS_BUTTON_PRESSED,
+                        }
+                    } else {
+                        crate::hud::HudTint::button()
+                    };
+                    let icon = if *index == 0 && beard {
+                        None // «нет бороды» — строка без иконки
+                    } else {
+                        registry
+                            .get(&format!("{rsi}#{name}"))
+                            .map(crate::inventory_ui::icon_node)
+                    };
+                    inner
+                        .spawn((
+                            AppearancePick {
+                                beard,
+                                index: *index,
+                            },
+                            Button,
+                            tint,
+                            BackgroundColor(if is_selected {
+                                ui::GLASS_BUTTON_PRESSED
+                            } else {
+                                ui::GLASS_BUTTON
+                            }),
+                            Node {
+                                width: Val::Percent(100.0),
+                                height: px(STYLE_ROW_H),
+                                align_items: AlignItems::Center,
+                                column_gap: px(6),
+                                padding: UiRect::horizontal(px(6)),
+                                ..default()
+                            },
+                        ))
+                        .with_children(|row| {
+                            row.spawn(Node {
+                                width: px(STYLE_ROW_H),
+                                height: px(STYLE_ROW_H),
+                                align_items: AlignItems::Center,
+                                justify_content: JustifyContent::Center,
+                                ..default()
+                            })
+                            .with_children(|cell| {
+                                if let Some(icon) = icon {
+                                    cell.spawn((
+                                        icon,
+                                        Node {
+                                            width: px(28),
+                                            height: px(28),
+                                            ..default()
+                                        },
+                                    ));
+                                }
+                            });
+                            row.spawn((
+                                Text::new((*name).to_string()),
+                                TextFont::from_font_size(ui::FONT_BASE),
+                                TextColor(if is_selected { ui::ACCENT } else { ui::TEXT }),
+                            ));
+                        });
+                }
+            });
+            // Полоса прокрутки — как `ScrollContainer`: только при контенте
+            // выше вьюпорта, прижата вправо.
+            crate::hud::spawn_scrollbar(list, content_h, view_h, scroll);
         });
 }
 
@@ -619,8 +665,10 @@ pub fn appearance_search_click(
     for interaction in clear.iter() {
         if *interaction == Interaction::Pressed {
             state.search.clear();
-            state.hair_scroll = 0;
-            state.beard_scroll = 0;
+            state.hair_scroll = 0.0;
+            state.hair_scroll_target = 0.0;
+            state.beard_scroll = 0.0;
+            state.beard_scroll_target = 0.0;
         }
     }
 }
@@ -661,12 +709,16 @@ pub fn appearance_search_input(
             }
             _ => continue,
         }
-        state.hair_scroll = 0;
-        state.beard_scroll = 0;
+        state.hair_scroll = 0.0;
+        state.hair_scroll_target = 0.0;
+        state.beard_scroll = 0.0;
+        state.beard_scroll_target = 0.0;
     }
 }
 
 /// Колесо мыши прокручивает список, над которым курсор (причёски или бороды).
+/// Шаг — 50 px за щелчок, как `ScrollContainer.ScrollSpeedY` в движке;
+/// значение догоняет цель в [`appearance_scroll_anim`].
 pub fn appearance_scroll(
     mut wheel: MessageReader<bevy::input::mouse::MouseWheel>,
     mut state: ResMut<AppearanceUi>,
@@ -686,19 +738,19 @@ pub fn appearance_scroll(
         return;
     }
     // Колесо вниз (delta < 0) — вниз по списку.
-    let step: isize = if delta < 0.0 { 1 } else { -1 };
+    let shift = -delta * ui::SCROLLBAR_WHEEL_STEP;
     let beard = lists
         .iter()
         .find(|(_, interaction)| **interaction == Interaction::Hovered)
         .map(|(list, _)| list.beard)
         .unwrap_or(false);
     if beard {
-        let max = filtered_beard(&state.search)
-            .len()
-            .saturating_sub(BEARD_ROWS);
-        state.beard_scroll = (state.beard_scroll as isize + step).clamp(0, max as isize) as usize;
+        let max = (list_content_h(filtered_beard(&state.search).len()) - list_view_h(BEARD_ROWS))
+            .max(0.0);
+        state.beard_scroll_target = (state.beard_scroll_target + shift).clamp(0.0, max);
     } else {
-        let max = filtered_hair(&state.search).len().saturating_sub(HAIR_ROWS);
-        state.hair_scroll = (state.hair_scroll as isize + step).clamp(0, max as isize) as usize;
+        let max =
+            (list_content_h(filtered_hair(&state.search).len()) - list_view_h(HAIR_ROWS)).max(0.0);
+        state.hair_scroll_target = (state.hair_scroll_target + shift).clamp(0.0, max);
     }
 }
