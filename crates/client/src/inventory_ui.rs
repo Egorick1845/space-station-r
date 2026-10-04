@@ -1379,6 +1379,32 @@ pub fn action_menu_click(
 
 /// Тестовый режим SSR_INV_TEST=1: через [`INV_TEST_DELAY`] секунд клиент
 /// передаёт первый предмет рюкзака ближайшему игроку (критерий T3.2).
+/// Тест-режим `SSR_UNEQUIP_TEST=<слот>`: через 4 с снимает вещь из слота
+/// (например `back`) — проверка, что снятое не исчезает: `TryUnequip` в сборке
+/// кладёт вещь `DropNextTo`/`PickupOrDrop`, а не в собственное хранилище.
+pub fn unequip_test_mode(
+    time: Res<Time>,
+    mut state: Local<(f32, bool)>,
+    mut senders: Query<&mut MessageSender<ClientMessage>, With<Connected>>,
+) {
+    let Ok(slot) = std::env::var("SSR_UNEQUIP_TEST") else {
+        return;
+    };
+    if state.1 {
+        return;
+    }
+    state.0 += time.delta_secs();
+    if state.0 < 4.0 {
+        return;
+    }
+    state.1 = true;
+    for mut sender in senders.iter_mut() {
+        sender.send::<GameChannel>(ClientMessage::Unequip { slot: slot.clone() });
+    }
+    tracing::info!(%slot, "unequip-test: снятие отправлено");
+}
+
+/// Тест-режим SSR_INV_TEST: перенос предмета в чужой инвентарь.
 pub fn inventory_test_mode(
     time: Res<Time>,
     own: Res<OwnPlayerEntity>,

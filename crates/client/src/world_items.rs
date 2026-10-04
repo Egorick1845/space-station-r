@@ -261,15 +261,17 @@ pub fn floor_item_click(
     tracing::info!(item = bits, "pickup clicked");
 }
 
-/// Тест-режим `SSR_SPAWN_TEST=<id> [<count>]`: спавнит сущность из
-/// ИМПОРТИРОВАННЫХ прототипов сборки (`prototypes_ss14.ron`) на пол — проверка,
-/// что команда `spawn` принимает любой прототип, а клиент находит его спрайт.
+/// Тест-режим `SSR_SPAWN_TEST=<id> [<кол-во>] [floor]`: отправляет админ-команду
+/// `spawn …` — так проверяются и импортированные прототипы сборки, и размеры
+/// предметов (например `SteelSheet 3` кладёт сталь в рюкзак, а `WallSolid 1 floor`
+/// размещает сущность на полу). Если в значении нет пробелов, добавляется
+/// `1 floor` (старое поведение).
 pub fn spawn_test_mode(
     time: Res<Time>,
     mut state: Local<(f32, bool)>,
     mut senders: Query<&mut MessageSender<ClientMessage>, With<Connected>>,
 ) {
-    let Ok(id) = std::env::var("SSR_SPAWN_TEST") else {
+    let Ok(value) = std::env::var("SSR_SPAWN_TEST") else {
         return;
     };
     if state.1 {
@@ -280,12 +282,17 @@ pub fn spawn_test_mode(
         return;
     }
     state.1 = true;
+    let tail = if value.contains(' ') {
+        value.clone()
+    } else {
+        format!("{value} 1 floor")
+    };
     for mut sender in senders.iter_mut() {
         sender.send::<GameChannel>(ClientMessage::Admin {
-            command: format!("spawn {id} 1 floor"),
+            command: format!("spawn {tail}"),
         });
     }
-    tracing::info!(id, "spawn-test: спавн прототипа сборки отправлен");
+    tracing::info!(tail, "spawn-test: команда спавна отправлена");
 }
 
 /// Тест-режим SSR_PICKUP_TEST=1: клиент кладёт предмет на пол админ-командой

@@ -16,6 +16,8 @@ pub struct ClientContent {
     pub proto_sprites: HashMap<String, String>,
     /// Имя импортированного прототипа: id → локализованное имя (или id).
     pub proto_names: HashMap<String, String>,
+    /// Размер предмета из прототипа: id → id размера (`Normal`, `Small`, …).
+    pub proto_sizes: HashMap<String, String>,
 }
 
 impl ClientContent {
@@ -64,14 +66,24 @@ pub fn load_content(mut commands: Commands) {
             }
         }
     }
-    // Импортированные прототипы сборки: 9k+ сущностей. Нужны для меню спавна —
-    // берём только спавнимые (не abstract) и только со спрайтом.
+    // Импортированные прототипы сборки (19k+ сущностей). Нужны для меню спавна:
+    // берём спавнимые (не abstract, без категории `HideSpawnMenu` — как
+    // `EntitySpawningUIController.BuildEntityList:203-211`) и только со спрайтом.
     let started = std::time::Instant::now();
     let path = ssr_core::assets_root().join("prototypes_ss14.ron");
     match ssr_core::prototypes::ProtoSet::load(&path) {
         Ok(set) => {
+            let mut hidden = 0usize;
             for proto in set.protos {
                 if proto.abstract_ || proto.kind != "entity" {
+                    continue;
+                }
+                if proto
+                    .categories
+                    .iter()
+                    .any(|category| category == "HideSpawnMenu")
+                {
+                    hidden += 1;
                     continue;
                 }
                 let Some(sprite) = proto.sprite else {
@@ -80,12 +92,16 @@ pub fn load_content(mut commands: Commands) {
                 if let Some(name) = proto.name {
                     content.proto_names.insert(proto.id.clone(), name);
                 }
+                if let Some(size) = proto.size {
+                    content.proto_sizes.insert(proto.id.clone(), size);
+                }
                 content.proto_sprites.insert(proto.id, sprite);
             }
             tracing::info!(
                 items = content.items.items.len(),
                 recipes = content.recipes.recipes.len(),
                 protos = content.proto_sprites.len(),
+                hidden,
                 ms = started.elapsed().as_millis() as u64,
                 "content catalog loaded (client)"
             );

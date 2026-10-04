@@ -1,8 +1,16 @@
 //! Импорт прототипов SS14 (SS14_IMPORT.md §4, задачи IMP.2/IMP.3):
-//! парсер YAML c наследованием (parent) и конвертер в наш формат `.ron`.
+//! парсер YAML c наследованием (`parent`, включая МУЛЬТИнаследование) и
+//! конвертер в наш формат `.ron`.
 //!
 //! Запуск:
 //! `cargo run -p ssr-tools --bin import-proto -- <PrototypesDir> <out.ron> [sprites.txt]`
+//!
+//! Семантика наследования — как в RobustToolbox (`PrototypeManager.YamlLoad.cs` +
+//! `SerializationManager.Composition.cs:179-223`): сливаются YAML-МАППИНГИ, а не
+//! объекты. Ключи компонента наследуются поштучно (ребёнок перекрывает только те
+//! поля, что указал сам), маппинги внутри поля сливаются по ключам, списки —
+//! заменяются целиком (кроме `components`, который в движке помечен
+//! `AlwaysPushInheritance`). Приоритет: ребёнок > parent[0] > parent[1] > …
 //!
 //! Отчёт (IMP-5): сколько перенесено, сколько файлов/прототипов пропущено и почему;
 //! список `sprites.txt` — RSI-пути, которые нужно скопировать в assets.
@@ -11,7 +19,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 
 use serde_yaml_ng::Value;
-use ssr_core::prototypes::{Proto, ProtoSet};
+use ssr_core::prototypes::{Proto, ProtoLight, ProtoSet, ProtoStack, ProtoStorage};
 
 /// Максимум итераций разрешения наследования (защита от глубоких цепочек).
 const MAX_DEPTH: usize = 64;
@@ -24,10 +32,16 @@ fn main() {
     }
     let (input, output) = (PathBuf::from(&args[1]), PathBuf::from(&args[2]));
     let sprites_path = args.get(3).map(PathBuf::from);
+    // 5-й аргумент `components` — дописать сырой дамп неразобранных компонентов
+    // (файл вырастает в ~40 раз; нужно только инструментам).
+    let with_components = args.iter().any(|arg| arg == "components");
 
     let mut raw: HashMap<String, RawProto> = HashMap::new();
+    // Прототипы стека (`type: stack`) — из них берём `maxCount` для `Stack`.
+    let mut stacks: HashMap<String, u32> = HashMap::new();
     let mut order: Vec<String> = Vec::new();
     let mut stats = Stats::default();
+    let mut files: Vec<PathBuf> = Vec::new();
 
     for entry in walkdir::WalkDir::new(&input)
         .into_iter()
@@ -39,11 +53,19 @@ fn main() {
         if entry.path().extension().and_then(|e| e.to_str()) != Some("yml") {
             continue;
         }
-        let text = match std::fs::read_to_string(entry.path()) {
+        files.push(entry.path().to_path_buf());
+    }
+    // Детерминированный порядок (в движке файлы шаффлятся, но дубликат id —
+    // ошибка: `PrototypeManager.YamlLoad.cs:409-428`; нам нужен воспроизводимый
+    // результат, поэтому сортируем пути).
+    files.sort();
+
+    for path in files {
+        let text = match std::fs::read_to_string(&path) {
             Ok(t) => t,
             Err(e) => {
                 stats.file_errors += 1;
-                eprintln!("read {}: {e}", entry.path().display());
+                eprintln!("read {}: {e}", path.display());
                 continue;
             }
         };
@@ -52,7 +74,7 @@ fn main() {
             Err(e) => {
                 // Кастомные теги (`!type:` и пр.) роняют парсер — пропуск с логом.
                 stats.parse_skipped += 1;
-                eprintln!("skip {}: {e}", entry.path().display());
+                eprintln!("skip {}: {e}", path.display());
                 continue;
             }
         };
@@ -62,14 +84,30 @@ fn main() {
                 continue;
             };
             let kind = doc["type"].as_str().unwrap_or("entity").to_string();
+            if kind == "stack" {
+                // `StackPrototype.MaxCount` (`Content.Shared/Stacks/StackPrototype.cs:52`).
+                if let Some(max) = doc["maxCount"].as_u64() {
+                    stacks.insert(id.to_string(), max as u32);
+                }
+                continue;
+            }
             if kind != "entity" {
                 stats.non_entities += 1;
                 continue;
             }
             if raw.contains_key(id) {
                 stats.duplicates += 1;
+                eprintln!("duplicate id {id} ({}), оставляем первый", path.display());
+                continue;
             }
-            let parent = doc["parent"].as_str().map(str::to_string);
+            let parents: Vec<String> = match &doc["parent"] {
+                Value::String(single) => vec![single.clone()],
+                Value::Sequence(list) => list
+                    .iter()
+                    .filter_map(|value| value.as_str().map(str::to_string))
+                    .collect(),
+                _ => Vec::new(),
+            };
             let components: Vec<(String, Value)> = doc["components"]
                 .as_sequence()
                 .map(|list| {
@@ -81,12 +119,21 @@ fn main() {
             let raw_proto = RawProto {
                 id: id.to_string(),
                 kind,
-                parent,
+                parents,
                 name: doc["name"].as_str().map(str::to_string),
                 description: doc["description"].as_str().map(str::to_string),
+                suffix: doc["suffix"].as_str().map(str::to_string),
+                categories: doc["categories"]
+                    .as_sequence()
+                    .map(|list| {
+                        list.iter()
+                            .filter_map(|value| value.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
                 abstract_: doc["abstract"].as_bool().unwrap_or(false),
                 components,
-                file: entry.path().display().to_string(),
+                file: path.display().to_string(),
             };
             if raw.insert(id.to_string(), raw_proto).is_none() {
                 order.push(id.to_string());
@@ -100,20 +147,28 @@ fn main() {
         stats.duplicates
     );
 
-    // Разрешение наследования (двухпроходный merge, ребёнок выигрывает).
+    // Разрешение наследования (мерж YAML-маппингов, ребёнок выигрывает).
     let mut resolved: HashMap<String, Proto> = HashMap::new();
     let mut resolving: Vec<String> = Vec::new();
     let mut cycles = 0usize;
     let ids: Vec<String> = order.clone();
     for id in &ids {
-        if let Err(e) = resolve(id, &raw, &mut resolved, &mut resolving, 0) {
+        if let Err(e) = resolve(
+            id,
+            &raw,
+            &stacks,
+            &mut resolved,
+            &mut resolving,
+            0,
+            with_components,
+        ) {
             cycles += 1;
             eprintln!("inheritance skip {id}: {e}");
         }
     }
     println!("разрешено: {} (циклов/ошибок: {cycles})", resolved.len());
 
-    // Отсортированный вывод + сбор спрайт-референсов.
+    // Сортированный вывод + сбор спрайт-референсов.
     let mut protos: Vec<Proto> = resolved.into_values().collect();
     protos.sort_by(|a, b| a.id.cmp(&b.id));
     let mut sprites: BTreeSet<String> = BTreeSet::new();
@@ -129,12 +184,14 @@ fn main() {
         }
     }
 
+    let with_sprite = protos.iter().filter(|proto| proto.sprite.is_some()).count();
+    let total = protos.len();
     ProtoSet { protos }.save(&output).expect("save protos");
     println!(
         "сохранено: {} прототипов → {}\n  со спрайтом: {}, уникальных RSI: {}",
-        ids.len(),
+        total,
         output.display(),
-        sprites.len(),
+        with_sprite,
         sprites.len()
     );
     if let Some(path) = sprites_path {
@@ -148,9 +205,11 @@ fn main() {
 struct RawProto {
     id: String,
     kind: String,
-    parent: Option<String>,
+    parents: Vec<String>,
     name: Option<String>,
     description: Option<String>,
+    suffix: Option<String>,
+    categories: Vec<String>,
     abstract_: bool,
     components: Vec<(String, Value)>,
     file: String,
@@ -169,9 +228,11 @@ struct Stats {
 fn resolve(
     id: &str,
     raw: &HashMap<String, RawProto>,
+    stacks: &HashMap<String, u32>,
     out: &mut HashMap<String, Proto>,
     stack: &mut Vec<String>,
     depth: usize,
+    with_components: bool,
 ) -> Result<(), String> {
     if out.contains_key(id) {
         return Ok(());
@@ -187,31 +248,20 @@ fn resolve(
     };
     stack.push(id.to_string());
 
-    // Сначала родитель — его компоненты станут базой.
+    // Сначала родители (слева направо), затем сам прототип: приоритет
+    // «ребёнок > parent[0] > parent[1] > …» (`Composition.cs:40-58`).
     let mut merged: Vec<(String, Value)> = Vec::new();
-    if let Some(parent) = &proto.parent
-        && raw.contains_key(parent)
-    {
-        resolve(parent, raw, out, stack, depth + 1)?;
-        // Компоненты родителя переносим по цепочке raw-прототипов.
-        let mut chain: Vec<&RawProto> = Vec::new();
-        let mut cursor = raw.get(parent);
-        while let Some(p) = cursor {
-            chain.push(p);
-            cursor = p.parent.as_ref().and_then(|par| raw.get(par));
+    for parent in &proto.parents {
+        if !raw.contains_key(parent) {
+            eprintln!("unknown parent {parent} for {id}");
+            continue;
         }
-        for p in chain.into_iter().rev() {
-            for (name, value) in &p.components {
-                upsert_component(&mut merged, name, value);
-            }
-        }
-    } else if let Some(parent) = &proto.parent {
-        eprintln!("unknown parent {parent} for {id}");
+        resolve(parent, raw, stacks, out, stack, depth + 1, with_components)?;
+        // Компоненты родителя берём по его raw-цепочке (уже слитой для него).
+        let parent_merged = merged_components(parent, raw, depth + 1)?;
+        merge_components(&mut merged, &parent_merged);
     }
-
-    for (name, value) in &proto.components {
-        upsert_component(&mut merged, name, value);
-    }
+    merge_components(&mut merged, &proto.components);
     stack.pop();
 
     // Извлекаем нужное нам подмножество компонентов (таблица 4.4 документа).
@@ -219,11 +269,32 @@ fn resolve(
     let mut tags = Vec::new();
     let mut size = None;
     let mut equip = None;
+    let mut storage = None;
+    let mut clothing_slots = Vec::new();
+    let mut tools = Vec::new();
+    let mut stack_component = None;
+    let mut pullable = false;
+    let mut body_type = None;
+    let mut light = None;
+    let mut components = Vec::new();
     for (name, value) in &merged {
         match name.as_str() {
             "Sprite" => {
-                if let Some(path) = value["sprite"].as_str() {
-                    let state = value["state"].as_str().unwrap_or("0");
+                // Спрайт может быть задан и на компоненте, и в первом слое
+                // (`layers[0]`), и прямой текстурой (`texture`).
+                let layer = value["layers"]
+                    .as_sequence()
+                    .and_then(|layers| layers.first());
+                let path = value["sprite"]
+                    .as_str()
+                    .or_else(|| layer.and_then(|layer| layer["sprite"].as_str()))
+                    .or_else(|| value["texture"].as_str())
+                    .or_else(|| layer.and_then(|layer| layer["texture"].as_str()));
+                let state = value["state"]
+                    .as_str()
+                    .or_else(|| layer.and_then(|layer| layer["state"].as_str()))
+                    .unwrap_or("0");
+                if let Some(path) = path {
                     sprite = Some(format!("{path}#{state}"));
                 }
             }
@@ -236,12 +307,88 @@ fn resolve(
                 }
             }
             "Item" => {
-                size = value["size"].as_str().map(str::to_string);
+                // `ItemComponent.Size` по умолчанию `Small` (`ItemComponent.cs:23`).
+                size = Some(value["size"].as_str().unwrap_or("Small").to_string());
             }
             "Clothing" => {
                 equip = value["slot"].as_str().map(str::to_string);
+                if let Some(flags) = value["slots"].as_str() {
+                    clothing_slots = flags
+                        .split(',')
+                        .map(|flag| flag.trim().to_string())
+                        .filter(|flag| !flag.is_empty())
+                        .collect();
+                }
+            }
+            "Storage" => {
+                let grid = value["grid"]
+                    .as_sequence()
+                    .map(|list| {
+                        list.iter()
+                            .filter_map(|box_value| {
+                                let text = box_value.as_str()?;
+                                let parts: Vec<i32> = text
+                                    .split(',')
+                                    .filter_map(|part| part.trim().parse().ok())
+                                    .collect();
+                                (parts.len() == 4).then(|| (parts[0], parts[1], parts[2], parts[3]))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                storage = Some(ProtoStorage {
+                    grid,
+                    max_item_size: value["maxItemSize"].as_str().map(str::to_string),
+                });
+            }
+            "Tool" => {
+                if let Some(list) = value["qualities"].as_sequence() {
+                    tools = list
+                        .iter()
+                        .filter_map(|quality| quality.as_str().map(str::to_string))
+                        .collect();
+                }
+            }
+            "Stack" => {
+                let kind = value["stackType"].as_str().unwrap_or_default().to_string();
+                if !kind.is_empty() {
+                    let count = value["count"].as_u64().unwrap_or(30) as u32;
+                    let max_count = value["maxCountOverride"]
+                        .as_u64()
+                        .map(|max| max as u32)
+                        .or_else(|| stacks.get(&kind).copied());
+                    stack_component = Some(ProtoStack {
+                        kind,
+                        count,
+                        max_count,
+                    });
+                }
+            }
+            "Pullable" => pullable = true,
+            "Physics" => {
+                body_type = value["bodyType"].as_str().map(str::to_string);
+            }
+            "PointLight" => {
+                light = Some(ProtoLight {
+                    radius: value["radius"].as_f64().unwrap_or(5.0) as f32,
+                    energy: value["energy"].as_f64().unwrap_or(1.0) as f32,
+                    color: value["color"].as_str().map(str::to_string),
+                    enabled: value["enabled"].as_bool().unwrap_or(true),
+                });
             }
             _ => {}
+        }
+        // Неразобранные компоненты сохраняем ТОЛЬКО по флагу `components`:
+        // сырой дамп всех компонентов раздувает файл в 40 раз (125 МБ против
+        // 3 МБ), а нужен он лишь инструментам/отладке. Полный дамп всегда можно
+        // пересобрать этим же импортёром из сборки.
+        if with_components
+            && !matches!(
+                name.as_str(),
+                "Sprite" | "Tag" | "Item" | "Clothing" | "Storage" | "Tool" | "Stack" | "Pullable"
+            )
+        {
+            components.push((name.clone(), yaml_to_ron(value)));
         }
     }
 
@@ -249,7 +396,7 @@ fn resolve(
         id.to_string(),
         Proto {
             id: proto.id.clone(),
-            parent: proto.parent.clone(),
+            parent: proto.parents.first().cloned(),
             name: proto.name.clone(),
             description: proto.description.clone(),
             kind: proto.kind.clone(),
@@ -258,16 +405,102 @@ fn resolve(
             size,
             equip,
             abstract_: proto.abstract_,
+            storage,
+            clothing_slots,
+            tools,
+            stack: stack_component,
+            pullable,
+            categories: proto.categories.clone(),
+            suffix: proto.suffix.clone(),
+            body_type,
+            light,
+            components,
         },
     );
     let _ = proto.file.as_str();
     Ok(())
 }
 
-/// Merge компонента по имени: ребёнок переопределяет родителя.
-fn upsert_component(components: &mut Vec<(String, Value)>, name: &str, value: &Value) {
-    match components.iter_mut().find(|(n, _)| n == name) {
-        Some(slot) => slot.1 = value.clone(),
-        None => components.push((name.to_string(), value.clone())),
+/// Компоненты прототипа, слитые по его цепочке наследования.
+fn merged_components(
+    id: &str,
+    raw: &HashMap<String, RawProto>,
+    depth: usize,
+) -> Result<Vec<(String, Value)>, String> {
+    if depth > MAX_DEPTH {
+        return Err("слишком глубокая цепочка наследования".into());
+    }
+    let Some(proto) = raw.get(id) else {
+        return Ok(Vec::new());
+    };
+    let mut merged: Vec<(String, Value)> = Vec::new();
+    for parent in &proto.parents {
+        if !raw.contains_key(parent) {
+            continue;
+        }
+        let parent_merged = merged_components(parent, raw, depth + 1)?;
+        merge_components(&mut merged, &parent_merged);
+    }
+    merge_components(&mut merged, &proto.components);
+    Ok(merged)
+}
+
+/// SS14-мерж компонентов (`ComponentRegistrySerializer.PushInheritance`): компонент
+/// того же типа сливается ПО КЛЮЧАМ (ребёнок перекрывает свои поля), отсутствующий
+/// у ребёнка компонент наследуется целиком. Маппинги внутри поля сливаются по
+/// ключам (`CombineMappings`), списки заменяются целиком (Default-поведение).
+fn merge_components(merged: &mut Vec<(String, Value)>, child: &[(String, Value)]) {
+    for (name, value) in child {
+        match merged.iter_mut().find(|(existing, _)| existing == name) {
+            Some(slot) => slot.1 = merge_value(&slot.1, value),
+            None => merged.push((name.clone(), value.clone())),
+        }
+    }
+}
+
+/// Мерж значений одного компонента: маппинги — по ключам, остальное — ребёнок
+/// побеждает целиком.
+fn merge_value(parent: &Value, child: &Value) -> Value {
+    match (parent, child) {
+        (Value::Mapping(parent_map), Value::Mapping(child_map)) => {
+            let mut result = parent_map.clone();
+            for (key, value) in child_map {
+                match result.get(key) {
+                    Some(existing) => {
+                        let merged = merge_value(existing, value);
+                        result.insert(key.clone(), merged);
+                    }
+                    None => {
+                        result.insert(key.clone(), value.clone());
+                    }
+                }
+            }
+            Value::Mapping(result)
+        }
+        _ => child.clone(),
+    }
+}
+
+/// `serde_yaml_ng::Value` → `ron::Value` (чтобы сохранить неразобранные
+/// компоненты в наш `.ron`).
+fn yaml_to_ron(value: &Value) -> ron::Value {
+    match value {
+        Value::Null => ron::Value::Unit,
+        Value::Bool(value) => ron::Value::Bool(*value),
+        Value::Number(number) => {
+            if let Some(int) = number.as_i64() {
+                ron::Value::Number(ron::value::Number::new(int))
+            } else {
+                ron::Value::Number(ron::value::Number::new(number.as_f64().unwrap_or(0.0)))
+            }
+        }
+        Value::String(text) => ron::Value::String(text.clone()),
+        Value::Sequence(list) => ron::Value::Seq(list.iter().map(yaml_to_ron).collect()),
+        Value::Mapping(map) => ron::Value::Map(
+            map.iter()
+                .map(|(key, value)| (yaml_to_ron(key), yaml_to_ron(value)))
+                .collect(),
+        ),
+        Value::Tagged(tagged) => yaml_to_ron(&tagged.value),
     }
 }

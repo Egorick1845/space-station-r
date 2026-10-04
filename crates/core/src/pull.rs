@@ -25,41 +25,31 @@ pub const PULL_SPEED_MODIFIER: f32 = 0.95;
 /// растянулась бы через полкарты).
 pub const PULL_BREAK_UNITS: f32 = 4.0 * 32.0;
 
-/// Тянется ли предмет такого размера: в сборке `PullableComponent` стоит на
-/// крупных объектах (ящики, шкафы, машины), а мелочь игрок носит в руках.
-/// Порог — 2×2 клетки (`Normal` и больше, `ItemSize` в SS14).
-pub fn is_pullable(size: (u8, u8)) -> bool {
-    size.0 >= 2 && size.1 >= 2
-}
+/// Тянется ли предмет: в сборке это КОМПОНЕНТ `Pullable`, а не размер — он стоит
+/// на `BaseItem` (`Resources/Prototypes/Entities/Objects/base_item.yml:62`) и на
+/// `BaseStructure` (`.../Structures/base_structure.yml:27`), то есть тянуть можно
+/// любой предмет и любую конструкцию. Флаг берётся из прототипа
+/// (`ItemSet::pullable`); прежнее правило «только от 2×2» было выдумкой.
+pub const PULLABLE_BY_DEFAULT: bool = true;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn sizes_follow_item_size_prototypes() {
-        // Мелкое носят в руках, крупное (ящик, шкаф) — тянут.
-        for (name, size, expected) in [
-            ("Tiny 1×1", (1, 1), false),
-            ("Small 1×2", (1, 2), false),
-            ("Normal 2×2", (2, 2), true),
-            ("Large 4×2", (4, 2), true),
-            ("Huge 4×4", (4, 4), true),
-        ] {
-            assert_eq!(is_pullable(size), expected, "{name}");
-        }
-        // Реальные размеры из каталога предметов (assets/prototypes/items.ron).
+    fn pullable_comes_from_prototype_not_size() {
+        // `Pullable` есть и на `BaseItem`, и на `BaseStructure`: тянуть можно
+        // всё, размер роли не играет (в сборке это компонент, не порог размера).
         let set = crate::items::ItemSet::load(
             &crate::assets_root().join("prototypes/items.ron"),
         )
         .expect("items.ron");
-        // Лом длинный, но узкий — его носят в руке, а не тянут.
-        assert!(!is_pullable(set.size_of("Crowbar")));
-        assert!(!is_pullable(set.size_of("SteelSheet")));
-        // Ящики в игре — отдельные сущности `Container`, но крупная кладь
-        // (рюкзак, аптечка, ящик для инструментов) тоже тянется.
-        assert!(is_pullable(set.size_of("ToolboxRed")));
-        assert!(is_pullable(set.size_of("Medkit")));
+        for id in ["Crowbar", "SteelSheet", "ToolboxRed", "Medkit", "Paper"] {
+            assert!(
+                set.pullable(id),
+                "{id} должен тянуться (`Pullable` у `BaseItem`)"
+            );
+        }
     }
 
     #[test]

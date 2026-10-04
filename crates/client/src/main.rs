@@ -376,6 +376,7 @@ fn main() {
         Update,
         (
             inventory_ui::inventory_test_mode,
+            inventory_ui::unequip_test_mode,
             inventory_ui::build_test_mode,
             inventory_ui::attack_test_mode,
             crafting::craft_test_mode,

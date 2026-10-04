@@ -266,37 +266,59 @@ fn spawn_containers(
     tracing::info!(count = spots.len(), "containers spawned");
 }
 
-/// Спавнимые прототипы сборки (IMP.2/IMP.3): id → есть ли спрайт. Из этого
-/// набора работает команда `spawn` и меню спавна — «как можно больше сущностей»,
-/// а не только наш ручной каталог предметов.
+/// Спавнимые прототипы сборки (IMP.2/IMP.3): id → размер предмета (`itemSize`).
+/// Из этого набора работает команда `spawn` и меню спавна — «как можно больше
+/// сущностей», а не только наш ручной каталог предметов.
 #[derive(Resource, Default)]
-struct ProtoCatalog(std::collections::HashSet<String>);
+struct ProtoCatalog {
+    ids: std::collections::HashSet<String>,
+    /// Размер предмета: id → id размера из `item_size.yml` (`Normal`, `Small`, …).
+    sizes: std::collections::HashMap<String, String>,
+}
 
 impl ProtoCatalog {
     fn contains(&self, id: &str) -> bool {
-        self.0.contains(id)
+        self.ids.contains(id)
+    }
+
+    /// Габариты предмета по его размеру-прототипу (клетки инвентаря).
+    fn size_cells(&self, id: &str) -> Option<(u8, u8)> {
+        let size_id = self.sizes.get(id)?;
+        ssr_core::item_size::cells_of(size_id)
     }
 }
 
 /// Проверяет портированные прототипы (`assets/prototypes_ss14.ron`, IMP.2/IMP.3)
-/// при старте и запоминает спавнимые (не abstract, entity) со спрайтом.
+/// при старте и запоминает спавнимые (не abstract, без `HideSpawnMenu`, entity)
+/// со спрайтом — те же условия, что в `EntitySpawningUIController.BuildEntityList`.
 fn load_prototypes(mut commands: Commands) {
     let path = ssr_core::assets_root().join("prototypes_ss14.ron");
     match ssr_core::prototypes::ProtoSet::load(&path) {
         Ok(set) => {
-            let mut spawnable = std::collections::HashSet::new();
+            let mut catalog = ProtoCatalog::default();
             for proto in &set.protos {
                 if proto.abstract_ || proto.kind != "entity" || proto.sprite.is_none() {
                     continue;
                 }
-                spawnable.insert(proto.id.clone());
+                if proto
+                    .categories
+                    .iter()
+                    .any(|category| category == "HideSpawnMenu")
+                {
+                    continue;
+                }
+                if let Some(size) = &proto.size {
+                    catalog.sizes.insert(proto.id.clone(), size.clone());
+                }
+                catalog.ids.insert(proto.id.clone());
             }
             tracing::info!(
                 protos = set.protos.len(),
-                spawnable = spawnable.len(),
+                spawnable = catalog.ids.len(),
+                with_size = catalog.sizes.len(),
                 "content prototypes loaded"
             );
-            commands.insert_resource(ProtoCatalog(spawnable));
+            commands.insert_resource(catalog);
         }
         Err(e) => tracing::warn!(error = %e, "content prototypes not loaded"),
     }
@@ -1599,7 +1621,13 @@ fn run_admin_command(
                 .min(20);
             // Второй режим: положить предмет на пол у ног (спавн-меню, «разместить»).
             let on_floor = parts.next() == Some("floor");
-            let (w, h) = catalogs.items.size_of(item_id);
+            // Размер: наш каталог, иначе размер из прототипа сборки
+            // (`Item.size` → `item_size.yml`): у стали это `Normal` = 2×2.
+            let (w, h) = if catalogs.items.by_id(item_id).is_some() {
+                catalogs.items.size_of(item_id)
+            } else {
+                prototypes.size_cells(item_id).unwrap_or((1, 1))
+            };
             let Some(base) = positions.get(player).ok().map(|p| p.0) else {
                 return "нет позиции игрока".to_string();
             };
@@ -1725,12 +1753,21 @@ fn run_admin_command(
 /// Единая точка приёма сообщений клиента: рукопожатие (Connect/Welcome, T1.2),
 /// операции над руками и админ-команды; исполняемое уходит в [`ActionQueue`].
 /// [`ActionQueue`] и обрабатывается одной системой [`process_actions`].
-/// Размер предмета по bits сущности (из имени, `item_size`): (ширина, высота).
-fn item_size_of(catalogs: &ContentCatalog, items: &Query<&Item>, bits: u64) -> (u8, u8) {
-    Entity::try_from_bits(bits)
-        .and_then(|entity| items.get(entity).ok())
-        .map(|item| catalogs.items.size_of(&item.name))
-        .unwrap_or((1, 1))
+/// Размер предмета по bits сущности: сначала наш каталог (`items.ron`), затем
+/// размер из прототипа сборки (`Item.size` → `itemSize`, `item_size.yml`).
+fn item_size_of(
+    catalogs: &ContentCatalog,
+    prototypes: &ProtoCatalog,
+    items: &Query<&Item>,
+    bits: u64,
+) -> (u8, u8) {
+    let Some(item) = Entity::try_from_bits(bits).and_then(|entity| items.get(entity).ok()) else {
+        return (1, 1);
+    };
+    if catalogs.items.by_id(&item.name).is_some() {
+        return catalogs.items.size_of(&item.name);
+    }
+    prototypes.size_cells(&item.name).unwrap_or((1, 1))
 }
 
 /// Обработчик всех сообщений клиентов: одна точка приёма (MessageReceiver
@@ -1943,7 +1980,7 @@ fn handle_client_messages(
                     let Ok(mut dest_inventory) = inventories.get_mut(dest_entity) else {
                         continue;
                     };
-                    let (w, h) = item_size_of(&content.catalogs, &items, item);
+                    let (w, h) = item_size_of(&content.catalogs, &content.prototypes, &items, item);
                     let anchor = (to_slot != SLOT_ANY).then_some(to_slot);
                     let Some(index) = dest_inventory.find_place(w, h, anchor) else {
                         tracing::warn!(?dest_entity, w, h, "transfer: no room for item");
@@ -2100,7 +2137,7 @@ fn handle_client_messages(
                         continue;
                     };
                     let anchor = inventory.anchor_of(item).unwrap_or(slot);
-                    let (w, h) = item_size_of(&content.catalogs, &items, item);
+                    let (w, h) = item_size_of(&content.catalogs, &content.prototypes, &items, item);
                     inventory.take(item);
                     if !hand.take_in_active(item) {
                         inventory.place(item, w, h, anchor);
@@ -2123,7 +2160,7 @@ fn handle_client_messages(
                     if !hand.take(item) {
                         continue;
                     }
-                    let (w, h) = item_size_of(&content.catalogs, &items, item);
+                    let (w, h) = item_size_of(&content.catalogs, &content.prototypes, &items, item);
                     match inventory.put_first_fit(item, w, h) {
                         Some(slot) => tracing::info!(item, slot, "item stowed"),
                         None => {
@@ -2300,13 +2337,14 @@ fn handle_client_messages(
                         }
                     };
                     let _ = slot_kind;
-                    // Карман: только мелкие предметы (SS14 PocketableItemSize = Small).
-                    if slot.is_pocket() {
-                        let (w, h) = content.catalogs.items.size_of(&name);
-                        if w > 1 || h > 1 {
-                            tracing::warn!(%name, "equip: item too big for pocket");
-                            continue;
-                        }
+                    // Карман: только мелкие предметы. В сборке сравнение идёт
+                    // по ВЕСУ размера (`InventorySystem.Equip.cs:262-270`:
+                    // `GetSizePrototype(item.Size) <= GetSizePrototype("Small")`),
+                    // а не по клеткам: Tiny(1) и Small(2) влезают, Normal(4) —
+                    // уже нет (стальной лист 2×2 в карман не лезет).
+                    if slot.is_pocket() && !content.catalogs.items.pocketable(&name) {
+                        tracing::warn!(%name, "equip: item too big for pocket");
+                        continue;
                     }
                     // Разгрузка: нужна верхняя одежда (`dependsOn: outerClothing`).
                     if slot.needs_outer()
@@ -2347,7 +2385,8 @@ fn handle_client_messages(
                     if let Some(previous) = clothing.equip(slot, item) {
                         // Прежняя вещь из слота возвращается туда, откуда пришла
                         // новая: в руку (если надевали из руки) или в рюкзак.
-                        let (w, h) = item_size_of(&content.catalogs, &items, previous);
+                        let (w, h) =
+                            item_size_of(&content.catalogs, &content.prototypes, &items, previous);
                         let mut placed = false;
                         if in_hand && let Ok(mut hand) = hands.get_mut(player) {
                             placed = hand.take_in_active(previous);
@@ -2395,16 +2434,15 @@ fn handle_client_messages(
                         }
                     }
                     for item in removed {
-                        let (w, h) = item_size_of(&content.catalogs, &items, item);
-                        // Приёмник — как `PickupOrDrop` в сборке: сначала
-                        // свободная рука (снял вещь → она в руке, можно сразу
-                        // надеть обратно), затем рюкзак, в крайнем случае пол.
+                        // Приёмник — как в сборке: `TryUnequip` (Equip.cs:473-475)
+                        // кладёт снятое `DropNextTo`, а `OnUseSlot` — через
+                        // `HandsSystem.PickupOrDrop` (Equip.cs:102): свободная рука,
+                        // иначе пол. В РЮКЗАК НЕ КЛАДЁМ: снятый рюкзак попадал в
+                        // собственную сетку и исчезал (владелец: «сняв его кликом
+                        // он тупо исчезает»).
                         let mut placed = false;
                         if let Ok(mut hand) = hands.get_mut(player) {
                             placed = hand.take_in_active(item);
-                        }
-                        if !placed && let Ok(mut inventory) = inventories.get_mut(player) {
-                            placed = inventory.put_first_fit(item, w, h).is_some();
                         }
                         if !placed
                             && let (Ok(position), Some(entity)) =
@@ -3042,6 +3080,8 @@ struct ActionQueries<'w, 's> {
     pulled_by: Query<'w, 's, &'static PulledBy>,
     atmospheres: Res<'w, Atmospheres>,
     catalogs: Res<'w, ContentCatalog>,
+    /// Размеры предметов из прототипов сборки (`item_size.yml`).
+    prototypes: Res<'w, ProtoCatalog>,
 }
 
 /// Доступ к двери (T4.2): дверь без ключа открыта всем, с ключом — только
@@ -3179,17 +3219,16 @@ fn process_actions(
                                 action: ActionKind::Pickup { item: entity },
                             });
                         }
-                        // Тянуть за собой можно крупное (ящики и предметы от
-                        // 2×2): в сборке это `PullableComponent`. Мелочь в руке.
+                        // Тянуть можно то, у чего в прототипе есть `Pullable`:
+                        // в сборке он стоит и на `BaseItem` (base_item.yml:62), и
+                        // на `BaseStructure` (base_structure.yml:27) — то есть
+                        // ЛЮБОЙ предмет и любая конструкция, независимо от размера
+                        // (прежнее правило «от 2×2» было выдумкой).
                         let pullable = container_positions.get(target).is_ok()
                             && (containers.get(target).is_ok()
                                 || items
                                     .get(target)
-                                    .map(|item| {
-                                        ssr_core::pull::is_pullable(
-                                            world.catalogs.items.size_of(&item.name),
-                                        )
-                                    })
+                                    .map(|item| world.catalogs.items.pullable(&item.name))
                                     .unwrap_or(false));
                         if pullable {
                             let currently = world
@@ -3550,7 +3589,12 @@ fn process_actions(
                             let mut absorbed = 0usize;
                             if let Ok(mut inventory) = inventories.get_mut(target) {
                                 for item in nearby {
-                                    let (w, h) = item_size_of(&world.catalogs, &items, item);
+                                    let (w, h) = item_size_of(
+                                        &world.catalogs,
+                                        &world.prototypes,
+                                        &items,
+                                        item,
+                                    );
                                     if inventory.put_first_fit(item, w, h).is_none() {
                                         break; // ящик полон (Capacity в движке)
                                     }

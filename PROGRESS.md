@@ -796,3 +796,85 @@ EntityStorageComponent.cs`), сеточного окна НЕТ (`StorageWindow`
   (`ColorFlashEffectSystem`).
 - Алерт «Stun» с кольцом-остатком стана и разделение стан/нокдаун
   (`StatusEffectStunned` в сборке).
+
+## 2026-10-04 (8) — прототипы, размеры предметов, снятие рюкзака
+
+Владелец: «при попытке снять рюкзак сняв его кликом он тупо исчезает, стопка
+стали должна занимать 2 на 2 места в инвентаре. Тебе нужно портировать ВСЕ
+системы для работы с прототипами, картами и прочим». Заведена цель
+`goal-309bdac2` (порт систем прототипов/карт). Изучено тремя субагентами:
+`PrototypeManager`/`EntityPrototype`/сериализация, карты и тайлы, размеры и стаки.
+
+### 1. Снятие одежды больше ничего не теряет
+
+В сборке `TryUnequip` (`InventorySystem.Equip.cs:473-475`) кладёт снятое
+`DropNextTo`, а `OnUseSlot` — через `HandsSystem.PickupOrDrop` (`:102`): свободная
+рука, иначе пол. **В рюкзак не кладётся.** У нас был лишний шаг «иначе в
+рюкзак» — снятый рюкзак попадал в СВОЮ сетку и исчезал. Шаг убран; проверено
+`SSR_UNEQUIP_TEST=back`: рюкзак оказался в руке, слот пуст.
+
+### 2. Размеры предметов — по таблице сборки
+
+- Новый модуль `ssr_core::item_size`: перенос `Resources/Prototypes/item_size.yml`
+  (`weight` + `defaultShape`, боксы со ВКЛЮЧИТЕЛЬНЫМИ границами):
+  Tiny 1×1 (вес 1), Small 1×2 (2), **Normal 2×2 (4)**, Large 4×2 (8),
+  Huge 4×4 (16), Ginormous 6×6 (32). Тесты: `sizes_match_engine_table`,
+  `sheet_is_two_by_two`, `pocket_fits_small_and_below`.
+- В каталоге предметов появился `size_id` (id прототипа размера) — числа больше
+  не выдумываются: сталь/стекло/пласталь/прут → `Normal` (2×2), рюкзак → `Huge`,
+  лом → `Normal`, пояс → `Ginormous`, сигарета/бумага → `Tiny` и т. д.
+  Проверено `SSR_SPAWN_TEST="SteelSheet 3"`: сталь лежит в рюкзаке клетками 2×2.
+- Карманы: сравнение по ВЕСУ (`PocketableItemSize = "Small"`), а не по клеткам —
+  `ItemSet::pocketable`.
+- **`Pullable` — компонент, а не размер**: у нас было правило «тянуть от 2×2»,
+  в сборке `Pullable` стоит на `BaseItem` (base_item.yml:62) и `BaseStructure`
+  (base_structure.yml:27), то есть тянуть можно любой предмет. Правило убрано,
+  флаг берётся из прототипа (`ItemSet::pullable`).
+
+### 3. Импортёр прототипов переписан на семантику движка
+
+`crates/tools/src/bin/import-proto.rs`:
+
+- **Мерж — YAML-маппингов, а не объектов** (`SerializationManager.Composition.cs:179-223`
+  + `ComponentRegistrySerializer.PushInheritance:222-255`): компонент того же типа
+  сливается по ключам (ребёнок перекрывает только свои поля), отсутствующий у
+  ребёнка компонент наследуется целиком, маппинги внутри поля сливаются по
+  ключам, списки заменяются. Прежний `upsert_component` заменял компонент целиком
+  и терял наследование (поэтому у `Crowbar` не было ни спрайта, ни размера).
+- **Мультинаследование** (`parent` может быть списком; приоритет
+  ребёнок > parent[0] > parent[1]).
+- **Разбор компонент → типизированные поля `Proto`**: `sprite` (в т. ч. из
+  `layers[0]`), `size` (`Item.size`, дефолт `Small`), `storage` (grid Box2i +
+  `maxItemSize`), `clothing_slots`, `tools` (качества), `stack` (тип, count,
+  максимум из прототипа стека `type: stack`), `pullable`, `categories`, `suffix`,
+  `body_type`, `light`. Сырой дамп компонентов — только по флагу `components`
+  (файл вырастает в 12 раз).
+- Итог: **19 421 прототип** (было 9 258 — прежний парсер спотыкался на файлах с
+  тегами `!type:`), 16 259 со спрайтом; `prototypes_ss14.ron` 9.8 МБ.
+- Клиент и сервер фильтруют `abstract`, отсутствие спрайта и категорию
+  `HideSpawnMenu` (как `EntitySpawningUIController.BuildEntityList:203-211`):
+  **спавнимых 14 656**, скрытых 1 999. Загрузка на клиенте — 84 мс.
+- Размер предмета вне нашего каталога сервер берёт из прототипа
+  (`ProtoCatalog::size_cells` → `item_size::cells_of`).
+
+### 4. Что дали отчёты для следующих заходов (не реализовано)
+
+- **Спавн сущностей по прототипу**: `EntityPrototype.LoadEntity` копирует
+  компоненты прототипа в сущность (`CopyTo`), порядок жизненного цикла
+  Create → ComponentInit → ComponentStartup (Transform, Physics, прочие) →
+  MapInit; смысл — спавнить из меню не «предмет с именем», а сущность с
+  реальными компонентами (Storage/Clothing/Tool/Stack/Physics/PointLight).
+- **Карты SS14**: формат 7 (и 6): `meta.format`, `tilemap` — палитра
+  `yamlId → имя прототипа`, чанки `chunks: {ind: {tiles: <base64>}}` со шагом
+  **7 байт** на тайл в v7 (int32 yamlId + flags + variant + rotationMirroring) и
+  **6** в v6, обход `y> x>`, 16×16; энтити сгруппированы по `proto` с
+  grid-local `Transform.pos` (центр тайла = x+0.5); стены/двери/шкафы — сущности
+  поверх тайлмапа. Рекомендованные карты: `_Mini/cluster.yml` (1.8 МБ, 6 824
+  тайла, 13 235 энтитей), `saltern.yml`, тесты — `Dungeon/Templates/3x7.yml` (v6)
+  и `corvax_shedevrolet.yml` (v7).
+- **Тайлдефы**: `ContentTileDefinition` (sprite PNG `32*variants × 32`,
+  `variants`, `isSubfloor`, `baseTurf`, `deconstructTools`, `isSpace`),
+  runtime TileId = ordinal-сортировка id после `Space`=0.
+- **Стаки**: `Stack` count/max, автослияние при вставке в хранилище и по клику
+  (но не при подборе), число не меняет занимаемую площадь, в UI — подпись
+  «Count: N» под слотом руки и смена спрайт-состояния (1-9 / 10-19 / 20-30).
