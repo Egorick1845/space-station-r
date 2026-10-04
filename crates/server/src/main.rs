@@ -2392,6 +2392,7 @@ fn handle_client_messages(
             .spawn((
                 PlayerPosition([spawn.0, spawn.1]),
                 PlayerInput::default(),
+                MoveVel::default(),
                 Replicate::to_clients(NetworkTarget::All),
                 Rooms::default(),
                 RigidBody::Dynamic,

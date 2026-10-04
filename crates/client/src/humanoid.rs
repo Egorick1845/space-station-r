@@ -333,11 +333,13 @@ pub fn update_facing(
             && atlas.index != index
         {
             atlas.index = index;
+            if part.key.contains("equipped") {
+                tracing::debug!(key = %part.key, facing = facing.0, "worn layer turned");
+            }
         }
     }
 }
 
-/// Отпечаток внешности: что надето и какая причёска.
 /// Отпечаток внешности: что надето, причёска, борода и НАПРАВЛЕНИЕ владельца —
 /// при повороте слои пересобираются заново, поэтому одежда гарантированно смотрит
 /// туда же, куда и тело (была жалоба, что одежда «поворачивается отдельно»).
@@ -481,6 +483,37 @@ pub fn sync_worn_clothes(
                 spawned += 1;
             }
         }
+        // Борода — отдельный маркинг (слой FacialHair в SS14): ниже волос,
+        // скрывается маской и шлемом.
+        let beard_hidden = helmet
+            || clothing
+                .get(ssr_core::clothing::ClothingSlot::Mask)
+                .is_some();
+        if let Some(beard) = beard
+            && !beard_hidden
+        {
+            let key = format!(
+                "sprites/ss14/Mobs/Customization/human_facial_hair.rsi#{}",
+                beard.style
+            );
+            if let Some(sprite) = registry.get(&key) {
+                let mut component = Sprite::from_image(sprite.image.clone());
+                component.texture_atlas = Some(TextureAtlas {
+                    layout: sprite.layout.clone(),
+                    index: sprite.index(facing.min(3), 0),
+                });
+                component.color = Color::srgb_u8(beard.color[0], beard.color[1], beard.color[2]);
+                commands.entity(visual).with_children(|parent| {
+                    parent.spawn((
+                        HumanoidPart { owner: visual, key },
+                        WornLayer { owner: visual },
+                        component,
+                        Transform::from_xyz(0.0, 0.0, 0.2115),
+                    ));
+                });
+                spawned += 1;
+            }
+        }
         commands.entity(visual).with_children(|parent| {
             for (slot, item) in clothing.slots.iter() {
                 let Some(key) = context.key(*item) else {
@@ -492,7 +525,7 @@ pub fn sync_worn_clothes(
                 let mut component = Sprite::from_image(sprite.image.clone());
                 component.texture_atlas = Some(TextureAtlas {
                     layout: sprite.layout.clone(),
-                    index: sprite.index(0, 0),
+                    index: sprite.index(facing.min(3), 0),
                 });
                 parent.spawn((
                     HumanoidPart { owner: visual, key },
@@ -506,6 +539,15 @@ pub fn sync_worn_clothes(
                 spawned += 1;
             }
         });
+        // Кэшируем отпечаток только когда все слои создались: RSI грузятся лениво,
+        // иначе пересборка шла бы КАЖДЫЙ кадр (из-за этого слои вечно пересоздавались
+        // и гонка с update_facing оставляла одежду повёрнутой на юг).
+        let expected = clothing.slots.len()
+            + usize::from(hair.is_some() && !helmet)
+            + usize::from(beard.is_some() && !beard_hidden);
+        if spawned == expected {
+            last.insert(entity, signature);
+        }
         tracing::info!(
             slots = clothing.slots.len(),
             spawned,
