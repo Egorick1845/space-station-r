@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use avian2d::math::Vector;
 use avian2d::prelude::{
-    Collider, ColliderDisabled, Gravity, LinearVelocity, PhysicsPlugins, Position, RigidBody,
-    Rotation,
+    Collider, ColliderDisabled, Friction, Gravity, LinearVelocity, PhysicsPlugins, Position,
+    RigidBody, Rotation,
 };
 use bevy::app::ScheduleRunnerPlugin;
 use bevy::prelude::*;
@@ -46,6 +46,10 @@ const INTEREST_RADIUS: i32 = 2;
 
 /// Число сущностей нагрузочного теста (критерий T1.4: клиент получает < 100 из 1000).
 const LOAD_TEST_ENTITIES: u32 = 1000;
+
+/// Радиус коллайдера игрока: чуть меньше половины тайла, чтобы проход шириной
+/// в 1 тайл не тёрся о стены (из-за этого было замедление в коридоре).
+const PLAYER_RADIUS: f32 = 14.0;
 
 /// Адрес, который слушает сервер. Порт переопределяется `SSR_PORT` — тестовые
 /// прогоны идут на отдельном порту и не перехватывают живую игру в 7777.
@@ -2065,7 +2069,9 @@ fn handle_client_messages(
                 Replicate::to_clients(NetworkTarget::All),
                 Rooms::default(),
                 RigidBody::Dynamic,
-                Collider::circle(16.0),
+                Collider::circle(PLAYER_RADIUS),
+                // Трение о стены в узком проходе тормозило игрока — выключаем.
+                Friction::ZERO,
                 Position(Vector::new(spawn.0, spawn.1)),
                 Rotation::default(),
                 Hands::default(),

@@ -24,6 +24,7 @@ mod containers;
 mod content;
 mod crafting;
 mod doors;
+mod fov;
 mod hud;
 mod humanoid;
 mod inventory_ui;
@@ -149,6 +150,7 @@ fn main() {
         (
             setup_camera,
             startup_map,
+            fov::setup_fog,
             install_default_font,
             settings::load_settings,
             settings::apply_saved_window_mode,
@@ -168,6 +170,7 @@ fn main() {
             tiles::render_map_chunks,
             tiles::despawn_orphan_chunks,
             camera_follow_player,
+            fov::update_fog,
             doors::spawn_door_visuals,
             doors::update_door_visuals,
             doors::apply_denied_doors,
@@ -244,6 +247,8 @@ fn main() {
         (
             settings::toggle_settings_menu,
             settings::settings_click,
+            settings::settings_tab_click,
+            settings::volume_slider_drag,
             settings::update_settings_text,
         ),
     );

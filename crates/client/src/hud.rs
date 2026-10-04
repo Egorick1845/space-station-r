@@ -9,6 +9,7 @@
 use bevy::input::ButtonState;
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::prelude::*;
+use bevy_replicon::shared::server_entity_map::ServerEntityMap;
 use lightyear::prelude::client::*;
 use lightyear::prelude::*;
 use ssr_core::PlayerPosition;
@@ -211,6 +212,57 @@ fn cursor_world(
     camera.viewport_to_world_2d(transform, cursor).ok()
 }
 
+/// Действие по E: открыть ближайшую дверь или ящик под курсором; если рядом
+/// ничего нет — применить предмет из активной руки к тайлу (как в SS14).
+fn send_interact(
+    senders: &mut Query<&mut MessageSender<ClientMessage>, With<Connected>>,
+    world: Vec2,
+    entity_map: Option<&ServerEntityMap>,
+    own: Option<Entity>,
+    hands: &Query<&ssr_core::inventory::Hands>,
+    doors: &Query<(Entity, &ssr_core::Door)>,
+    containers: &Query<
+        (Entity, &ssr_core::inventory::ItemPosition),
+        With<ssr_core::inventory::Container>,
+    >,
+) {
+    let mut nearest: Option<(f32, Entity)> = None;
+    for (entity, door) in doors.iter() {
+        let distance = Vec2::from_array(door.position).distance(world);
+        if distance <= 24.0 && nearest.is_none_or(|(best, _)| distance < best) {
+            nearest = Some((distance, entity));
+        }
+    }
+    for (entity, position) in containers.iter() {
+        let distance = Vec2::from_array(position.0).distance(world);
+        if distance <= 24.0 && nearest.is_none_or(|(best, _)| distance < best) {
+            nearest = Some((distance, entity));
+        }
+    }
+    let tx = (world.x / 32.0).floor() as i32;
+    let ty = (world.y / 32.0).floor() as i32;
+    // Объект рядом: клиентская сущность → серверные bits → Interact.
+    if let Some((_, target)) = nearest
+        && let Some(map) = entity_map
+        && let Some(server_entity) = map.to_server().get(&target)
+    {
+        let bits = server_entity.to_bits();
+        for mut sender in senders.iter_mut() {
+            sender.send::<GameChannel>(ClientMessage::Interact { entity: bits });
+        }
+        return;
+    }
+    // Иначе — предмет из активной руки к тайлу.
+    let item = own
+        .and_then(|entity| hands.get(entity).ok())
+        .and_then(|hands| hands.active_item());
+    if let Some(item) = item {
+        for mut sender in senders.iter_mut() {
+            sender.send::<GameChannel>(ClientMessage::UseItem { item, tx, ty });
+        }
+    }
+}
+
 /// Отправляет осмотр тайла по мировым координатам.
 fn send_examine(
     senders: &mut Query<&mut MessageSender<ClientMessage>, With<Connected>>,
@@ -223,7 +275,8 @@ fn send_examine(
     }
 }
 
-/// Горячие клавиши: F5 спавн, F7 админ, F бой, E осмотр, Q бросить, C крафт.
+/// Горячие клавиши: F5 спавн, F7 админ, F бой, E действие, Q бросить, C крафт.
+#[allow(clippy::too_many_arguments)]
 pub fn hud_hotkeys(
     keys: Res<ButtonInput<KeyCode>>,
     console: Res<Console>,
@@ -232,6 +285,14 @@ pub fn hud_hotkeys(
     mut senders: Query<&mut MessageSender<ClientMessage>, With<Connected>>,
     windows: Query<&Window>,
     camera: Single<(&Camera, &GlobalTransform), With<Camera2d>>,
+    doors: Query<(Entity, &ssr_core::Door)>,
+    containers: Query<
+        (Entity, &ssr_core::inventory::ItemPosition),
+        With<ssr_core::inventory::Container>,
+    >,
+    entity_map: Option<Res<ServerEntityMap>>,
+    own: Res<OwnPlayerEntity>,
+    hands: Query<&ssr_core::inventory::Hands>,
 ) {
     if console.open {
         return;
@@ -260,10 +321,33 @@ pub fn hud_hotkeys(
             sender.send::<GameChannel>(ClientMessage::DropHand);
         }
     }
+    // E — действие: дверь/ящик под курсором открыть, иначе применить предмет
+    // из активной руки к тайлу (как в SS14). Shift+E — осмотр.
     if keys.just_pressed(KeyCode::KeyE)
         && let Some(world) = cursor_world(&windows, &camera)
     {
-        send_examine(&mut senders, world);
+        let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+        if shift {
+            send_examine(&mut senders, world);
+        } else {
+            send_interact(
+                &mut senders,
+                world,
+                entity_map.as_deref(),
+                own.0,
+                &hands,
+                &doors,
+                &containers,
+            );
+        }
+    }
+    // 1/2 — выбрать руку напрямую (как хотбар в SS14).
+    for (key, index) in [(KeyCode::Digit1, 0u8), (KeyCode::Digit2, 1u8)] {
+        if keys.just_pressed(key) {
+            for mut sender in senders.iter_mut() {
+                sender.send::<GameChannel>(ClientMessage::TakeInHand { slot: index });
+            }
+        }
     }
     if keys.just_pressed(KeyCode::KeyC) {
         crafting.open = !crafting.open;
