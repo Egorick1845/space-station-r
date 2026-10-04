@@ -863,6 +863,8 @@ pub fn register_replication(app: &mut App) {
     // Одежда: порядок регистрации обязан совпадать с сервером (иначе репликация
     // разъезжается и клиент ловит «Hit the end of buffer»).
     app.component::<ssr_core::clothing::Clothing>().replicate();
+    // Пол: порядок регистрации совпадает с сервером (иначе «Hit the end of buffer»).
+    app.component::<ssr_core::mechanics::Sex>().replicate();
     app.component::<ssr_core::roles::PlayerRole>().replicate();
     app.component::<ssr_core::Species>().replicate();
     app.component::<ssr_core::atmosphere::ChunkAtmosphere>()

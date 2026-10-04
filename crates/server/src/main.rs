@@ -24,6 +24,7 @@ use ssr_core::clothing::{Clothing, ClothingSlot};
 use ssr_core::inventory::{
     Container, Hands, Health, HeldBy, Inventory, Item, ItemPosition, SLOT_ANY,
 };
+use ssr_core::mechanics::Sex;
 use ssr_core::mechanics::{Ghost, KNOCKDOWN_SECS, KnockedDown, PlayerName, RUN_SPEED_MULT};
 use ssr_core::power::{Cable, Consumer, Generator, Light, Powered};
 use ssr_core::roles::{Access, PlayerRole, RoleSet};
@@ -179,6 +180,7 @@ fn main() {
     app.component::<Container>().replicate();
     app.component::<ItemPosition>().replicate();
     app.component::<Clothing>().replicate();
+    app.component::<Sex>().replicate();
     // Роли (T4.2). Тот же порядок, что у клиента!
     app.component::<PlayerRole>().replicate();
     // Расы (T5.3). Тот же порядок, что у клиента!
@@ -1352,6 +1354,15 @@ struct AuxParams<'w, 's> {
     clothings: Query<'w, 's, &'static mut Clothing>,
 }
 
+/// Простой «бросок монетки» для пола на спавне (без выбора игрока — как в SS14).
+fn rand_bool() -> bool {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() % 2 == 0)
+        .unwrap_or(true)
+}
+
 /// Имя игрока по его сущности (для чата): из реестра подключений.
 fn items_name(players: &Players, player: Entity) -> String {
     players
@@ -2453,6 +2464,12 @@ fn handle_client_messages(
             clothing.equip(slot, item.to_bits());
         }
         commands.entity(player).insert(clothing);
+        // Пол: варианты есть только у head/chest/groin (SS14 HasSexMorph).
+        let sex = std::env::var("SSR_SEX")
+            .ok()
+            .and_then(|value| Sex::from_id(&value))
+            .unwrap_or_else(|| if rand_bool() { Sex::Female } else { Sex::Male });
+        commands.entity(player).insert(sex);
         if let Some(role) = role {
             commands.entity(player).insert((
                 PlayerRole {

@@ -23,3 +23,36 @@ pub struct PlayerName(pub String);
 /// Призрак админа: летает сквозь стены, без коллизии и урона.
 #[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
 pub struct Ghost;
+
+/// Пол персонажа: влияет только на части тела `head/chest/groin` — как
+/// `HumanoidVisualLayersExtension.HasSexMorph` в SS14 (только эти три слоя
+/// имеют варианты `_m`/`_f`; у Unsexed остаётся мужской арт).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, bevy::prelude::Component,
+)]
+pub enum Sex {
+    #[default]
+    Male,
+    Female,
+    Unsexed,
+}
+
+impl Sex {
+    /// Суффикс состояния RSI для слоя с половым вариантом (`_m`/`_f`).
+    pub fn part_suffix(self) -> &'static str {
+        match self {
+            Sex::Female => "_f",
+            _ => "_m",
+        }
+    }
+
+    /// Разбор строки (`SSR_SEX`).
+    pub fn from_id(id: &str) -> Option<Self> {
+        match id.to_ascii_lowercase().as_str() {
+            "male" | "м" | "m" => Some(Self::Male),
+            "female" | "ж" | "f" => Some(Self::Female),
+            "unsexed" => Some(Self::Unsexed),
+            _ => None,
+        }
+    }
+}

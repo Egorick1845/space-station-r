@@ -61,6 +61,18 @@ fn part_key(species: &str, part: &str) -> String {
     format!("sprites/ss14/Mobs/Species/{species}/parts.rsi#{part}")
 }
 
+/// Часть с учётом пола: `_m`/`_f` только у head/chest/groin (SS14:
+/// `HasSexMorph` — Groin, Chest, Head); остальные части без вариантов.
+fn sexed_part(part: &str, sex: ssr_core::mechanics::Sex) -> String {
+    match part {
+        "head_m" | "chest_m" | "groin_m" => {
+            let base = part.trim_end_matches("_m");
+            format!("{base}{}", sex.part_suffix())
+        }
+        _ => part.to_string(),
+    }
+}
+
 /// Глаза — отдельный слой поверх головы (как `MobHumanoidEyes` в SS14).
 const EYES_KEY: &str = "sprites/ss14/Mobs/Customization/eyes.rsi#eyes";
 /// Ключ спрайта призрака.
@@ -77,6 +89,7 @@ pub fn attach_body(
     registry: &RsiRegistry,
     owner: Entity,
     species: &str,
+    sex: ssr_core::mechanics::Sex,
 ) -> usize {
     // Призрак: вместо тела — один спрайт призрака (механики владельца).
     if species == GHOST_SPECIES {
@@ -96,7 +109,7 @@ pub fn attach_body(
     let mut attached = 0usize;
     commands.entity(owner).with_children(|parent| {
         for (part, z) in PARTS {
-            let key = part_key(species, part);
+            let key = part_key(species, &sexed_part(part, sex));
             let Some(sprite) = registry.get(&key) else {
                 continue;
             };
@@ -163,6 +176,7 @@ pub struct BodyQueries<'w, 's> {
     pub visuals: Query<'w, 's, (Entity, &'static RemotePlayerVisual)>,
     pub bodies: Query<'w, 's, &'static BodySpecies>,
     pub children: Query<'w, 's, &'static Children>,
+    pub sexes: Query<'w, 's, &'static ssr_core::mechanics::Sex>,
 }
 
 /// Собирает/пересобирает тела, когда раса появилась или сменилась.
@@ -179,6 +193,7 @@ pub fn sync_bodies(
         visuals,
         bodies,
         children,
+        sexes,
     } = q;
     let species_of = |entity: Entity| {
         // Призрак важнее расы: тело заменяется спрайтом призрака.
@@ -191,14 +206,21 @@ pub fn sync_bodies(
             .unwrap_or_else(|_| "Human".to_string())
     };
 
+    // Отпечаток тела: раса + пол (половые варианты только у head/chest/groin).
+    let body_signature = |entity: Entity| {
+        let sex = sexes.get(entity).copied().unwrap_or_default();
+        format!("{}{}", species_of(entity), sex.part_suffix())
+    };
     if let Some(own_entity) = own.0 {
         let species_id = species_of(own_entity);
+        let sex = sexes.get(own_entity).copied().unwrap_or_default();
         for player_entity in players.iter() {
-            if bodies.get(player_entity).ok().map(|b| b.0.as_str()) == Some(species_id.as_str()) {
+            let signature = body_signature(player_entity);
+            if bodies.get(player_entity).ok().map(|b| b.0.as_str()) == Some(signature.as_str()) {
                 continue;
             }
             detach_body(&mut commands, &children, player_entity);
-            let parts = attach_body(&mut commands, &registry, player_entity, &species_id);
+            let parts = attach_body(&mut commands, &registry, player_entity, &species_id, sex);
             // Спрайты грузятся лениво (T5.3): пока частей не хватает — не
             // помечаем тело собранным, на следующем кадре попробуем снова.
             if parts < PARTS.len() {
@@ -206,8 +228,8 @@ pub fn sync_bodies(
             }
             commands
                 .entity(player_entity)
-                .insert(BodySpecies(species_id.clone()));
-            tracing::info!(species = %species_id, parts, "player body attached");
+                .insert(BodySpecies(signature));
+            tracing::info!(species = %species_id, sex = ?sex, parts, "player body attached");
         }
     }
 
@@ -218,18 +240,20 @@ pub fn sync_bodies(
             continue;
         }
         let species_id = species_of(visual.player);
-        if bodies.get(visual_entity).ok().map(|b| b.0.as_str()) == Some(species_id.as_str()) {
+        let sex = sexes.get(visual.player).copied().unwrap_or_default();
+        let signature = body_signature(visual.player);
+        if bodies.get(visual_entity).ok().map(|b| b.0.as_str()) == Some(signature.as_str()) {
             continue;
         }
         detach_body(&mut commands, &children, visual_entity);
-        let parts = attach_body(&mut commands, &registry, visual_entity, &species_id);
+        let parts = attach_body(&mut commands, &registry, visual_entity, &species_id, sex);
         if parts < PARTS.len() {
             continue;
         }
         commands
             .entity(visual_entity)
-            .insert(BodySpecies(species_id.clone()));
-        tracing::info!(player = ?visual.player, species = %species_id, parts, "remote body attached");
+            .insert(BodySpecies(signature));
+        tracing::info!(player = ?visual.player, species = %species_id, sex = ?sex, parts, "remote body attached");
     }
 }
 
