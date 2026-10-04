@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Версия протокола. Несовпадение при рукопожатии = отказ соединения (проверка в T1.2).
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// Порт игрового сервера по умолчанию (T1.2).
 pub const DEFAULT_SERVER_PORT: u16 = 7777;
@@ -67,8 +67,8 @@ pub enum ClientMessage {
     Chat { channel: ChatChannel, text: String },
     /// Бросить предмет из рюкзака на пол (перетаскивание из окна в мир, SS14).
     DropItem { item: u64 },
-    /// Надеть предмет из рюкзака (слот берётся из каталога предмета).
-    Equip { item: u64 },
+    /// Надеть предмет: `slot` — целевой слот (одежда, карман, разгрузка).
+    Equip { item: u64, slot: String },
     /// Снять одежду из слота (имя слота как в каталоге: `jumpsuit`, `shoes`).
     Unequip { slot: String },
     /// Переключить боевой режим: обычные клики начинают бить, а не использовать.

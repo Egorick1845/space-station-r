@@ -10,6 +10,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ClothingSlot {
     Back,
+    Pocket1,
+    Pocket2,
+    SuitStorage,
     Belt,
     Ears,
     Eyes,
@@ -25,7 +28,10 @@ pub enum ClothingSlot {
 
 impl ClothingSlot {
     /// Все слоты (порядок — для UI и сериализации).
-    pub const ALL: [ClothingSlot; 12] = [
+    pub const ALL: [ClothingSlot; 15] = [
+        ClothingSlot::Pocket1,
+        ClothingSlot::Pocket2,
+        ClothingSlot::SuitStorage,
         ClothingSlot::Jumpsuit,
         ClothingSlot::Shoes,
         ClothingSlot::Gloves,
@@ -43,6 +49,9 @@ impl ClothingSlot {
     /// Имя слота строкой (как в каталоге предметов).
     pub fn id(self) -> &'static str {
         match self {
+            ClothingSlot::Pocket1 => "pocket1",
+            ClothingSlot::Pocket2 => "pocket2",
+            ClothingSlot::SuitStorage => "suitstorage",
             ClothingSlot::Back => "back",
             ClothingSlot::Belt => "belt",
             ClothingSlot::Ears => "ears",
@@ -63,11 +72,23 @@ impl ClothingSlot {
         Self::ALL.into_iter().find(|slot| slot.id() == id)
     }
 
+    /// Карман: в него влезают только мелкие предметы (`PocketableItemSize` = Small).
+    pub fn is_pocket(self) -> bool {
+        matches!(self, ClothingSlot::Pocket1 | ClothingSlot::Pocket2)
+    }
+
+    /// Разгрузка требует верхней одежды (`dependsOn: outerClothing` в SS14).
+    pub fn needs_outer(self) -> bool {
+        matches!(self, ClothingSlot::SuitStorage)
+    }
+
     /// Слой отрисовки: чем больше, тем выше (порядок `base.yml`).
     /// Части тела идут с шагом 1 (1.00 Groin … 1.22 Head), одежда вклинивается
     /// между ними как в движке.
     pub fn layer_z(self) -> f32 {
         match self {
+            // Карманы и разгрузка — невидимые слоты: спрайта на теле не имеют.
+            ClothingSlot::Pocket1 | ClothingSlot::Pocket2 | ClothingSlot::SuitStorage => 0.0,
             ClothingSlot::Jumpsuit => 1.08,
             ClothingSlot::Gloves => 1.13,
             ClothingSlot::Shoes => 1.14,
@@ -86,6 +107,7 @@ impl ClothingSlot {
     /// Состояние RSI «надетым» (`equipped-INNERCLOTHING` и т.п.).
     pub fn equipped_state(self) -> &'static str {
         match self {
+            ClothingSlot::Pocket1 | ClothingSlot::Pocket2 | ClothingSlot::SuitStorage => "",
             ClothingSlot::Head => "equipped-HELMET",
             ClothingSlot::Eyes => "equipped-EYES",
             ClothingSlot::Ears => "equipped-EARS",

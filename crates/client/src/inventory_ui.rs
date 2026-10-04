@@ -714,10 +714,19 @@ pub fn render_hands_panel(
                 .and_then(|entity| clothings.get(entity).ok())
                 .cloned()
                 .unwrap_or_default();
+            // В SS14 это два контейнера: SecondHotbar слева (id/belt/back),
+            // MainHotbar справа (карманы и разгрузка).
             for slot in [
                 ssr_core::clothing::ClothingSlot::Id,
                 ssr_core::clothing::ClothingSlot::Belt,
                 ssr_core::clothing::ClothingSlot::Back,
+            ] {
+                equip_slot(bar, &theme, &sprites, slot, &clothing);
+            }
+            for slot in [
+                ssr_core::clothing::ClothingSlot::SuitStorage,
+                ssr_core::clothing::ClothingSlot::Pocket1,
+                ssr_core::clothing::ClothingSlot::Pocket2,
             ] {
                 equip_slot(bar, &theme, &sprites, slot, &clothing);
             }
@@ -1786,6 +1795,7 @@ fn equip_slot(
         ssr_core::clothing::ClothingSlot::Back => theme.slot_back.clone(),
         ssr_core::clothing::ClothingSlot::Belt => theme.slot_belt.clone(),
         ssr_core::clothing::ClothingSlot::Id => theme.slot_id.clone(),
+        ssr_core::clothing::ClothingSlot::SuitStorage => theme.slot_suit_storage.clone(),
         _ => theme.slot_pocket.clone(),
     };
     let item = clothing.get(slot);
@@ -1844,14 +1854,17 @@ pub fn equip_slot_click(
             tracing::info!(slot = button.0.id(), item, "unequip sent");
             continue;
         }
-        // Пустой слот: надеваем предмет из активной руки.
+        // Пустой слот: кладём/надеваем предмет из активной руки.
         let item = own
             .0
             .and_then(|entity| hands.get(entity).ok())
             .and_then(|hands| hands.active_item());
         if let Some(item) = item {
             for mut sender in senders.iter_mut() {
-                sender.send::<GameChannel>(ClientMessage::Equip { item });
+                sender.send::<GameChannel>(ClientMessage::Equip {
+                    item,
+                    slot: button.0.id().to_string(),
+                });
             }
             tracing::info!(slot = button.0.id(), item, "equip sent");
         }

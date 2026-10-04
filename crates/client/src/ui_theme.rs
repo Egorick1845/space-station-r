@@ -132,6 +132,8 @@ pub struct UiTheme {
     pub slot_pocket: Handle<Image>,
     /// `Slots/id` — слот ID-карты.
     pub slot_id: Handle<Image>,
+    /// `Slots/suit_storage` — слот разгрузки.
+    pub slot_suit_storage: Handle<Image>,
     /// `SlotBackground` — фон слота действия (`ActionButton` в SS14).
     pub slot_background: Handle<Image>,
 
@@ -241,6 +243,7 @@ pub fn load_ui_theme(mut commands: Commands, assets: Res<AssetServer>) {
         slot_belt: load("sprites/ss14/Interface/Default/Slots/belt.png"),
         slot_pocket: load("sprites/ss14/Interface/Default/Slots/pocket.png"),
         slot_id: load("sprites/ss14/Interface/Default/Slots/id.png"),
+        slot_suit_storage: load("sprites/ss14/Interface/Default/Slots/suit_storage.png"),
         slot_background: load("sprites/ss14/Interface/Default/SlotBackground.png"),
         status_left: load("sprites/ss14/Interface/Default/item_status_left.png"),
         status_right: load("sprites/ss14/Interface/Default/item_status_right.png"),

@@ -2156,7 +2156,7 @@ fn handle_client_messages(
                         tracing::info!(item, "item dropped from inventory to floor");
                     }
                 }
-                ClientMessage::Equip { item } => {
+                ClientMessage::Equip { item, slot } => {
                     let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {
                         continue;
                     };
@@ -2165,15 +2165,43 @@ fn handle_client_messages(
                         .get(Entity::try_from_bits(item).unwrap_or(player))
                         .map(|item| item.name.clone())
                         .unwrap_or_default();
-                    let Some(slot) = content
-                        .catalogs
-                        .items
-                        .slot_of(&name)
-                        .and_then(ClothingSlot::from_id)
-                    else {
-                        tracing::warn!(%name, "equip: item is not clothing");
+                    let Some(slot) = ClothingSlot::from_id(&slot) else {
+                        tracing::warn!(slot, "equip: unknown slot");
                         continue;
                     };
+                    // Одежда надевается только в свой слот; в карманы/разгрузку
+                    // можно класть любые подходящие по размеру предметы.
+                    let slot_kind = if slot.is_pocket() || slot.needs_outer() {
+                        None
+                    } else {
+                        match content.catalogs.items.slot_of(&name) {
+                            Some(kind) if kind == slot.id() => Some(kind.to_string()),
+                            _ => {
+                                tracing::warn!(%name, slot = slot.id(), "equip: wrong slot");
+                                continue;
+                            }
+                        }
+                    };
+                    let _ = slot_kind;
+                    // Карман: только мелкие предметы (SS14 PocketableItemSize = Small).
+                    if slot.is_pocket() {
+                        let (w, h) = content.catalogs.items.size_of(&name);
+                        if w > 1 || h > 1 {
+                            tracing::warn!(%name, "equip: item too big for pocket");
+                            continue;
+                        }
+                    }
+                    // Разгрузка: нужна верхняя одежда (`dependsOn: outerClothing`).
+                    if slot.needs_outer()
+                        && aux
+                            .clothings
+                            .get(player)
+                            .map(|clothing| clothing.get(ClothingSlot::OuterClothing).is_none())
+                            .unwrap_or(true)
+                    {
+                        tracing::warn!(%name, "equip: no outer clothing for suit storage");
+                        continue;
+                    }
                     // Предмет должен лежать в рюкзаке: забираем и надеваем.
                     let Ok(mut inventory) = inventories.get_mut(player) else {
                         continue;

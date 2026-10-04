@@ -355,28 +355,46 @@ pub fn send_interact(
     Some(())
 }
 
-/// Обводка объекта под курсором — как `InteractionOutline` в SS14: подсвечиваются
-/// все предметы (лежащие на полу и в руках), ящики и шлюзы; цвет — жёлтый
-/// «в зоне взаимодействия» (`SelectionOutlineInrange` — зелёный, вне зоны — красный).
+/// Обводка под курсором: у шлюзов и ящиков — рамка по тайлу, у предметов —
+/// контур по форме спрайта (как `SelectionOutline` в SS14: 8 копий спрайта
+/// со смещением на 1 px дают силуэт вместо квадрата).
+#[allow(clippy::too_many_arguments)]
 pub fn hover_outline(
     windows: Query<&Window>,
     camera: Single<(&Camera, &GlobalTransform), With<Camera2d>>,
     doors: Query<&Door>,
     containers: Query<&ssr_core::inventory::ItemPosition, With<ssr_core::inventory::Container>>,
-    floor_items: Query<&ssr_core::inventory::ItemPosition, With<ssr_core::inventory::Item>>,
+    items: Query<(
+        &ssr_core::inventory::Item,
+        &ssr_core::inventory::ItemPosition,
+        &ssr_core::inventory::HeldBy,
+    )>,
+    sprites: crate::inventory_ui::ItemSprites,
+    mut commands: Commands,
+    outlines: Query<Entity, With<ItemOutline>>,
     mut gizmos: Gizmos,
 ) {
+    for entity in outlines.iter() {
+        commands.entity(entity).despawn();
+    }
     let Ok(window) = windows.single() else {
         return;
     };
-    let Some(cursor) = window.cursor_position() else {
+    // SSR_HOVER_TEST: считаем курсор над предметом (для скриншот-проверки).
+    let cursor_point = if std::env::var_os("SSR_HOVER_TEST").is_some() {
+        items
+            .iter()
+            .next()
+            .map(|(_, position, _)| Vec2::from_array(position.0))
+    } else {
+        window.cursor_position().and_then(|cursor| {
+            let (camera, transform) = *camera;
+            camera.viewport_to_world_2d(transform, cursor).ok()
+        })
+    };
+    let Some(world) = cursor_point else {
         return;
     };
-    let (camera, camera_transform) = *camera;
-    let Ok(world) = camera.viewport_to_world_2d(camera_transform, cursor) else {
-        return;
-    };
-    // Шлюзы: рамка тайла.
     for door in doors.iter() {
         let position = Vec2::from_array(door.position);
         if position.distance(world) <= CLICK_RADIUS {
@@ -387,22 +405,65 @@ pub fn hover_outline(
             );
         }
     }
-    // Предметы и ящики: рамка по размеру спрайта (у ящика — тайл).
-    for (position, half) in containers
-        .iter()
-        .map(|position| (position, DOOR_HALF))
-        .chain(floor_items.iter().map(|position| (position, 16.0)))
-    {
+    for position in containers.iter() {
         let point = Vec2::from_array(position.0);
         if point.distance(world) <= 24.0 {
             gizmos.rect_2d(
                 Isometry2d::from_translation(point),
-                Vec2::splat(half * 2.0 + 4.0),
-                Color::srgb(1.0, 0.95, 0.55),
+                Vec2::splat(DOOR_HALF * 2.0 + 4.0),
+                Color::srgb(1.0, 0.9, 0.35),
             );
         }
     }
+    // Предмет: контур по силуэту — копии спрайта со смещением под самим спрайтом.
+    let hovered = items.iter().find(|(_, position, held)| {
+        held.player == 0 && Vec2::from_array(position.0).distance(world) <= 24.0
+    });
+    let Some((item, position, _)) = hovered else {
+        return;
+    };
+    let Some(sprite) = sprites.icon_by_name(&item.name) else {
+        return;
+    };
+    let base = Sprite {
+        image: sprite.image.clone(),
+        texture_atlas: Some(TextureAtlas {
+            layout: sprite.layout.clone(),
+            index: sprite.index(0, 0),
+        }),
+        color: Color::srgba(0.45, 1.0, 0.45, 0.85),
+        ..default()
+    };
+    commands
+        .spawn((
+            ItemOutline,
+            Visibility::default(),
+            Transform::from_xyz(position.0[0], position.0[1], OUTLINE_Z),
+        ))
+        .with_children(|parent| {
+            for (dx, dy) in OUTLINE_OFFSETS {
+                parent.spawn((base.clone(), Transform::from_xyz(dx, dy, 0.0)));
+            }
+        });
 }
+
+/// Слой контура: под самим предметом (он на 0.45).
+const OUTLINE_Z: f32 = 0.44;
+/// Смещения копий спрайта — контур толщиной 1 px по силуэту.
+const OUTLINE_OFFSETS: [(f32, f32); 8] = [
+    (-1.0, 0.0),
+    (1.0, 0.0),
+    (0.0, -1.0),
+    (0.0, 1.0),
+    (-1.0, -1.0),
+    (1.0, -1.0),
+    (-1.0, 1.0),
+    (1.0, 1.0),
+];
+
+/// Корень контура предмета под курсором.
+#[derive(Component)]
+pub struct ItemOutline;
 
 /// Тестовый режим SSR_INTERACT_TEST=1: раз в [`AUTO_INTERACT_PERIOD`] секунд
 /// клиент «кликает» по ближайшей к своему игроку двери (открыть/закрыть).
