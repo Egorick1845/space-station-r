@@ -52,6 +52,8 @@ const GLOW_Z: f32 = 2.00;
 const GLOW_ALPHA: f32 = 0.55;
 /// Юнитов на тайл.
 const TILE_UNITS: f32 = TILE_PX as f32;
+/// Кадр мира в тайлах — как `ViewportUIController` в движке (672×480 px).
+const VIEWPORT_TILES: (f32, f32) = (21.0, 15.0);
 
 /// Карта света: слой тьмы и слой тёплого оттенка.
 #[derive(Resource)]
@@ -71,6 +73,35 @@ pub(crate) struct WorldState {
     lamps: Vec<(i32, i32, u8, u8)>, // тайл, радиус, яркость×100
     closed_doors: Vec<(i32, i32)>,
     chunks: u64, // хеш набора чанков (репликация карты могла подгрузить новый)
+}
+
+/// Источник света для GPU-конвейера (SS14_LIGHTING.md §7): мировые единицы,
+/// параметры — как у `PointLightComponent` (`Falloff` 6.8, `CurveFactor` 0).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GpuLight {
+    pub position: (f32, f32),
+    /// Мировой радиус: `PointLight.radius` в тайлах × `TILE_PX`.
+    pub radius: f32,
+    pub energy: f32,
+    pub falloff: f32,
+    pub curve: f32,
+    /// Линейный цвет: движок берёт hex как линейный множитель (без sRGB→linear).
+    pub color: [f32; 3],
+}
+
+/// Сцена света для GPU-конвейера: окклюдеры из тайлов, источники и камера.
+/// Заполняется при каждом пересчёте карты света — та же подписка на изменения
+/// мира, поэтому CPU- и GPU-пути не расходятся.
+#[derive(Resource, Default)]
+pub struct LightScene {
+    pub walls: Vec<ssr_core::occluders::OccluderSegment>,
+    pub lights: Vec<GpuLight>,
+    /// Левый-нижний угол видимой области мира (кадр 21×15 тайлов, как у камеры).
+    pub camera: (f32, f32),
+    /// Размер видимой области в мировых единицах (672×480).
+    pub viewport: (f32, f32),
+    /// Позиция глаза (свой игрок) — центр карты FOV.
+    pub eye: (f32, f32),
 }
 
 /// Создаёт картинки карты света и спрайты.
@@ -182,6 +213,7 @@ pub fn update_lighting(
     lamps: Query<(&Light, &ItemPosition, Option<&Powered>)>,
     doors: Query<&ssr_core::Door>,
     light_map: Option<ResMut<LightMap>>,
+    scene: Option<ResMut<LightScene>>,
     mut images: ResMut<Assets<Image>>,
     mut transforms: Query<&mut Transform>,
 ) {
@@ -234,6 +266,33 @@ pub fn update_lighting(
         chunk_hash = chunk_hash
             .wrapping_mul(33)
             .wrapping_add(chunk.coords.0 as u64 ^ chunk.coords.1 as u64);
+    }
+    // Сцена для GPU-конвейера: окклюдеры строит core (грани стен без общих
+    // рёбер — правило движка), источники — в мировых единицах.
+    if let Some(mut scene) = scene {
+        let chunk_refs: Vec<&TileChunkData> = chunks.iter().collect();
+        scene.walls = ssr_core::occluders::build_occluders(&chunk_refs, &closed_doors);
+        scene.lights = lamps
+            .iter()
+            .filter(|(_, _, powered)| powered.map(|p| p.0).unwrap_or(true))
+            .map(|(light, position, _)| GpuLight {
+                position: (position.0[0], position.0[1]),
+                radius: light.radius * TILE_UNITS,
+                energy: light.energy,
+                falloff: FALLOFF,
+                curve: 0.0,
+                color: [
+                    light.color[0] as f32 / 255.0,
+                    light.color[1] as f32 / 255.0,
+                    light.color[2] as f32 / 255.0,
+                ],
+            })
+            .collect();
+        let center = (player_position.0[0], player_position.0[1]);
+        let viewport = (VIEWPORT_TILES.0 * TILE_UNITS, VIEWPORT_TILES.1 * TILE_UNITS);
+        scene.camera = (center.0 - viewport.0 * 0.5, center.1 - viewport.1 * 0.5);
+        scene.viewport = viewport;
+        scene.eye = center;
     }
     let signature = WorldState {
         player_tile,

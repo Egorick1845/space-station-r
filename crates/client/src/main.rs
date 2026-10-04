@@ -137,6 +137,7 @@ fn main() {
     app.init_resource::<crafting::CraftingState>();
     app.init_resource::<hud::HudState>();
     app.init_resource::<hud::Placement>();
+    app.init_resource::<lighting::LightScene>();
     app.init_resource::<appearance::AppearanceUi>();
     app.init_resource::<appearance::ScrollDrag>();
     app.init_resource::<inventory_ui::InventoryUi>();
