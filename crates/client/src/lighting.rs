@@ -28,9 +28,13 @@ const FALLOFF: f32 = 6.8;
 /// Высота источника над полом (`LIGHTING_HEIGHT = 1.0` в шейдере).
 const LIGHTING_HEIGHT: f32 = 1.0;
 /// Полуразмер окна карты света в тайлах.
-const LIGHT_RADIUS_TILES: i32 = 34;
+const LIGHT_RADIUS_TILES: i32 = 26;
 /// Как часто пересобираем карту (сек): в движке — каждый кадр в рендерере.
 const LIGHT_PERIOD: f32 = 0.25;
+/// Лучей на лампу (точность формы теней) и шаг луча в долях тайла.
+const LIGHT_RAYS: usize = 96;
+const RAY_STEP: f32 = 0.5;
+
 /// Слой тёмного оверлея — выше всех мировых спрайтов (см. FOG_Z).
 const LIGHT_Z: f32 = 2.01;
 /// Слой оттенка света — сразу над тьмой (ниже интерфейса).
@@ -225,47 +229,42 @@ pub fn update_lighting(
         lights.push((tx, ty, light.radius, light.energy, color));
     }
 
-    // 3) свет по тайлам: ambient плюс вклад ламп с учётом перекрытия стенами.
+    // 3) Свет: лучи ОТ каждой лампы (как полярная shadow map в SS14) — луч
+    //    шагает до стены и подсвечивает пройденные клетки. Раньше видимость
+    //    проверялась для каждой клетки из каждой лампы: это была основная
+    //    тяжесть, отсюда «свет слишком тяжёлый».
     let mut values = vec![AMBIENT; (side * side) as usize];
-    // Цвет лампы, накопленный по тайлам (для слоя оттенка).
     let mut tint = vec![[0.0f32; 3]; (side * side) as usize];
-    for ly in 0..side {
-        for lx in 0..side {
-            let center = (side as i32 / 2, side as i32 / 2);
-            let index = (ly * side + lx) as usize;
-            if grid[index] == TileType::Wall {
-                // Стены почти не освещаются (в SS14 их подсвечивает wall-bleed).
-                values[index] = AMBIENT * 0.6;
-                continue;
+    for (tx, ty, radius, energy, color) in &lights {
+        let local = (tx - origin.0, ty - origin.1);
+        let radius = *radius;
+        let energy = *energy;
+        let center = (local.0 as f32 + 0.5, local.1 as f32 + 0.5);
+        for ray in 0..LIGHT_RAYS {
+            let angle = std::f32::consts::TAU * (ray as f32) / (LIGHT_RAYS as f32);
+            let (dx, dy) = (angle.cos(), angle.sin());
+            let mut distance = 0.0f32;
+            while distance <= radius {
+                let fx = center.0 + dx * distance;
+                let fy = center.1 + dy * distance;
+                let lx = fx.floor() as i32;
+                let ly = fy.floor() as i32;
+                if lx < 0 || ly < 0 || lx >= side as i32 || ly >= side as i32 {
+                    break;
+                }
+                let index = (ly as u32 * side + lx as u32) as usize;
+                if grid[index] == TileType::Wall {
+                    break; // стена или закрытая дверь — дальше света нет
+                }
+                let contribution = attenuation(distance, radius) * energy;
+                if contribution > 0.001 {
+                    values[index] = (values[index] + contribution * 0.3).min(1.0);
+                    for channel in 0..3 {
+                        tint[index][channel] += color[channel] * contribution;
+                    }
+                }
+                distance += RAY_STEP;
             }
-            for (tx, ty, radius, energy, color) in &lights {
-                // Позиция лампы в локальной сетке.
-                let lx_local = tx - origin.0;
-                let ly_local = ty - origin.1;
-                if lx_local < 0
-                    || ly_local < 0
-                    || lx_local >= side as i32
-                    || ly_local >= side as i32
-                {
-                    continue;
-                }
-                if !visible_in(&grid, side, (lx_local, ly_local), (lx as i32, ly as i32)) {
-                    continue;
-                }
-                let dx = lx as f32 - lx_local as f32;
-                let dy = ly as f32 - ly_local as f32;
-                let distance = (dx * dx + dy * dy).sqrt();
-                if distance > *radius {
-                    continue;
-                }
-                let contribution = attenuation(distance, *radius) * energy;
-                values[index] += contribution;
-                for channel in 0..3 {
-                    tint[index][channel] += color[channel] * contribution;
-                }
-            }
-            let _ = center;
-            values[index] = values[index].min(1.0);
         }
     }
 
