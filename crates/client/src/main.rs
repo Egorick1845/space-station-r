@@ -153,7 +153,8 @@ fn main() {
     app.add_systems(
         Update,
         (
-            appearance::appearance_hotkey,
+            // Окно внешности на P убрано по просьбе владельца: смена причёски
+            // и бороды осталась в окне персонажа (клавиша I).
             appearance::appearance_sync,
             appearance::appearance_search_click,
             appearance::appearance_search_input,
@@ -947,8 +948,10 @@ pub fn fit_world_viewport(
     let Projection::Orthographic(orthographic) = &mut **projection else {
         return;
     };
-    // Масштаб такой, что по высоте видно ровно 480 единиц мира (15 тайлов).
-    let scale = logical_h / VIRTUAL_H;
+    // Масштаб такой, что по высоте видно ровно 480 единиц мира (15 тайлов):
+    // видимая высота = высота окна × scale, значит scale = 480 / высота_окна
+    // (в Bevy ортографический scale — это «отдаление», а не приближение).
+    let scale = VIRTUAL_H / logical_h;
     if (orthographic.scale - scale).abs() > 1e-4 {
         orthographic.scale = scale;
         tracing::info!(

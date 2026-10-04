@@ -161,7 +161,9 @@ fn filtered_beard(search: &str) -> Vec<(usize, &'static str)> {
         .collect()
 }
 
-/// Открывает/закрывает окно внешности (клавиша P).
+/// Открывает/закрывает окно внешности. Хоткей P снят (владелец: «убери окно
+/// смены причёски на P») — функция остаётся для тестового флага SSR_APPEARANCE.
+#[allow(dead_code)]
 pub fn appearance_hotkey(
     keys: Res<ButtonInput<KeyCode>>,
     mut ui_state: ResMut<AppearanceUi>,
