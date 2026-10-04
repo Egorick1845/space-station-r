@@ -176,6 +176,8 @@ fn main() {
     app.add_systems(Update, hud::sprint_hotkey);
     // Алерт выносливости (PORT_PLAN 1.5): 7 уровней, иконки из сборки.
     app.add_systems(Update, hud::render_alerts_column);
+    // Кадры иконок алертов играются по delays RSI (флипбук `SpriteView`).
+    app.add_systems(Update, hud::animate_alerts);
     // Подсветка клеток при переносе предмета (PORT_PLAN 1.6).
     app.add_systems(Update, inventory_ui::drag_highlight);
     // Текстуры интерфейса SS14 (слоты, Storage, Nano-кнопки) — сразу на старте.
@@ -255,6 +257,7 @@ fn main() {
             hotkeys,
             windows::drag_windows,
             audio::door_sounds,
+            audio::container_sounds,
             audio::damage_sound,
             audio::build_sound,
             audio::footsteps,

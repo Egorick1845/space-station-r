@@ -18,6 +18,10 @@ pub struct Sounds {
     steps: Vec<Handle<AudioSource>>,
     deny: Handle<AudioSource>,
     punch: Handle<AudioSource>,
+    /// Ящик-`EntityStorage`: `OpenSound`/`CloseSound` из
+    /// `EntityStorageComponent` сборки (`closetopen.ogg` / `closetclose.ogg`).
+    closet_open: Handle<AudioSource>,
+    closet_close: Handle<AudioSource>,
 }
 
 /// Заявки на разовые звуки от других систем (T5.3).
@@ -43,6 +47,8 @@ pub fn load_sounds(mut commands: Commands, assets: Res<AssetServer>) {
         ],
         deny: assets.load("sounds/ss14/airlock_deny.ogg"),
         punch: assets.load("sounds/ss14/boxingpunch1.ogg"),
+        closet_open: assets.load("sounds/ss14/closetopen.ogg"),
+        closet_close: assets.load("sounds/ss14/closetclose.ogg"),
     });
 }
 
@@ -68,6 +74,33 @@ pub fn door_sounds(
                 &sounds.door_open
             } else {
                 &sounds.door_close
+            };
+            play(&mut commands, handle);
+        }
+    }
+}
+
+/// Ящики (`EntityStorage` в сборке): `OpenSound` / `CloseSound` из
+/// `EntityStorageComponent` — `closetopen.ogg` / `closetclose.ogg`. Первое
+/// появление ящика в кадре (репликация) звуком не считается, как у дверей.
+pub fn container_sounds(
+    mut commands: Commands,
+    sounds: Res<Sounds>,
+    containers: Query<
+        (Entity, &ssr_core::inventory::Container),
+        Changed<ssr_core::inventory::Container>,
+    >,
+    mut seen: Local<std::collections::HashSet<Entity>>,
+) {
+    if seen.len() > 4096 {
+        seen.clear();
+    }
+    for (entity, container) in containers.iter() {
+        if !seen.insert(entity) {
+            let handle = if container.open {
+                &sounds.closet_open
+            } else {
+                &sounds.closet_close
             };
             play(&mut commands, handle);
         }

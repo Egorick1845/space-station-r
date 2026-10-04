@@ -53,6 +53,19 @@ const LOAD_TEST_ENTITIES: u32 = 1000;
 /// в 1 тайл не тёрся о стены (из-за этого было замедление в коридоре).
 const PLAYER_RADIUS: f32 = 14.0;
 
+/// Ящик как `EntityStorage` (PORT_PLAN 1.7): радиус всасывания при закрытии —
+/// только предметы, лежащие НА ящике (его собственный тайл). В сборке это
+/// `EnteringRange = 0.18` тайла вокруг центра ящика: предмет кладут на открытую
+/// крышку, и он лежит в центре. У нас «на ящике» = половина тайла от центра,
+/// поэтому вещь, брошенная рядом (падение — 0.8 тайла от игрока), останется на
+/// полу, если игрок не стоит у самого ящика.
+const CONTAINER_ENTERING_RANGE: f32 = TILE_SIZE * 0.5;
+/// На сколько далеко от ящика раскладывается высыпанное содержимое. В движке
+/// вещи ложатся в центр (`worldPos + EnteringOffset`), но у нас предмет на полу
+/// рисуется ПОД спрайтом ящика (пол 0.45 против ящика 0.7) — в центре их не
+/// видно, поэтому раскладываем кольцом вокруг ящика.
+const CONTAINER_SPILL_RADIUS: f32 = TILE_SIZE * 1.05;
+
 /// Адрес, который слушает сервер. Порт переопределяется `SSR_PORT` — тестовые
 /// прогоны идут на отдельном порту и не перехватывают живую игру в 7777.
 fn server_addr() -> SocketAddr {
@@ -2275,24 +2288,57 @@ fn handle_client_messages(
                         tracing::warn!(%name, "equip: no outer clothing for suit storage");
                         continue;
                     }
-                    // Предмет должен лежать в рюкзаке: забираем и надеваем.
-                    let Ok(mut inventory) = inventories.get_mut(player) else {
-                        continue;
-                    };
-                    if inventory.anchor_of(item).is_none() {
-                        tracing::warn!(%name, "equip: item not in inventory");
+                    // Предмет должен быть в руке или в рюкзаке. В SS14 надеть вещь
+                    // можно прямо из руки (`InventorySystem` берёт её из слота-источника),
+                    // поэтому клик по слоту с вещью в руке работает.
+                    let in_inventory = inventories
+                        .get(player)
+                        .map(|inventory| inventory.anchor_of(item).is_some())
+                        .unwrap_or(false);
+                    let in_hand = hands
+                        .get(player)
+                        .map(|hand| hand.active_item() == Some(item))
+                        .unwrap_or(false);
+                    if !in_inventory && !in_hand {
+                        tracing::warn!(%name, "equip: item is neither in a hand nor in the backpack");
                         continue;
                     }
-                    inventory.take(item);
+                    if in_hand {
+                        if let Ok(mut hand) = hands.get_mut(player) {
+                            hand.take(item);
+                        }
+                    } else if let Ok(mut inventory) = inventories.get_mut(player) {
+                        inventory.take(item);
+                    }
                     let Ok(mut clothing) = aux.clothings.get_mut(player) else {
                         continue;
                     };
                     if let Some(previous) = clothing.equip(slot, item) {
-                        // Прежняя вещь из слота возвращается в рюкзак.
+                        // Прежняя вещь из слота возвращается туда, откуда пришла
+                        // новая: в руку (если надевали из руки) или в рюкзак.
                         let (w, h) = item_size_of(&content.catalogs, &items, previous);
-                        inventory.put_first_fit(previous, w, h);
+                        let mut placed = false;
+                        if in_hand && let Ok(mut hand) = hands.get_mut(player) {
+                            placed = hand.take_in_active(previous);
+                        }
+                        if !placed
+                            && let Ok(mut inventory) = inventories.get_mut(player)
+                            && inventory.put_first_fit(previous, w, h).is_some()
+                        {
+                            placed = true;
+                        }
+                        if !placed
+                            && let (Ok(position), Some(entity)) =
+                                (positions.get(player), Entity::try_from_bits(previous))
+                        {
+                            // Ни руки, ни места — вещь падает под ноги.
+                            commands.entity(entity).insert((
+                                HeldBy { player: 0 },
+                                ItemPosition([position.0[0], position.0[1] - TILE_SIZE * 0.8]),
+                            ));
+                        }
                     }
-                    tracing::info!(%name, slot = slot.id(), "clothing equipped");
+                    tracing::info!(%name, slot = slot.id(), from_hand = in_hand, "clothing equipped");
                 }
                 ClientMessage::Unequip { slot } => {
                     let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {
@@ -2308,13 +2354,30 @@ fn handle_client_messages(
                     let Some(item) = clothing.unequip(slot) else {
                         continue;
                     };
-                    let (w, h) = item_size_of(&content.catalogs, &items, item);
-                    if let Ok(mut inventory) = inventories.get_mut(player)
-                        && inventory.put_first_fit(item, w, h).is_none()
-                    {
-                        // Рюкзак полон — вещь падает под ноги.
-                        if let (Ok(position), Some(entity)) =
-                            (positions.get(player), Entity::try_from_bits(item))
+                    // Каскад зависимых слотов (`dependsOn` шаблона человека):
+                    // снимая комбинезон, снимаем карманы и ID, снимая верхнюю
+                    // одежду — разгрузку (в сборке это `TryUnequip`, Equip.cs:458).
+                    let mut removed = vec![item];
+                    for dependent in slot.dependents() {
+                        if let Some(extra) = clothing.unequip(*dependent) {
+                            removed.push(extra);
+                        }
+                    }
+                    for item in removed {
+                        let (w, h) = item_size_of(&content.catalogs, &items, item);
+                        // Приёмник — как `PickupOrDrop` в сборке: сначала
+                        // свободная рука (снял вещь → она в руке, можно сразу
+                        // надеть обратно), затем рюкзак, в крайнем случае пол.
+                        let mut placed = false;
+                        if let Ok(mut hand) = hands.get_mut(player) {
+                            placed = hand.take_in_active(item);
+                        }
+                        if !placed && let Ok(mut inventory) = inventories.get_mut(player) {
+                            placed = inventory.put_first_fit(item, w, h).is_some();
+                        }
+                        if !placed
+                            && let (Ok(position), Some(entity)) =
+                                (positions.get(player), Entity::try_from_bits(item))
                         {
                             commands.entity(entity).insert((
                                 HeldBy { player: 0 },
@@ -2502,10 +2565,19 @@ fn handle_client_messages(
             }
         }
         commands.entity(player).insert(inventory);
-        // Одежда: стартовый комплект как у ассистента/инженера в SS14 —
-        // рюкзак, комбинезон и ботинки (без рюкзака окно инвентаря не открыть).
+        // Одежда: стартовый комплект как у инженера в SS14 — рюкзак, комбинезон,
+        // ботинки, перчатки, каска, противогаз и гарнитура (без рюкзака окно
+        // инвентаря не открыть, а без остального нечего снимать и надевать).
         let mut clothing = Clothing::default();
-        for worn_name in ["Backpack", "JumpsuitEngineering", "ShoesBlack"] {
+        for worn_name in [
+            "Backpack",
+            "JumpsuitEngineering",
+            "ShoesBlack",
+            "GlovesYellow",
+            "HardhatWhite",
+            "GasMask",
+            "Headset",
+        ] {
             let item = commands
                 .spawn((
                     Item {
@@ -3010,6 +3082,8 @@ fn process_actions(
     mut doors: Query<&mut Door>,
     mut containers: Query<&mut Container>,
     container_positions: Query<&ItemPosition>,
+    // То же, но с сущностями — для всасывания предметов в ящик (EntityStorage).
+    floor_positions: Query<(Entity, &ItemPosition)>,
     items: Query<&Item>,
     mut senders: Query<&mut MessageSender<ServerMessage>, With<Connected>>,
     players: Res<Players>,
@@ -3089,7 +3163,12 @@ fn process_actions(
                                 .ok()
                                 .is_some_and(|pulling| pulling.target == target);
                             options.push(ActionOption {
-                                label: if currently { "Отпустить" } else { "Тянуть" }.into(),
+                                label: if currently {
+                                    "Отпустить"
+                                } else {
+                                    "Тянуть"
+                                }
+                                .into(),
                                 action: ActionKind::Pull { target: entity },
                             });
                         }
@@ -3180,8 +3259,8 @@ fn process_actions(
                 else {
                     continue;
                 };
-                let diff = Vec2::from_array(target_position.0)
-                    - Vec2::from_array(player_position.0);
+                let diff =
+                    Vec2::from_array(target_position.0) - Vec2::from_array(player_position.0);
                 let distance = diff.length();
                 if distance > INTERACT_RANGE + TILE_SIZE {
                     tracing::warn!(?player, ?entity, "pull: too far");
@@ -3349,6 +3428,102 @@ fn process_actions(
                             continue;
                         }
                         container.open = !container.open;
+                        let open = container.open;
+                        // Ящик — `EntityStorage` в сборке: у него НЕТ сеточного
+                        // окна. Открытие ВЫСЫПАЕТ содержимое на пол
+                        // (`OpenStorage` → `EmptyContents`), закрытие ВСАСЫВАЕТ
+                        // предметы, лежащие рядом (`CloseStorage` →
+                        // `GetEntitiesInRange(EnteringOffset, EnteringRange)`).
+                        // Предметы кладут в открытый ящик перетаскиванием на него
+                        // (наш аналог `PlaceableSurface` у открытой крышки).
+                        let items_inside: Vec<u64> = inventories
+                            .get(target)
+                            .map(|inventory| inventory.cells.iter().flatten().copied().collect())
+                            .unwrap_or_default();
+                        if open {
+                            if let Ok(mut inventory) = inventories.get_mut(target) {
+                                let origin = container_positions
+                                    .get(target)
+                                    .map(|position| position.0)
+                                    .unwrap_or([0.0, 0.0]);
+                                for (index, item) in items_inside.iter().enumerate() {
+                                    inventory.take(*item);
+                                    let Some(entity) = Entity::try_from_bits(*item) else {
+                                        continue;
+                                    };
+                                    // Раскладываем вокруг ящика, чтобы вещи не
+                                    // слиплись в одну точку (в движке они ложатся
+                                    // в `worldPos + EnteringOffset`).
+                                    let angle = index as f32 * 0.7;
+                                    let offset = [
+                                        origin[0] + angle.cos() * CONTAINER_SPILL_RADIUS,
+                                        origin[1] + angle.sin() * CONTAINER_SPILL_RADIUS,
+                                    ];
+                                    commands
+                                        .entity(entity)
+                                        // `HeldBy { player: 0 }` — «ничей»: клиент
+                                        // рисует предмет на полу только при
+                                        // наличии `HeldBy` (иначе он не попадает
+                                        // в его запрос и вещь не видно).
+                                        .insert((HeldBy { player: 0 }, ItemPosition(offset)));
+                                }
+                                tracing::info!(
+                                    container = ?target,
+                                    spilled = items_inside.len(),
+                                    "container opened: contents spilled"
+                                );
+                            }
+                        } else {
+                            // Всасывание: предметы с пола в радиусе вокруг ящика.
+                            // `ItemPosition` есть только у лежащего в мире
+                            // (взятую вещь `Pickup` его лишает), поэтому «на полу»
+                            // = есть `ItemPosition` и есть `Item`, а сам ящик
+                            // отсеивается проверкой `Item`.
+                            let Ok(origin) =
+                                container_positions.get(target).map(|position| position.0)
+                            else {
+                                continue;
+                            };
+                            let mut nearby: Vec<u64> = Vec::new();
+                            let mut floor_count = 0usize;
+                            let mut min_dist = f32::MAX;
+                            for (entity, position) in floor_positions.iter() {
+                                floor_count += 1;
+                                if entity == target || items.get(entity).is_err() {
+                                    continue;
+                                }
+                                let dx = position.0[0] - origin[0];
+                                let dy = position.0[1] - origin[1];
+                                let dist = (dx * dx + dy * dy).sqrt();
+                                min_dist = min_dist.min(dist);
+                                if dist <= CONTAINER_ENTERING_RANGE {
+                                    nearby.push(entity.to_bits());
+                                }
+                            }
+                            tracing::debug!(
+                                floor = floor_count,
+                                min_dist,
+                                range = CONTAINER_ENTERING_RANGE,
+                                candidates = nearby.len(),
+                                "container absorb scan"
+                            );
+                            let mut absorbed = 0usize;
+                            if let Ok(mut inventory) = inventories.get_mut(target) {
+                                for item in nearby {
+                                    let (w, h) = item_size_of(&world.catalogs, &items, item);
+                                    if inventory.put_first_fit(item, w, h).is_none() {
+                                        break; // ящик полон (Capacity в движке)
+                                    }
+                                    if let Some(entity) = Entity::try_from_bits(item) {
+                                        commands.entity(entity).remove::<ItemPosition>();
+                                    }
+                                    absorbed += 1;
+                                }
+                            }
+                            tracing::info!(
+                                container = ?target, absorbed, "container closed: nearby items stored"
+                            );
+                        }
                         tracing::info!(
                             container = ?target, open = container.open,
                             "container toggled"

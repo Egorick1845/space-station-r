@@ -19,9 +19,9 @@
 | 1.2 | Спрайты, слои, порядок отрисовки | `Robust.Client/GameObjects/Systems/SpriteSystem.cs` (слои, `SpriteComponent.Layer`, `DrawDepth`), `SpriteOrdering` | частичная (тело, одежда, предметы) | Перенести модель слоёв и `DrawDepth` (порядок мира), выравнивание по Y как в движке |
 | 1.3 | Тайлы и IconSmooth | `IconSmoothSystem`/`IconSmoothComponent`, `SetCornerLayers` | своя логика (уже сверена: SE→0, NE→2, NW→1, SW→3) | Перенести полностью из компонента, включая диагональные варианты и «слои углов»; тест на эталонные тайлы |
 | 1.4 | Окна интерфейса по XAML | `Content.Client/**/*.xaml` + `Stylesheets/StyleNano.cs` | стекло-тема, слоты, хотбар, инвентарь, спавн-меню (факты в SS14_UI.md) | Довести каждое окно 1:1: размеры, отступы, шрифты, цвета, позиции (HotbarGui, InventoryGui, StorageWindow, EntitySpawnWindow, VerbMenu, Chat, Admin) |
-| 1.5 | Алерты и статусы | `Content.Client/Alerts/*`, `Resources/Prototypes/Alerts/*` | **готово**: колонка `AlertsUI` 64×64 справа под чатом (`SetMarginTop(Alerts, chatHeight)`), Health 5 иконок `human_alive` (`severity = round(lerp(0,4,доля урона))`), Stamina 7 иконок (`RoundToLevels(остаток, 100, 7)`), давление `pressure.rsi` только в опасной зоне (`BarotraumaSystem`: 50/385 предупреждение, 20/550 урон) | — |
+| 1.5 | Алерты и статусы | `Content.Client/UserInterface/Systems/Alerts/*`, `Content.Shared/Alert/*`, `Resources/Prototypes/Alerts/*` | **готово**: колонка `AlertsUI` 64×64 справа под чатом (`SetMarginTop(Alerts, chatHeight)`), Health 5 иконок `human_alive` (`severity = round(lerp(0,4,доля урона))`), Stamina 7 иконок (`RoundToLevels(остаток, 100, 7)`), давление `pressure.rsi` только в опасной зоне (`BarotraumaSystem`: 50/385 предупреждение, 20/550 урон); **иконки анимированы** — флипбук по `delays` RSI (`hud::animate_alerts`, у `health0` 28 кадров × 0.05 с) | — |
 | 1.6 | Инвентарь: размеры и формы | `Resources/Prototypes/item_size.yml`, `Content.Shared/Item/ItemComponent.cs`, `Content.Client/.../Storage/{StorageWindow.cs,ItemGridPiece.cs}` | сетка 7×4, размеры в прототипах, иконка ×2 | Рамка формы из `piece_*`, фантом предмета при переносе, подсветка клеток (`#1E8000`/`#B40046`), поворот (СКМ), сохранение позиции |
-| 1.7 | Хранилища: ящики = EntityStorage | `Content.Shared/EntityStorage/*`, `Resources/Prototypes/Entities/Structures/Storage/*` | у ящиков сделано сеточное окно (отклонение!) | Убрать сеточное окно у ящиков: предмет кладётся внутрь перетаскиванием/кликом; окно хранилища — только у StorageComponent (рюкзак, пояс, аптечка) |
+| 1.7 | Хранилища: ящики = EntityStorage | `Content.Shared/Storage/Components/EntityStorageComponent.cs`, `Content.Shared/Storage/EntitySystems/SharedEntityStorageSystem.cs`, `Resources/Prototypes/Entities/Structures/Storage/Crates/*` | **готово**: у ящиков нет сеточного окна; открытие высыпает содержимое (`OpenStorage` → `EmptyContents`), закрытие всасывает только предметы НА ящике (`EnteringRange`), класть — перетаскиванием на открытый ящик (аналог `PlaceableSurface`); звуки `closetopen/closetclose.ogg`; сетка осталась только у `StorageComponent` (рюкзак, пояс) | — |
 | 1.8 | Позиционирование HUD | `HotbarGui.xaml`, `InventoryGui.xaml`, `ChatBox.xaml`, `ActionsBar`, `GhostBar` | позиции по SS14_UI.md | Сверить каждую панель с XAML (пиксельно по скриншоту) |
 
 ## M2. «Штурвал в руках» (движение и взаимодействие)
@@ -88,6 +88,7 @@
 1. **1.1** — проводка GPU-конвейера света: **сделана** (сверка с CPU-путём A/B на
    одном спавне, `target/ab_light.ps1`); остались размер карты под окно и
    профилирование (T7.5).
-2. **1.7 + 1.6** — ящики как EntityStorage (убрать сетку) и фантом/подсветка формы предмета.
+2. **1.6** — фантом формы предмета при переносе и подсветка клеток (в сетке
+   рюкзака сделано; ждёт окна хранилищ).
 3. **Вербы предмета** — остаток по отчёту о `VerbSystem` (взять в руку, надеть,
    снять, убрать в рюкзак) и админ-команды из сборки (пункт 3 очереди запросов).

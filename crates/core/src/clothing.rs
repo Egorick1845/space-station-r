@@ -82,6 +82,22 @@ impl ClothingSlot {
         matches!(self, ClothingSlot::SuitStorage)
     }
 
+    /// Слоты, которые ЗАВИСЯТ от этого (`dependsOn` в
+    /// `human_inventory_template.yml`): снятие комбинезона стягивает карманы и
+    /// ID, снятие верхней одежды — разгрузку. В сборке этот каскад делает
+    /// `InventorySystem.TryUnequip` (`Equip.cs:458-465`).
+    pub fn dependents(self) -> &'static [ClothingSlot] {
+        match self {
+            ClothingSlot::Jumpsuit => &[
+                ClothingSlot::Pocket1,
+                ClothingSlot::Pocket2,
+                ClothingSlot::Id,
+            ],
+            ClothingSlot::OuterClothing => &[ClothingSlot::SuitStorage],
+            _ => &[],
+        }
+    }
+
     /// Слой отрисовки: чем больше, тем выше (порядок `base.yml`).
     /// Части тела идут с шагом 1 (1.00 Groin … 1.22 Head), одежда вклинивается
     /// между ними как в движке.
@@ -158,5 +174,39 @@ impl Clothing {
     /// Есть ли рюкзак (инвентарь доступен только с ним — правило владельца).
     pub fn has_backpack(&self) -> bool {
         self.get(ClothingSlot::Back).is_some()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Зависимые слоты — из `dependsOn` шаблона человека: карманы и ID держатся
+    /// на комбинезоне, разгрузка — на верхней одежде. Снятие каскадом
+    /// (`TryUnequip`) обязано опустошать и их.
+    #[test]
+    fn dependents_match_human_template() {
+        assert_eq!(
+            ClothingSlot::Jumpsuit.dependents(),
+            &[
+                ClothingSlot::Pocket1,
+                ClothingSlot::Pocket2,
+                ClothingSlot::Id
+            ]
+        );
+        assert_eq!(
+            ClothingSlot::OuterClothing.dependents(),
+            &[ClothingSlot::SuitStorage]
+        );
+        for slot in [
+            ClothingSlot::Head,
+            ClothingSlot::Mask,
+            ClothingSlot::Shoes,
+            ClothingSlot::Back,
+            ClothingSlot::Gloves,
+            ClothingSlot::Pocket1,
+        ] {
+            assert!(slot.dependents().is_empty(), "{slot:?} не имеет зависимых");
+        }
     }
 }

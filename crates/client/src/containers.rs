@@ -441,8 +441,11 @@ pub fn container_slot_click(
     }
 }
 
-/// Тестовый режим SSR_CONTAINER_TEST=1 (критерий T3.4): открывает ближайший
-/// ящик, забирает предмет, закрывает и пробует забрать ещё раз (должен быть отказ).
+/// Тестовый режим SSR_CONTAINER_TEST=1 (PORT_PLAN 1.7, `EntityStorage` в сборке):
+/// открывает ближайший ящик (содержимое высыпается), кладёт предмет из рюкзака в
+/// ОТКРЫТЫЙ ящик, закрывает и открывает снова (содержимое снова высыпается).
+/// Проверка — по логам сервера: `container opened: contents spilled`,
+/// `item transferred` с приёмником-ящиком и запрет передачи в закрытый ящик.
 pub fn container_test_mode(
     time: Res<Time>,
     params: ContainerTestParams,
@@ -487,13 +490,14 @@ pub fn container_test_mode(
             sender.send::<GameChannel>(ClientMessage::Interact { entity: bits });
         }
         state.opened = true;
-        tracing::info!("container-test: open sent");
+        tracing::info!("container-test: open sent (содержимое должно высыпаться)");
     }
+    // Кладём предмет из рюкзака в ОТКРЫТЫЙ ящик — как перетаскиванием на ящик.
     if state.opened
         && !state.taken
         && state.elapsed >= 8.0
         && let Some(item) = inventories
-            .get(container_entity)
+            .get(own_entity)
             .ok()
             .and_then(|inv| inv.cells.iter().flatten().copied().next())
     {
@@ -501,11 +505,11 @@ pub fn container_test_mode(
             sender.send::<GameChannel>(ClientMessage::TransferItem {
                 item,
                 to_slot: SLOT_ANY,
-                target_player: 0,
+                target_player: bits,
             });
         }
         state.taken = true;
-        tracing::info!(item, "container-test: take sent (container open)");
+        tracing::info!(item, "container-test: put sent (container open)");
     }
     if state.taken && !state.closed && state.elapsed >= 11.0 {
         for mut sender in senders.iter_mut() {
@@ -514,23 +518,13 @@ pub fn container_test_mode(
         state.closed = true;
         tracing::info!("container-test: close sent");
     }
-    if state.closed
-        && !state.take_after_close
-        && state.elapsed >= 13.5
-        && let Some(item) = inventories
-            .get(container_entity)
-            .ok()
-            .and_then(|inv| inv.cells.iter().flatten().copied().next())
-    {
+    // Повторное открытие: содержимое обязано высыпаться снова.
+    if state.closed && !state.take_after_close && state.elapsed >= 14.0 {
         for mut sender in senders.iter_mut() {
-            sender.send::<GameChannel>(ClientMessage::TransferItem {
-                item,
-                to_slot: SLOT_ANY,
-                target_player: 0,
-            });
+            sender.send::<GameChannel>(ClientMessage::Interact { entity: bits });
         }
         state.take_after_close = true;
-        tracing::info!(item, "container-test: take sent (container closed)");
+        tracing::info!("container-test: reopen sent (содержимое снова высыпается)");
     }
 }
 

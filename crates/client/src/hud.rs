@@ -629,6 +629,82 @@ pub fn health_alert_level(health: &ssr_core::inventory::Health) -> u8 {
     (4.0 * fraction).round().clamp(0.0, 4.0) as u8
 }
 
+/// Иконка алерта: ключ RSI и текущий кадр. В сборке (`AlertControl` +
+/// `SpriteView`) спрайт алерта — это ФЛИПБУК из RSI: движок проигрывает кадры
+/// состояния по `delays` из meta.json (`SpriteSystem.FrameUpdate`,
+/// `Loop = true`), поэтому «мигание» здоровья и стамины — не код, а сами кадры
+/// (у `health4` и `stamina0..4` амплитуда альфы в разы больше, чем у соседних).
+#[derive(Component)]
+pub struct AlertIcon {
+    pub key: String,
+    pub frame: u32,
+    pub elapsed: f32,
+}
+
+/// Следующий кадр флипбука: накапливаем время и идём вперёд, пока его хватает
+/// на кадр (цикл, а не один шаг — как `SpriteComponent.FrameUpdate`). Возвращает
+/// (остаток времени, кадр).
+pub fn advance_alert_frame(
+    mut elapsed: f32,
+    mut frame: u32,
+    delays: &[f32],
+    frames: u32,
+) -> (f32, u32) {
+    if frames == 0 {
+        return (elapsed, 0);
+    }
+    let mut guard = 0;
+    while guard < frames * 2 {
+        guard += 1;
+        let delay = delays
+            .get(frame as usize)
+            .copied()
+            .unwrap_or(0.1)
+            .max(0.001);
+        if elapsed < delay {
+            break;
+        }
+        elapsed -= delay;
+        frame = (frame + 1) % frames;
+    }
+    (elapsed, frame)
+}
+
+/// Проигрывает RSI-анимацию иконок алертов: кадр вперёд, когда накопилось
+/// время кадра, по кругу (`Loop = true` в `SpriteComponent`). Без этой системы
+/// колонка показывала только нулевой кадр — статичную картинку.
+pub fn animate_alerts(
+    time: Res<Time>,
+    registry: Res<crate::rsi::RsiRegistry>,
+    mut icons: Query<(&mut AlertIcon, &mut ImageNode)>,
+) {
+    let dt = time.delta_secs();
+    for (mut icon, mut node) in icons.iter_mut() {
+        let Some(sprite) = registry.get(&icon.key) else {
+            continue; // RSI ещё грузится (реестр ленивый)
+        };
+        let frames = sprite
+            .frames_per_direction
+            .first()
+            .copied()
+            .unwrap_or(1)
+            .max(1);
+        if frames <= 1 {
+            continue;
+        }
+        let delays = sprite.delays.first().map(Vec::as_slice).unwrap_or(&[]);
+        let (elapsed, frame) = advance_alert_frame(icon.elapsed + dt, icon.frame, delays, frames);
+        icon.elapsed = elapsed;
+        icon.frame = frame;
+        let index = sprite.index(0, icon.frame);
+        if let Some(atlas) = node.texture_atlas.as_mut()
+            && atlas.index != index
+        {
+            atlas.index = index;
+        }
+    }
+}
+
 /// Подпись колонки алертов: уровни Health/Stamina и алерт давления (если есть).
 type AlertsSignature = (u8, u8, Option<(bool, u8)>);
 
@@ -642,7 +718,10 @@ pub fn render_alerts_column(
     staminas: Query<&ssr_core::stamina::Stamina>,
     healths: Query<&ssr_core::inventory::Health>,
     positions: Query<&ssr_core::PlayerPosition>,
-    atmospheres: Query<(&ssr_core::atmosphere::ChunkAtmosphere, &ssr_core::tiles::TileChunkData)>,
+    atmospheres: Query<(
+        &ssr_core::atmosphere::ChunkAtmosphere,
+        &ssr_core::tiles::TileChunkData,
+    )>,
     registry: Res<crate::rsi::RsiRegistry>,
     root: Query<Entity, With<AlertRoot>>,
     mut last: Local<Option<AlertsSignature>>,
@@ -673,10 +752,7 @@ pub fn render_alerts_column(
                 .iter()
                 .find(|(_, chunk)| chunk.coords == coords)?;
             atmosphere
-                .at(
-                    (tx - coords.0 * size) as u32,
-                    (ty - coords.1 * size) as u32,
-                )
+                .at((tx - coords.0 * size) as u32, (ty - coords.1 * size) as u32)
                 .and_then(|gas| ssr_core::atmosphere::pressure_alerts::alert_for(gas.pressure))
         });
     // Тест-режим SSR_PRESSURE_TEST=1: рисует иконку давления принудительно —
@@ -733,8 +809,14 @@ pub fn render_alerts_column(
                 };
                 let icon = crate::inventory_ui::icon_node(sprite);
                 // Иконка 32×32 в масштабе ×2 (AlertControl: Scale=(2,2)).
+                // Кадры играет `animate_alerts` (флипбук RSI, как в сборке).
                 column.spawn((
                     icon,
+                    AlertIcon {
+                        key: key.clone(),
+                        frame: 0,
+                        elapsed: 0.0,
+                    },
                     Node {
                         width: px(64),
                         height: px(64),
@@ -2022,4 +2104,72 @@ pub fn close_windows_on_escape(
         }
     }
     crafting.open = false;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Флипбук иконки алерта идёт по `delays` и зацикливается: у `health0`
+    /// (`human_alive.rsi`) 28 кадров по 0.05 с — ровно 1.4 с на цикл, как в
+    /// meta.json сборки. Проверяем и переход через несколько кадров за тик.
+    #[test]
+    fn alert_flipbook_loops_by_rsi_delays() {
+        let delays = vec![0.05f32; 28];
+        // Меньше кадра — стоим на месте.
+        assert_eq!(advance_alert_frame(0.02, 0, &delays, 28), (0.02, 0));
+        // Ровно кадр — следующий.
+        assert_eq!(advance_alert_frame(0.05, 0, &delays, 28), (0.0, 1));
+        // Полтора цикла — вернулись к тому же кадру с остатком.
+        let (elapsed, frame) = advance_alert_frame(1.4 + 0.7, 0, &delays, 28);
+        assert_eq!(frame, 14);
+        assert!((elapsed - 0.0).abs() < 1e-4, "остаток {elapsed}");
+        // Зацикливание: 28 кадров = полный круг.
+        assert_eq!(advance_alert_frame(1.4, 0, &delays, 28).1, 0);
+    }
+
+    /// Реальные иконки алертов из сборки анимированные: у `health0` 28 кадров по
+    /// 0.05 с, и за цикл флипбук проходит ВСЕ кадры (иначе индикатор выглядел бы
+    /// статичным, как было до `animate_alerts`).
+    #[test]
+    fn alert_icons_animate_through_all_frames() {
+        let dir = ssr_core::assets_root().join("sprites/ss14/Interface/Alerts/human_alive.rsi");
+        let Ok(rsi) = ssr_core::rsi::load_rsi(&dir) else {
+            return; // ассетов нет — тест пропускаем
+        };
+        let Some(state) = rsi.states.iter().find(|state| state.name == "health0") else {
+            panic!("в human_alive.rsi нет состояния health0");
+        };
+        let frames = state.frames_per_direction.first().copied().unwrap_or(1);
+        let delays = state.delays.first().cloned().unwrap_or_default();
+        assert!(
+            frames >= 2,
+            "у health0 должно быть больше кадра, получено {frames}"
+        );
+        assert_eq!(
+            delays.len(),
+            frames as usize,
+            "задержек столько же, сколько кадров"
+        );
+        let total: f32 = delays.iter().sum();
+        let mut seen = std::collections::HashSet::new();
+        let mut frame = 0u32;
+        seen.insert(frame);
+        // Остаток времени переносится в следующий вызов — как в `animate_alerts`.
+        let mut elapsed = 0.0f32;
+        let mut played = 0.0f32;
+        while played < total {
+            let (rest, next) = advance_alert_frame(elapsed + 1.0 / 60.0, frame, &delays, frames);
+            elapsed = rest;
+            frame = next;
+            played += 1.0 / 60.0;
+            seen.insert(frame);
+        }
+        assert_eq!(
+            seen.len(),
+            frames as usize,
+            "за цикл должны проигрываться все кадры (frames={frames}, delays={:?}, total={total}, seen={seen:?})",
+            &delays[..delays.len().min(4)]
+        );
+    }
 }

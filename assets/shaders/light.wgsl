@@ -94,6 +94,11 @@ struct Params {
 
 const SHADOW_BINS: u32 = 512u; // ShadowMapSize в движке
 const FOV_BINS: u32 = 2048u;   // FovMapSize в движке
+/// Глубина просачивания света в стену в мировых единицах (`wall-bleed-blur` +
+/// `MergeWallLayer` в движке): свет заходит за первый окклюдер и гаснет.
+/// Без этого стены либо чернеют целиком, либо (при маске стен на весь тайл)
+/// светятся квадратами в невидимой зоне.
+const WALL_BLEED_DEPTH: f32 = 14.0;
 
 // Полярный угол: в движке `deflect = atan(rel.y, -rel.x) / PI`, `u = (deflect + 1) / 2`.
 fn polar_u(dx: f32, dy: f32) -> f32 {
@@ -268,6 +273,14 @@ fn light_map_cs(@builtin(global_invocation_id) id: vec3<u32>) {
 
 /// Полярные карты для чтения в шейдере карты света (объявлены вверху, у
 /// остальных привязок: WGSL требует объявление до использования).
+/// Чтение карты света с зажимом координат: у края карты `textureLoad` за
+/// границей возвращает нули и подмешивал бы темноту (полосы по краям экрана).
+/// В движке то же самое делает `WrapMode.ClampToEdge` у таргета блюра.
+fn load_light(coord: vec2<i32>) -> vec4<f32> {
+    let max_coord = vec2<i32>(params.map_size) - vec2<i32>(1);
+    return textureLoad(src, clamp(coord, vec2<i32>(0), max_coord), 0);
+}
+
 /// Размытие карты света (гаусс из `light-blur.swsl`), направление — из параметров
 /// (у нас оба прохода — одна и та же функция с разным `dir`).
 @compute @workgroup_size(8, 8)
@@ -277,13 +290,13 @@ fn blur_cs(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
     let coord = vec2<i32>(i32(id.x), i32(id.y));
-    let base = textureLoad(src, coord, 0);
+    let base = load_light(coord);
     let du = vec2<i32>(i32(round(params.blur_dir.x)), i32(round(params.blur_dir.y)));
     var sum = base * 0.375;
-    sum += textureLoad(src, coord + du, 0) * 0.25;
-    sum += textureLoad(src, coord - du, 0) * 0.25;
-    sum += textureLoad(src, coord + du * 2, 0) * 0.0625;
-    sum += textureLoad(src, coord - du * 2, 0) * 0.0625;
+    sum += load_light(coord + du) * 0.25;
+    sum += load_light(coord - du) * 0.25;
+    sum += load_light(coord + du * 2) * 0.0625;
+    sum += load_light(coord - du * 2) * 0.0625;
     // Просачивание на стены добавляет яркость (×1.1 в wall-bleed-blur.swsl).
     sum = vec4<f32>(sum.rgb * params.blur_boost, sum.a);
     textureStore(dst, coord, sum);
@@ -341,9 +354,15 @@ fn light_apply_fov_cs(@builtin(global_invocation_id) id: vec3<u32>) {
     let bin = clamp(i32(round(u)), 0, i32(FOV_BINS) - 1);
     let wall_dist = textureLoad(fov_read, vec2<i32>(bin, 0), 0).x;
     var occlusion = chebyshev(vec2<f32>(wall_dist, wall_dist * wall_dist + 0.25), our_dist);
-    // Стена не гасится маской видимости (стенсил движка).
+    // Стена не гасится маской видимости (стенсил движка), но свет заходит в неё
+    // лишь на глубину просачивания и гаснет: передняя грань стены освещена,
+    // глубина — тёмная. Так «стены видно» рядом с освещённой зоной, и при этом
+    // в невидимой зоне не появляются светлые квадраты тайлов.
     let wall = textureLoad(wall_mask_read, vec2<i32>(i32(id.x), i32(id.y)), 0).x;
-    occlusion = max(occlusion, wall);
+    if (wall > 0.5 && wall_dist < NO_OCCLUDER * 0.5) {
+        let depth = clamp(our_dist - wall_dist, 0.0, 128.0);
+        occlusion = max(occlusion, exp(-depth / WALL_BLEED_DEPTH));
+    }
     var color = textureLoad(src, vec2<i32>(i32(id.x), i32(id.y)), 0);
     color = color * occlusion;
     // Тьма оверлея считается заново: alpha = 1 − свет (движок рисует
