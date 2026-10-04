@@ -95,8 +95,8 @@ fn blit_rsi_cell(canvas: &mut RgbaImage, sheet: &RgbaImage, cell: u32, px: u32, 
 }
 
 /// Рисует стену с угловым сглаживанием (правила IconSmooth/Corners движка):
-/// четыре слоя `solid{corner}` со сдвигами направлений SE=юг, NE=запад,
-/// NW=север, SW=восток.
+/// четыре слоя `solid{corner}`, каждый рисует свою четверть тайла
+/// (SE=ячейка юга, NE=востока, NW=севера, SW=запада).
 #[allow(clippy::too_many_arguments)]
 fn blit_wall(
     canvas: &mut RgbaImage,
@@ -125,12 +125,15 @@ fn blit_wall(
     let corner_sw = (s as u8 * CCW) | (sw as u8 * DIAG) | (w as u8 * CW);
     let corner_nw = (w as u8 * CCW) | (nw as u8 * DIAG) | (n as u8 * CW);
 
-    // Порядок и направления слоёв — как в движке (SetCornerLayers).
+    // Порядок и направления слоёв — как в движке (SetCornerLayers):
+    // SE — без сдвига (юг), NE — против часовой (восток), NW — разворот
+    // (север), SW — по часовой (запад). Ячейки: юг=0 (SE-четверть),
+    // север=1 (NW), восток=2 (NE), запад=3 (SW).
     for (corner, direction) in [
         (corner_se, 0u32),
-        (corner_ne, 3),
-        (corner_nw, 2),
-        (corner_sw, 1),
+        (corner_ne, 2),
+        (corner_nw, 1),
+        (corner_sw, 3),
     ] {
         let state_name = format!("solid{corner}");
         let Some(state) = rsi.state(&state_name) else {
@@ -265,6 +268,26 @@ pub fn render_map_chunks(
         ));
         tracing::debug!(coords = ?data.coords, "map chunk rendered");
     }
+}
+
+/// Офлайн-дамп чанков карты в PNG (SSR_DUMP_ONLY=1): сборка картинок без окна
+/// и сети — глазами сверить сглаживание стен и тайлы. SSR_MAP выбирает карту.
+pub fn dump_map_chunks(map_name: &str, out_dir: &Path) -> Result<usize, String> {
+    let root = ssr_core::assets_root();
+    let visuals = load_tile_visuals(&root);
+    let file = ssr_core::tiles::MapFile::load(&root.join("maps").join(map_name))?;
+    let chunks: Vec<TileChunkData> = file.to_chunks()?.iter().map(TileChunkData::from).collect();
+    let map: HashMap<(i32, i32), &TileChunkData> =
+        chunks.iter().map(|data| (data.coords, data)).collect();
+    std::fs::create_dir_all(out_dir).map_err(|e| format!("create {}: {e}", out_dir.display()))?;
+    for data in &chunks {
+        let canvas = compose_chunk(data, &visuals, &map);
+        let path = out_dir.join(format!("chunk_{}_{}.png", data.coords.0, data.coords.1));
+        canvas
+            .save(&path)
+            .map_err(|e| format!("save {}: {e}", path.display()))?;
+    }
+    Ok(chunks.len())
 }
 
 /// Визуальный чанк карты, привязанный к реплицированной сущности чанка.

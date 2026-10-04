@@ -25,7 +25,8 @@ use ssr_core::inventory::{
 use ssr_core::roles::{Access, PlayerRole, RoleSet};
 use ssr_core::tiles::{MapFile, TileChunkData, TileType};
 use ssr_core::{
-    CHUNK_UNITS, Door, INTERACT_RANGE, PLAYER_MOVE_SPEED, PlayerPosition, TILE_SIZE, chunk_coords,
+    CHUNK_UNITS, Door, INTERACT_RANGE, PLAYER_MOVE_SPEED, PlayerPosition, Species, TILE_SIZE,
+    chunk_coords,
 };
 use ssr_protocol::net::GameChannel;
 use ssr_protocol::{
@@ -140,6 +141,8 @@ fn main() {
     app.component::<ItemPosition>().replicate();
     // Роли (T4.2). Тот же порядок, что у клиента!
     app.component::<PlayerRole>().replicate();
+    // Расы (T5.3). Тот же порядок, что у клиента!
+    app.component::<Species>().replicate();
     app.run();
 }
 
@@ -783,7 +786,12 @@ fn handle_client_messages(
             ))
             .id();
         let player_bits = player.to_bits();
-        tracing::info!(name, spawn = ?spawn, "player spawned");
+        // Раса (T5.3): SSR_SPECIES=<id>, по умолчанию человек.
+        let species = std::env::var("SSR_SPECIES").unwrap_or_else(|_| "Human".to_string());
+        commands.entity(player).insert(Species {
+            id: species.clone(),
+        });
+        tracing::info!(name, spawn = ?spawn, species = %species, "player spawned");
 
         // Роль (T4.2): SSR_ROLE=<id> — фиксированная (тесты/отладка), иначе
         // выдача по кругу, чтобы в раунде были разные роли.

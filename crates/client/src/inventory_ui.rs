@@ -2,27 +2,45 @@
 //! рюкзак 7×4, две руки с активной, атака предметом из руки, контекстные
 //! действия (verbs) по правому клику, предмет в руке рисуется у держателя.
 
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy_replicon::shared::server_entity_map::ServerEntityMap;
 use lightyear::prelude::client::*;
 use lightyear::prelude::*;
 use ssr_core::PlayerPosition;
 use ssr_core::inventory::{
-    HAND_SLOTS, Hands, Health, HeldBy, INVENTORY_COLS, INVENTORY_ROWS, Inventory, SLOT_ANY,
+    HAND_SLOTS, Hands, Health, HeldBy, INVENTORY_COLS, INVENTORY_ROWS, Inventory, Item, SLOT_ANY,
 };
 use ssr_core::roles::PlayerRole;
 use ssr_protocol::net::GameChannel;
 use ssr_protocol::{ActionOption, ClientMessage};
 
 use crate::PlayerEntity;
-use crate::rsi::RsiRegistry;
+use crate::rsi::{RsiRegistry, RsiSprite};
+use crate::windows;
 
-/// Иконка предмета (до системы прототипов в игре — лом из сборки).
-const ITEM_ICON: &str = "sprites/ss14/Objects/Tools/crowbar.rsi#icon";
-/// Спрайт других игроков (тот же, что у себя; свой — отдельный визуал).
-const REMOTE_SPRITE: &str = "sprites/ss14/Mobs/Animals/monkey.rsi#monkey";
 /// Юнитов на тайл (клик по тайловой сетке).
 const TILE_UNITS: f32 = 32.0;
+
+/// Спрайт предмета в слотах UI: имя предмета → RSI-стейт иконки.
+pub fn item_icon<'a>(registry: &'a RsiRegistry, name: &str) -> Option<&'a RsiSprite> {
+    let path = match name {
+        "Crowbar" => "Objects/Tools/crowbar.rsi#icon",
+        "SteelSheet" => "Objects/Materials/Sheets/metal.rsi#steel",
+        _ => return None,
+    };
+    registry.get(&format!("sprites/ss14/{path}"))
+}
+
+/// Спрайт предмета в руке: inhand-стейт (4 направления), если он есть.
+pub fn item_inhand<'a>(registry: &'a RsiRegistry, name: &str) -> Option<&'a RsiSprite> {
+    let path = match name {
+        "Crowbar" => "Objects/Tools/crowbar.rsi#inhand-right",
+        "SteelSheet" => "Objects/Materials/Sheets/metal.rsi#steel-inhand-right",
+        _ => return None,
+    };
+    registry.get(&format!("sprites/ss14/{path}"))
+}
 /// Время до авто-переноса в тестовом режиме SSR_INV_TEST.
 const INV_TEST_DELAY: f32 = 5.0;
 
@@ -40,7 +58,7 @@ pub struct ActionMenu {
 /// Визуал другого игрока, привязанный к реплицированной сущности.
 #[derive(Component)]
 pub struct RemotePlayerVisual {
-    player: Entity,
+    pub player: Entity,
 }
 
 /// Слот рюкзака в UI.
@@ -122,100 +140,116 @@ fn own_hands<'a>(own: &OwnPlayerEntity, hands: &'a Query<&Hands>) -> Option<&'a 
 
 // ---------------------------------------------------------------- визуалы игроков
 
-/// Спавнит спрайты других игроков: без этого их не было видно вообще.
+/// Спавнит визуалы других игроков (тело собирает `humanoid::sync_bodies`).
 pub fn spawn_remote_players(
     mut commands: Commands,
-    registry: Res<RsiRegistry>,
     player_entity: Res<PlayerEntity>,
     entity_map: Option<Res<ServerEntityMap>>,
     added: AddedPositions,
 ) {
     let own = crate::own_player_entity(&player_entity, &entity_map);
-    let Some(sprite) = registry.get(REMOTE_SPRITE) else {
-        return;
-    };
     for (entity, position) in added.iter() {
         if Some(entity) == own {
             continue;
         }
-        let mut sprite_component = Sprite::from_image(sprite.image.clone());
-        sprite_component.texture_atlas = Some(TextureAtlas {
-            layout: sprite.layout.clone(),
-            index: sprite.index(0, 0),
-        });
         commands.spawn((
             RemotePlayerVisual { player: entity },
-            sprite_component,
+            crate::humanoid::Facing(0),
             Transform::from_xyz(position.0[0], position.0[1], 0.9),
         ));
         tracing::info!(player = ?entity, "remote player visual spawned");
     }
 }
 
-/// Двигает визуалы других игроков за реплицированными позициями и убирает
-/// «осиротевшие» (игрок вышел из интереса).
+/// Двигает визуалы других игроков за реплицированными позициями, выбирает
+/// сторону по смещению и убирает «осиротевшие» (игрок вышел из интереса).
 pub fn sync_remote_players(
     mut commands: Commands,
     positions: Query<&PlayerPosition>,
-    mut visuals: Query<(Entity, &RemotePlayerVisual, &mut Transform)>,
+    mut visuals: Query<(
+        Entity,
+        &RemotePlayerVisual,
+        &mut Transform,
+        &mut crate::humanoid::Facing,
+    )>,
 ) {
-    for (visual_entity, visual, mut transform) in visuals.iter_mut() {
+    for (visual_entity, visual, mut transform, mut facing) in visuals.iter_mut() {
         let Ok(position) = positions.get(visual.player) else {
             commands.entity(visual_entity).despawn();
             continue;
         };
-        transform.translation.x = position.0[0];
-        transform.translation.y = position.0[1];
+        let (x, y) = (position.0[0], position.0[1]);
+        let delta = Vec2::new(x - transform.translation.x, y - transform.translation.y);
+        if delta.length() >= 0.5 {
+            facing.0 = if delta.x.abs() > delta.y.abs() {
+                if delta.x > 0.0 { 2 } else { 3 }
+            } else if delta.y > 0.0 {
+                1
+            } else {
+                0
+            };
+        }
+        transform.translation.x = x;
+        transform.translation.y = y;
     }
 }
 
-/// Рисует предмет из АКТИВНОЙ руки у спрайта держателя (SS14-модель).
+/// Рисует предмет из АКТИВНОЙ руки у спрайта держателя (SS14-модель):
+/// спрайт берётся по имени предмета (inhand-стейт) и поворачивается по взгляду.
 pub fn sync_inhand_items(
     mut commands: Commands,
     registry: Res<RsiRegistry>,
     entity_map: Option<Res<ServerEntityMap>>,
-    items: Query<(Entity, &HeldBy)>,
+    items: Query<(Entity, &HeldBy, &Item)>,
     hands: Query<&Hands>,
-    positions: Query<&PlayerPosition>,
-    mut visuals: Query<(Entity, &InHandVisual, &mut Transform)>,
+    holders: Query<(&PlayerPosition, &crate::humanoid::Facing)>,
+    mut visuals: Query<(Entity, &InHandVisual, &mut Transform, &mut Sprite)>,
 ) {
-    let Some(icon) = registry.get(ITEM_ICON) else {
-        return;
-    };
     let Some(map) = entity_map.as_deref() else {
         return;
     };
 
-    for (visual_entity, visual, mut transform) in visuals.iter_mut() {
+    for (visual_entity, visual, mut transform, mut sprite) in visuals.iter_mut() {
         let holder_bits = items
             .get(visual.item)
-            .map(|(_, held)| held.player)
+            .map(|(_, held, _)| held.player)
             .unwrap_or_default();
-        let active_here = Entity::try_from_bits(holder_bits)
-            .and_then(|server| map.to_client().get(&server).copied())
-            .map(|client| {
-                let active = hands.get(client).ok().and_then(|h| h.active_item());
-                let position = positions.get(client).ok();
-                (active, position.map(|p| (p.0[0] + 14.0, p.0[1] - 6.0)))
-            });
-        match active_here {
-            Some((Some(active), position)) if active == visual.item.to_bits() => {
-                if let Some((x, y)) = position {
-                    transform.translation.x = x;
-                    transform.translation.y = y;
-                }
-            }
-            _ => {
-                commands.entity(visual_entity).despawn();
+        let holder = Entity::try_from_bits(holder_bits)
+            .and_then(|server| map.to_client().get(&server).copied());
+        let Some(holder_client) = holder else {
+            commands.entity(visual_entity).despawn();
+            continue;
+        };
+        let active = hands.get(holder_client).ok().and_then(|h| h.active_item());
+        if active != Some(visual.item.to_bits()) {
+            commands.entity(visual_entity).despawn();
+            continue;
+        }
+        let Ok((position, facing)) = holders.get(holder_client) else {
+            continue;
+        };
+        transform.translation.x = position.0[0] + 14.0;
+        transform.translation.y = position.0[1] - 6.0;
+        let name = items
+            .get(visual.item)
+            .ok()
+            .map(|(_, _, item)| item.name.clone());
+        if let Some(name) = name
+            && let Some(rsi) = item_inhand(&registry, &name)
+            && let Some(atlas) = sprite.texture_atlas.as_mut()
+        {
+            let index = rsi.index(facing.0.min(3), 0);
+            if atlas.index != index {
+                atlas.index = index;
             }
         }
     }
 
-    for (item_entity, held) in items.iter() {
+    for (item_entity, held, item) in items.iter() {
         if held.player == 0
             || visuals
                 .iter()
-                .any(|(_, visual, _)| visual.item == item_entity)
+                .any(|(_, visual, _, _)| visual.item == item_entity)
         {
             continue;
         }
@@ -233,14 +267,17 @@ pub fn sync_inhand_items(
         if !active_matches {
             continue;
         }
-        let mut sprite = Sprite::from_image(icon.image.clone());
+        let Some(rsi) = item_inhand(&registry, &item.name) else {
+            continue;
+        };
+        let mut sprite = Sprite::from_image(rsi.image.clone());
         sprite.texture_atlas = Some(TextureAtlas {
-            layout: icon.layout.clone(),
-            index: icon.index(0, 0),
+            layout: rsi.layout.clone(),
+            index: rsi.index(0, 0),
         });
-        let (x, y) = positions
+        let (x, y) = holders
             .get(holder_client)
-            .map(|p| (p.0[0] + 14.0, p.0[1] - 6.0))
+            .map(|(position, _)| (position.0[0] + 14.0, position.0[1] - 6.0))
             .unwrap_or((0.0, 0.0));
         commands.spawn((
             InHandVisual { item: item_entity },
@@ -252,12 +289,34 @@ pub fn sync_inhand_items(
 
 // ---------------------------------------------------------------- UI
 
+/// Доступ к спрайтам предметов для панелей UI (иконка по bits сущности).
+#[derive(SystemParam)]
+pub struct ItemSprites<'w, 's> {
+    registry: Res<'w, RsiRegistry>,
+    items: Query<'w, 's, &'static Item>,
+}
+
+impl ItemSprites<'_, '_> {
+    /// Иконка предмета по bits его сущности (None — предмет неизвестен).
+    pub fn icon(&self, bits: u64) -> Option<&RsiSprite> {
+        let name = Entity::try_from_bits(bits)
+            .and_then(|entity| self.items.get(entity).ok())
+            .map(|item| item.name.clone())?;
+        let sprite = item_icon(&self.registry, &name);
+        if sprite.is_none() {
+            tracing::warn!(item = %name, "no icon for item");
+        }
+        sprite
+    }
+}
+
 /// Пересобирает панель рюкзака при изменениях содержимого.
 pub fn render_inventory_panel(
     mut commands: Commands,
-    registry: Res<RsiRegistry>,
+    sprites: ItemSprites,
     own: Res<OwnPlayerEntity>,
     inventories: Query<&Inventory>,
+    positions: Res<windows::WindowPositions>,
     root: Query<Entity, With<InventoryPanel>>,
     mut last: Local<Option<Vec<Option<u64>>>>,
 ) {
@@ -276,20 +335,25 @@ pub fn render_inventory_panel(
     for entity in root.iter() {
         commands.entity(entity).despawn();
     }
-    let icon = registry.get(ITEM_ICON).map(|rsi| rsi.image.clone());
+
+    let mut node = Node {
+        position_type: PositionType::Absolute,
+        left: px(490),
+        bottom: px(96),
+        flex_direction: FlexDirection::Column,
+        padding: UiRect::all(px(8)),
+        row_gap: px(6),
+        ..default()
+    };
+    windows::apply_saved_position(windows::WindowKind::Inventory, &mut node, &positions);
 
     commands
         .spawn((
             InventoryPanel,
-            Node {
-                position_type: PositionType::Absolute,
-                left: px(12),
-                bottom: px(12),
-                flex_direction: FlexDirection::Column,
-                padding: UiRect::all(px(8)),
-                row_gap: px(6),
-                ..default()
-            },
+            windows::WindowKind::Inventory,
+            windows::WindowDrag::default(),
+            Interaction::default(),
+            node,
             BackgroundColor(Color::srgba(0.06, 0.06, 0.08, 0.72)),
         ))
         .with_children(|panel| {
@@ -329,11 +393,16 @@ pub fn render_inventory_panel(
                                     BackgroundColor(Color::srgb(0.12, 0.12, 0.15)),
                                     BorderColor::from(Color::srgb(0.28, 0.28, 0.33)),
                                 ));
-                                if item.is_some()
-                                    && let Some(icon) = &icon
+                                if let Some(bits) = item
+                                    && let Some(sprite) = sprites.icon(bits)
                                 {
+                                    let mut image = ImageNode::new(sprite.image.clone());
+                                    image.texture_atlas = Some(TextureAtlas {
+                                        layout: sprite.layout.clone(),
+                                        index: sprite.index(0, 0),
+                                    });
                                     slot.with_child((
-                                        ImageNode::new(icon.clone()),
+                                        image,
                                         Node {
                                             width: px(28),
                                             height: px(28),
@@ -346,7 +415,7 @@ pub fn render_inventory_panel(
                     }
                 });
             panel.spawn((
-                Text::new("ЛКМ — взять в руку; ПКМ — действия"),
+                Text::new("ЛКМ — взять в руку; X — сменить руку; ПКМ — действия"),
                 TextFont::from_font_size(11.0),
                 TextColor(Color::srgb(0.62, 0.62, 0.66)),
             ));
@@ -354,11 +423,13 @@ pub fn render_inventory_panel(
 }
 
 /// Пересобирает панель рук при изменениях (активная рука, предметы).
+/// Расположение — внизу по центру, как хотбар рук в SS14.
 pub fn render_hands_panel(
     mut commands: Commands,
-    registry: Res<RsiRegistry>,
+    sprites: ItemSprites,
     own: Res<OwnPlayerEntity>,
     hands: Query<&Hands>,
+    positions: Res<windows::WindowPositions>,
     root: Query<Entity, With<HandsPanel>>,
     mut last: Local<Option<Hands>>,
 ) {
@@ -374,21 +445,26 @@ pub fn render_hands_panel(
     for entity in root.iter() {
         commands.entity(entity).despawn();
     }
-    let icon = registry.get(ITEM_ICON).map(|rsi| rsi.image.clone());
+
+    let mut node = Node {
+        position_type: PositionType::Absolute,
+        left: px(560),
+        bottom: px(24),
+        flex_direction: FlexDirection::Row,
+        align_items: AlignItems::Center,
+        padding: UiRect::all(px(8)),
+        column_gap: px(4),
+        ..default()
+    };
+    windows::apply_saved_position(windows::WindowKind::Hands, &mut node, &positions);
 
     commands
         .spawn((
             HandsPanel,
-            Node {
-                position_type: PositionType::Absolute,
-                left: px(12),
-                bottom: px(225),
-                flex_direction: FlexDirection::Row,
-                align_items: AlignItems::Center,
-                padding: UiRect::all(px(8)),
-                column_gap: px(4),
-                ..default()
-            },
+            windows::WindowKind::Hands,
+            windows::WindowDrag::default(),
+            Interaction::default(),
+            node,
             BackgroundColor(Color::srgba(0.06, 0.06, 0.08, 0.72)),
         ))
         .with_children(|row| {
@@ -417,11 +493,16 @@ pub fn render_hands_panel(
                         Color::srgb(0.28, 0.28, 0.33)
                     }),
                 ));
-                if item.is_some()
-                    && let Some(icon) = &icon
+                if let Some(bits) = item
+                    && let Some(sprite) = sprites.icon(bits)
                 {
+                    let mut image = ImageNode::new(sprite.image.clone());
+                    image.texture_atlas = Some(TextureAtlas {
+                        layout: sprite.layout.clone(),
+                        index: sprite.index(0, 0),
+                    });
                     slot.with_child((
-                        ImageNode::new(icon.clone()),
+                        image,
                         Node {
                             width: px(34),
                             height: px(34),

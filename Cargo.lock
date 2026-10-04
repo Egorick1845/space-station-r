@@ -7987,6 +7987,8 @@ dependencies = [
  "bevy_replicon",
  "image",
  "lightyear",
+ "ron",
+ "serde",
  "ssr-core",
  "ssr-protocol",
  "tracing",

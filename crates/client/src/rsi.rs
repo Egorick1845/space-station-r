@@ -60,15 +60,26 @@ impl RsiRegistry {
 /// грузить их все нельзя — расширяем список по мере использования (ленивая
 /// загрузка по требованию — отдельная задача, T5.3).
 pub const STARTUP_RSI: &[&str] = &[
-    "Mobs/Animals/monkey.rsi",
     "Mobs/Ghosts/ghost_human.rsi",
     "Objects/Tools/crowbar.rsi",
+    // Листы металла (T5.3): иконка и inhand для SteelSheet.
+    "Objects/Materials/Sheets/metal.rsi",
     "Structures/Walls/solid.rsi",
     "Structures/Doors/Airlocks/Standard/basic.rsi",
     // Анимированный фон лобби мини-станции (64 кадра).
     "_Mini/Lobby/mars.rsi",
-    // Ящик-контейнер (T3.4): состояния closed/open.
+    // Ящик-контейнер (T3.4): состояния base/closed/open.
     "Structures/Storage/Crates/generic.rsi",
+    // Тела рас (T5.3): части гуманоидов, собираются в humanoid.rs.
+    "Mobs/Species/Human/parts.rsi",
+    "Mobs/Species/Skeleton/parts.rsi",
+    "Mobs/Species/Arachnid/parts.rsi",
+    "Mobs/Species/Diona/parts.rsi",
+    "Mobs/Species/Gingerbread/parts.rsi",
+    "Mobs/Species/Moth/parts.rsi",
+    "Mobs/Species/Reptilian/parts.rsi",
+    "Mobs/Species/Slime/parts.rsi",
+    "Mobs/Species/Vox/parts.rsi",
 ];
 
 /// Загружает RSI из [`STARTUP_RSI`] и строит реестр.

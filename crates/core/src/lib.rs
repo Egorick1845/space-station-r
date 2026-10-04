@@ -82,3 +82,18 @@ pub struct Door {
 
 /// Радиус взаимодействия, юниты (PLAN.md T3.1: 1.5 тайла).
 pub const INTERACT_RANGE: f32 = 1.5 * tiles::TILE_PX as f32;
+
+/// Раса/вид игрока (T5.3): спрайты тела — `Mobs/Species/<id>/parts.rsi`.
+/// Выбирается сервером (SSR_SPECIES), реплицируется клиенту.
+#[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Species {
+    pub id: String,
+}
+
+impl Default for Species {
+    fn default() -> Self {
+        Self {
+            id: "Human".to_string(),
+        }
+    }
+}

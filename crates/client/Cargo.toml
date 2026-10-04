@@ -12,3 +12,5 @@ lightyear = { workspace = true }
 bevy_replicon = { workspace = true }
 tracing = { workspace = true }
 image = { workspace = true }
+serde = { workspace = true }
+ron = { workspace = true }

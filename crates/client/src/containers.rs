@@ -18,8 +18,6 @@ use crate::rsi::RsiRegistry;
 const CRATE_BASE: &str = "sprites/ss14/Structures/Storage/Crates/generic.rsi#base";
 const CRATE_CLOSED: &str = "sprites/ss14/Structures/Storage/Crates/generic.rsi#closed";
 const CRATE_OPEN: &str = "sprites/ss14/Structures/Storage/Crates/generic.rsi#open";
-/// Иконка предмета в слотах (до системы прототипов — лом).
-const ITEM_ICON: &str = "sprites/ss14/Objects/Tools/crowbar.rsi#icon";
 /// Радиус, в котором открытый ящик показывается на экране.
 const CONTAINER_UI_RANGE: f32 = 96.0;
 
@@ -153,9 +151,10 @@ fn open_container_in_reach<'a>(
 #[allow(clippy::too_many_arguments)]
 pub fn render_container_panel(
     mut commands: Commands,
-    registry: Res<RsiRegistry>,
+    sprites: crate::inventory_ui::ItemSprites,
     own: Res<crate::inventory_ui::OwnPlayerEntity>,
     positions: Query<&PlayerPosition>,
+    window_positions: Res<crate::windows::WindowPositions>,
     containers: WorldContainers,
     inventories: Query<&Inventory>,
     root: Query<Entity, With<ContainerPanel>>,
@@ -192,21 +191,30 @@ pub fn render_container_panel(
         .get(container_entity)
         .map(|(_, container, _)| container.name.clone())
         .unwrap_or_else(|_| "Ящик".to_string());
-    let icon = registry.get(ITEM_ICON).map(|rsi| rsi.image.clone());
     tracing::info!(?container_entity, "container panel opened");
+
+    let mut node = Node {
+        position_type: PositionType::Absolute,
+        left: px(1030),
+        bottom: px(120),
+        flex_direction: FlexDirection::Column,
+        padding: UiRect::all(px(8)),
+        row_gap: px(6),
+        ..default()
+    };
+    crate::windows::apply_saved_position(
+        crate::windows::WindowKind::Container,
+        &mut node,
+        &window_positions,
+    );
 
     commands
         .spawn((
             ContainerPanel,
-            Node {
-                position_type: PositionType::Absolute,
-                right: px(12),
-                bottom: px(12),
-                flex_direction: FlexDirection::Column,
-                padding: UiRect::all(px(8)),
-                row_gap: px(6),
-                ..default()
-            },
+            crate::windows::WindowKind::Container,
+            crate::windows::WindowDrag::default(),
+            Interaction::default(),
+            node,
             BackgroundColor(Color::srgba(0.06, 0.06, 0.08, 0.78)),
         ))
         .with_children(|panel| {
@@ -250,11 +258,16 @@ pub fn render_container_panel(
                                     BackgroundColor(Color::srgb(0.12, 0.12, 0.15)),
                                     BorderColor::from(Color::srgb(0.28, 0.28, 0.33)),
                                 ));
-                                if item.is_some()
-                                    && let Some(icon) = &icon
+                                if let Some(bits) = item
+                                    && let Some(sprite) = sprites.icon(bits)
                                 {
+                                    let mut image = ImageNode::new(sprite.image.clone());
+                                    image.texture_atlas = Some(TextureAtlas {
+                                        layout: sprite.layout.clone(),
+                                        index: sprite.index(0, 0),
+                                    });
                                     slot.with_child((
-                                        ImageNode::new(icon.clone()),
+                                        image,
                                         Node {
                                             width: px(26),
                                             height: px(26),

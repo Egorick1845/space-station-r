@@ -17,12 +17,17 @@ use lightyear::prelude::client::*;
 use lightyear::prelude::*;
 use ssr_core::{GAME_NAME, PlayerPosition};
 
+mod audio;
+mod console;
 mod containers;
 mod doors;
+mod humanoid;
 mod inventory_ui;
 mod lobby;
 mod rsi;
+mod settings;
 mod tiles;
+mod windows;
 use ssr_protocol::net::GameChannel;
 use ssr_protocol::{
     ClientMessage, DEFAULT_SERVER_PORT, PROTOCOL_VERSION, ProtocolPlugin, ServerMessage,
@@ -53,6 +58,18 @@ const DEV_PLAYER_NAME: &str = "SSR-dev";
 const NET_TICK_SECS: f32 = 1.0 / NET_TPS as f32;
 
 fn main() {
+    // SSR_DUMP_ONLY=1 — офлайн-дамп чанков карты в PNG (без окна и сети):
+    // глазами проверить сглаживание стен и тайлы.
+    if std::env::var_os("SSR_DUMP_ONLY").is_some() {
+        let map = std::env::var("SSR_MAP").unwrap_or_else(|_| "test.ron".to_string());
+        let out = ssr_core::repo_root().join("target/chunk-dump");
+        match tiles::dump_map_chunks(&map, &out) {
+            Ok(count) => println!("chunks dumped: {count} -> {}", out.display()),
+            Err(e) => eprintln!("dump failed: {e}"),
+        }
+        return;
+    }
+
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
@@ -76,6 +93,11 @@ fn main() {
     app.init_resource::<lobby::LobbyState>();
     app.init_resource::<inventory_ui::OwnPlayerEntity>();
     app.init_resource::<inventory_ui::ActionMenu>();
+    app.init_resource::<console::Console>();
+    app.init_resource::<windows::WindowPositions>();
+    app.init_resource::<settings::Settings>();
+    // FPS-диагностика нужна строке FPS в углу (включается в настройках).
+    app.add_plugins(bevy::diagnostic::FrameTimeDiagnosticsPlugin::default());
     // RsiRegistry строится сразу после DefaultPlugins: нужен и игроку (обезьяна),
     // и дверям (closed/open) уже на Startup.
     let rsi_root = Path::new(&assets_file_path()).join("sprites/ss14");
@@ -86,7 +108,18 @@ fn main() {
             rsi::build_registry(&mut images, &mut layouts, &rsi_root)
         });
     app.insert_resource(registry);
-    app.add_systems(Startup, (setup_camera, startup_map, install_default_font));
+    app.add_systems(
+        Startup,
+        (
+            setup_camera,
+            startup_map,
+            install_default_font,
+            settings::load_settings,
+            settings::apply_saved_window_mode,
+            settings::spawn_fps_text,
+            audio::load_sounds,
+        ),
+    );
     app.add_systems(
         Update,
         (
@@ -105,6 +138,26 @@ fn main() {
         )
             .run_if(in_game),
     );
+    // UI-сервисы: перетаскивание окон, звук, настройки, консоль.
+    app.add_systems(
+        Update,
+        (
+            hotkeys,
+            windows::drag_windows,
+            audio::door_sounds,
+            audio::damage_sound,
+            audio::build_sound,
+            settings::apply_volume,
+            settings::toggle_settings_menu,
+            settings::settings_click,
+            settings::update_settings_text,
+            settings::update_fps,
+            console::toggle_console,
+            console::console_input,
+            console::update_console_text,
+        )
+            .run_if(in_game),
+    );
     app.add_systems(
         Update,
         (
@@ -112,6 +165,8 @@ fn main() {
             inventory_ui::spawn_remote_players,
             inventory_ui::sync_remote_players,
             inventory_ui::sync_inhand_items,
+            humanoid::sync_bodies,
+            humanoid::update_facing,
             inventory_ui::render_inventory_panel,
             inventory_ui::render_hands_panel,
             inventory_ui::spawn_health_hud,
@@ -182,6 +237,8 @@ fn main() {
         .replicate();
     // Роли (T4.2). Тот же порядок, что у сервера!
     app.component::<ssr_core::roles::PlayerRole>().replicate();
+    // Расы (T5.3). Тот же порядок, что у сервера!
+    app.component::<ssr_core::Species>().replicate();
     app.run();
 }
 
@@ -229,7 +286,7 @@ fn enter_game(
             ReplicationReceiver,
         ))
         .trigger(Connect::from);
-    spawn_player_sprite(&mut commands, &registry);
+    spawn_player_sprite(&mut commands);
     // Лом из SS14 рядом со стартовой точкой (демо IMP.1).
     let key = "sprites/ss14/Objects/Tools/crowbar.rsi#icon";
     rsi::spawn_rsi_sprite(
@@ -302,10 +359,13 @@ fn send_input(
     input: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
     player_entity: Res<PlayerEntity>,
+    console: Res<console::Console>,
     mut connected_elapsed: Local<f32>,
     connected: Query<(), With<Connected>>,
     mut senders: Query<&mut MessageSender<ClientMessage>, With<Connected>>,
 ) {
+    // При открытой консоли персонаж не двигается (текст набирается).
+    let console_open = console.open;
     if !input_ready(&player_entity) {
         return;
     }
@@ -336,7 +396,7 @@ fn send_input(
         walk_dir
     } else if build_test_walk {
         Vec2::X
-    } else if locked {
+    } else if locked || console_open {
         Vec2::ZERO
     } else {
         input_direction(&input)
@@ -345,6 +405,20 @@ fn send_input(
         sender.send::<GameChannel>(ClientMessage::Input {
             movement: direction.to_array(),
         });
+    }
+}
+
+/// Горячие клавиши: X — сменить руку (как в SS14).
+fn hotkeys(
+    input: Res<ButtonInput<KeyCode>>,
+    console: Res<console::Console>,
+    mut senders: Query<&mut MessageSender<ClientMessage>, With<Connected>>,
+) {
+    if console.open || !input.just_pressed(KeyCode::KeyX) {
+        return;
+    }
+    for mut sender in senders.iter_mut() {
+        sender.send::<GameChannel>(ClientMessage::SwitchHand);
     }
 }
 
@@ -421,11 +495,9 @@ fn apply_player_state(
     player_entity: Res<PlayerEntity>,
     entity_map: Option<Res<ServerEntityMap>>,
     positions: Query<&PlayerPosition>,
-    registry: Res<rsi::RsiRegistry>,
     mut interp: Local<PositionInterp>,
-    mut sprites: Query<(&mut Transform, &mut Sprite, &mut PlayerFacing), With<Player>>,
+    mut sprites: Query<(&mut Transform, &mut humanoid::Facing), With<Player>>,
 ) {
-    const KEY: &str = "sprites/ss14/Mobs/Animals/monkey.rsi#monkey";
     let Some(own) = own_player_entity(&player_entity, &entity_map) else {
         return;
     };
@@ -463,17 +535,11 @@ fn apply_player_state(
         }
     });
 
-    let sprite_rsi = registry.get(KEY);
-    for (mut transform, mut sprite, mut facing) in sprites.iter_mut() {
+    for (mut transform, mut facing) in sprites.iter_mut() {
         transform.translation.x = current.x;
         transform.translation.y = current.y;
-        if let Some(direction) = direction
-            && facing.0 != direction
-        {
+        if let Some(direction) = direction {
             facing.0 = direction;
-            if let (Some(rsi), Some(atlas)) = (sprite_rsi, sprite.texture_atlas.as_mut()) {
-                atlas.index = rsi.index(direction, 0);
-            }
         }
     }
     tracing::debug!(target = ?target.to_array(), render = ?current.to_array(), "position applied");
@@ -509,23 +575,13 @@ fn setup_camera(mut commands: Commands) {
     ));
 }
 
-/// Спрайт игрока из RSI с атласом направлений (порядок движка: S,N,E,W).
-fn spawn_player_sprite(commands: &mut Commands, registry: &rsi::RsiRegistry) {
-    const KEY: &str = "sprites/ss14/Mobs/Animals/monkey.rsi#monkey";
-    let Some(sprite) = registry.get(KEY) else {
-        tracing::warn!(KEY, "player rsi missing");
-        return;
-    };
-    let mut sprite_component = Sprite::from_image(sprite.image.clone());
-    sprite_component.texture_atlas = Some(TextureAtlas {
-        layout: sprite.layout.clone(),
-        index: sprite.index(0, 0), // старт: смотрит на юг
-    });
+/// Сущность-визуал своего игрока: тело (гуманоид) собирается отдельно
+/// (`humanoid::sync_bodies`), здесь только трансформ и направление.
+fn spawn_player_sprite(commands: &mut Commands) {
     // z = 1: игрок рисуется поверх тайлов карты.
     commands.spawn((
         Player,
-        sprite_component,
-        PlayerFacing(0),
+        humanoid::Facing(0), // старт: смотрит на юг
         Transform::from_xyz(0.0, 0.0, 1.0),
     ));
 }
@@ -542,10 +598,6 @@ fn camera_follow_player(
     camera.translation.x = target.translation.x;
     camera.translation.y = target.translation.y;
 }
-
-/// Текущее направление игрока (0 юг, 1 восток, 2 север, 3 запад).
-#[derive(Component, Default, Clone, Copy, PartialEq)]
-struct PlayerFacing(u32);
 
 /// Грузит прототипы/спрайты тайлов; сами чанки приходят с сервера (T2.3).
 fn startup_map(mut commands: Commands) {
