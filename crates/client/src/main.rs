@@ -17,6 +17,7 @@ use lightyear::prelude::client::*;
 use lightyear::prelude::*;
 use ssr_core::{GAME_NAME, PlayerPosition};
 
+mod appearance;
 mod audio;
 mod bot;
 mod chat;
@@ -137,6 +138,7 @@ fn main() {
     app.init_resource::<crafting::CraftingState>();
     app.init_resource::<hud::HudState>();
     app.init_resource::<hud::Placement>();
+    app.init_resource::<appearance::AppearanceUi>();
     app.init_resource::<inventory_ui::InventoryUi>();
     app.init_resource::<audio::SoundRequests>();
     // Ленивая подгрузка RSI (T5.3): обрабатываем заявки из реестра каждый кадр.

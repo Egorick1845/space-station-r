@@ -815,7 +815,7 @@ fn glass_field() -> (Node, BackgroundColor) {
 /// Каркас окна меню — как `DefaultWindow` в SS14: шапка `window_header`,
 /// заголовок цветом `NanoGold`, крестик `cross.svg` с модуляцией `#4B596A`
 /// и фон `window_background_bordered`.
-fn menu_panel(
+pub(crate) fn menu_panel(
     commands: &mut Commands,
     theme: &crate::ui_theme::UiTheme,
     title: &str,
@@ -1558,8 +1558,14 @@ pub fn close_windows_on_escape(
     mut crafting: ResMut<crate::crafting::CraftingState>,
     mut placement: ResMut<Placement>,
     mut uis: Query<&mut crate::inventory_ui::InventoryUi>,
+    mut appearance: ResMut<crate::appearance::AppearanceUi>,
 ) {
     if console.open || chat.focused || !keys.just_pressed(KeyCode::Escape) {
+        return;
+    }
+    if appearance.open {
+        appearance.open = false;
+        tracing::info!("escape: appearance closed");
         return;
     }
     // Сначала Esc снимает фокус поиска, потом закрывает окно.
