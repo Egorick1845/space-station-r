@@ -389,7 +389,7 @@ pub fn sync_worn_clothes(
     visuals: Query<(Entity, &crate::inventory_ui::RemotePlayerVisual)>,
     own_visual: Res<crate::inventory_ui::OwnPlayerEntity>,
     worn: Query<(Entity, &WornLayer)>,
-    last: Local<std::collections::HashMap<Entity, WornSignature>>,
+    mut last: Local<std::collections::HashMap<Entity, WornSignature>>,
 ) {
     for (entity, clothing, hair) in clothings.iter() {
         let signature = (
@@ -399,16 +399,24 @@ pub fn sync_worn_clothes(
         if last.get(&entity) == Some(&signature) {
             continue;
         }
-        // Визуал игрока: у своего — сама сущность, у чужого — его визуал.
+        // Визуал игрока: у своего — сама сущность (если уже разрешена), у чужого —
+        // его визуал. Дубль визуала своего игрока брать нельзя: он удаляется
+        // в sync_remote_players вместе с детьми, и одежда исчезала («кукла голая»).
         let visual = if Some(entity) == own_visual.0 {
             Some(entity)
+        } else if own_visual.0.is_none() {
+            // Свой игрок ещё не разрешён — подождём следующий кадр.
+            None
         } else {
             visuals
                 .iter()
+                .filter(|(_, remote)| remote.player != own_visual.0.unwrap())
                 .find(|(_, remote)| remote.player == entity)
                 .map(|(visual, _)| visual)
         };
         let Some(visual) = visual else {
+            // Не кэшируем: вернёмся к этому игроку, когда визуал появится.
+            last.remove(&entity);
             continue;
         };
         for (layer, worn) in worn.iter() {
