@@ -2858,6 +2858,17 @@ fn process_actions(
                                 action: ActionKind::Attack { target: entity },
                             });
                         }
+                        // Предмет: свои вербы, как в SS14 (меню по ПКМ).
+                        if items.get(target).is_ok() {
+                            options.push(ActionOption {
+                                label: "Осмотреть".into(),
+                                action: ActionKind::Examine { entity },
+                            });
+                            options.push(ActionOption {
+                                label: "Взять".into(),
+                                action: ActionKind::Pickup { item: entity },
+                            });
+                        }
                         if let Ok(door) = doors.get(target)
                             && has_door_access(&world.access, player, door)
                         {
@@ -2918,6 +2929,76 @@ fn process_actions(
             }
         };
         match action {
+            // Верб «Осмотреть»: описание объекта, как у очереди Examine.
+            ActionKind::Examine { entity } => {
+                let text = describe_target(
+                    entity,
+                    0,
+                    0,
+                    &items,
+                    &containers,
+                    &container_positions,
+                    &doors,
+                    &world.atmospheres,
+                    &world.catalogs,
+                );
+                tracing::info!(?player, %text, "examine (verb)");
+                if let Some(link) = players
+                    .entries
+                    .iter()
+                    .find(|entry| entry.player == player)
+                    .map(|entry| entry.link)
+                    && let Ok(mut sender) = senders.get_mut(link)
+                {
+                    sender.send::<GameChannel>(ServerMessage::Event {
+                        kind: format!("examine:{text}"),
+                    });
+                }
+                continue;
+            }
+            // Верб «Взять»: поднять предмет с пола (та же проверка, что у
+            // ClientMessage::Pickup — дистанция и «лежит на полу»).
+            ActionKind::Pickup { item } => {
+                let Some(entity) = Entity::try_from_bits(item) else {
+                    continue;
+                };
+                let Ok(player_position) = positions.get(player) else {
+                    continue;
+                };
+                let Ok(item_position) = container_positions.get(entity) else {
+                    tracing::warn!(item, "verb pickup: item is not on the floor");
+                    continue;
+                };
+                let dx = item_position.0[0] - player_position.0[0];
+                let dy = item_position.0[1] - player_position.0[1];
+                if (dx * dx + dy * dy).sqrt() > INTERACT_RANGE + TILE_SIZE {
+                    tracing::warn!(item, "verb pickup: too far");
+                    continue;
+                }
+                let name = items
+                    .get(entity)
+                    .map(|i| i.name.clone())
+                    .unwrap_or_default();
+                let (w, h) = world.catalogs.items.size_of(&name);
+                let mut taken = false;
+                if let Ok(mut hand) = hands.get_mut(player)
+                    && hand.active_item().is_none()
+                {
+                    taken = hand.take_in_active(item);
+                }
+                if !taken && let Ok(mut inventory) = inventories.get_mut(player) {
+                    taken = inventory.put_first_fit(item, w, h).is_some();
+                }
+                if taken {
+                    commands
+                        .entity(entity)
+                        .remove::<ssr_core::inventory::ItemPosition>()
+                        .insert(ssr_core::inventory::HeldBy {
+                            player: player.to_bits(),
+                        });
+                    tracing::info!(item, "verb pickup: taken");
+                }
+            }
             ActionKind::Attack { target } => {
                 let Some(target_entity) = Entity::try_from_bits(target) else {
                     continue;

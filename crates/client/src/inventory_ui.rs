@@ -1236,6 +1236,12 @@ pub fn world_click(
         &ssr_core::inventory::ItemPosition,
     )>,
     entity_map: Option<Res<ServerEntityMap>>,
+    items: Query<(
+        Entity,
+        &ssr_core::inventory::Item,
+        &ssr_core::inventory::ItemPosition,
+        &ssr_core::inventory::HeldBy,
+    )>,
     mut menu: ResMut<ActionMenu>,
     mut senders: Query<&mut MessageSender<ClientMessage>, With<Connected>>,
 ) {
@@ -1252,6 +1258,36 @@ pub fn world_click(
 
     // Правый клик — меню контекстных действий (verbs).
     if buttons.just_pressed(MouseButton::Right) {
+        // Предмет под курсором: у него свои вербы, как в SS14 (взять, осмотреть
+        // и т.д.). Клетка та же, что у обводки в `doors::hover_outline`.
+        const HALF: f32 = ssr_core::tiles::TILE_PX as f32 / 2.0;
+        let hovered_item = items
+            .iter()
+            .find(|(_, _, position, held)| {
+                let point = Vec2::from_array(position.0);
+                held.player == 0
+                    && (point.x - world.x).abs() <= HALF
+                    && (point.y - world.y).abs() <= HALF
+            })
+            .and_then(|(entity, _, _, _)| {
+                entity_map
+                    .as_deref()
+                    .and_then(|map| map.to_server().get(&entity))
+                    .copied()
+                    .map(Entity::to_bits)
+            });
+        if let Some(bits) = hovered_item {
+            for mut sender in senders.iter_mut() {
+                sender.send::<GameChannel>(ClientMessage::RequestActions {
+                    entity: bits,
+                    tx: 0,
+                    ty: 0,
+                });
+            }
+            menu.cursor = cursor;
+            tracing::info!(bits, "actions requested (item)");
+            return;
+        }
         let target = player_under_cursor(&visuals, world);
         let (entity, tx, ty) = match target {
             Some((player_entity, _)) => {
