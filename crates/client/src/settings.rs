@@ -15,6 +15,12 @@ pub struct Settings {
     pub volume: f32,
     pub fullscreen: bool,
     pub show_fps: bool,
+    /// Имя игрока (T5.4): уходит в Connect.
+    pub player_name: String,
+    /// Адрес сервера "host:port" (T5.4); пусто — локальный из SSR_PORT.
+    pub server: String,
+    /// Сохранённый список серверов (T5.4).
+    pub servers: Vec<String>,
 }
 
 impl Default for Settings {
@@ -23,6 +29,9 @@ impl Default for Settings {
             volume: 0.8,
             fullscreen: false,
             show_fps: false,
+            player_name: "Игрок".to_string(),
+            server: String::new(),
+            servers: vec!["127.0.0.1:7777".to_string()],
         }
     }
 }

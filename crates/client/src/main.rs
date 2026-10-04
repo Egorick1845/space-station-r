@@ -40,14 +40,33 @@ use ssr_protocol::{
 /// Тик-рейт сети (совпадает с сервером, T0.3).
 const NET_TPS: f64 = 20.0;
 
-/// Адрес сервера (T5.4 добавит экран подключения). Порт переопределяется
-/// `SSR_PORT` — тестовые прогоны идут на отдельном порту, не мешая игре в 7777.
-fn server_addr() -> SocketAddr {
+/// Локальный адрес по умолчанию. Порт переопределяется `SSR_PORT` —
+/// тестовые прогоны идут на отдельном порту, не мешая игре в 7777.
+fn default_server_addr() -> SocketAddr {
     let port = std::env::var("SSR_PORT")
         .ok()
         .and_then(|value| value.parse::<u16>().ok())
         .unwrap_or(DEFAULT_SERVER_PORT);
     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
+}
+
+/// Адрес сервера для подключения (T5.4): из настроек («host:port», можно имя
+/// хоста), иначе локальный адрес по умолчанию.
+fn server_addr(settings: &settings::Settings) -> SocketAddr {
+    let address = settings.server.trim();
+    if !address.is_empty() {
+        if let Ok(parsed) = address.parse::<SocketAddr>() {
+            return parsed;
+        }
+        use std::net::ToSocketAddrs;
+        if let Ok(mut resolved) = address.to_socket_addrs()
+            && let Some(first) = resolved.next()
+        {
+            return first;
+        }
+        tracing::warn!(address, "адрес сервера не разобран, беру локальный");
+    }
+    default_server_addr()
 }
 
 /// Локальный конец линка (порт 0 — любой свободный).
@@ -160,9 +179,6 @@ fn main() {
             audio::footsteps,
             audio::play_requested_sounds,
             settings::apply_volume,
-            settings::toggle_settings_menu,
-            settings::settings_click,
-            settings::update_settings_text,
             settings::update_fps,
             console::toggle_console,
             console::console_input,
@@ -197,6 +213,15 @@ fn main() {
         )
             .run_if(in_game),
     );
+    // Настройки (Esc) работают и в лобби, и в игре (T5.4).
+    app.add_systems(
+        Update,
+        (
+            settings::toggle_settings_menu,
+            settings::settings_click,
+            settings::update_settings_text,
+        ),
+    );
     // Тест-режимы клиента (SSR_*_TEST) — отдельной группой.
     app.add_systems(
         Update,
@@ -228,13 +253,18 @@ fn main() {
     let auto_play = std::env::var_os("SSR_AUTO_PLAY").is_some();
     let show_lobby = !auto_play && (force_lobby || cfg!(not(debug_assertions)));
     if show_lobby {
+        app.init_resource::<lobby::LobbyInput>();
         app.add_systems(Startup, lobby::spawn_lobby);
         app.add_systems(
             Update,
             (
                 enter_game,
                 lobby::lobby_button,
+                lobby::lobby_field_click,
+                lobby::lobby_text_input,
+                lobby::lobby_field_text,
                 lobby::animate_lobby_background,
+                lobby::lobby_auto_ready,
             ),
         );
     } else {
@@ -304,6 +334,7 @@ fn enter_game(
     mut commands: Commands,
     state: Res<lobby::LobbyState>,
     registry: Res<rsi::RsiRegistry>,
+    settings: Res<settings::Settings>,
     mut entered: Local<bool>,
 ) {
     if *state != lobby::LobbyState::Playing || *entered {
@@ -315,7 +346,7 @@ fn enter_game(
         .spawn((
             Client,
             LocalAddr(CLIENT_ADDR),
-            PeerAddr(server_addr()),
+            PeerAddr(server_addr(&settings)),
             Link::default(),
             RawClient,
             UdpIo::default(),
@@ -350,18 +381,25 @@ struct PlayerEntity(Option<u64>);
 /// MessageSender авто-добавляется required-компонентом на линк клиента.
 fn send_connect(
     mut senders: Query<&mut MessageSender<ClientMessage>, With<Connected>>,
+    settings: Res<settings::Settings>,
     mut handshake: ResMut<Handshake>,
 ) {
     if handshake.connect_sent {
         return;
     }
     for mut sender in senders.iter_mut() {
+        // Имя из настроек (T5.4); пустое — техническое.
+        let name = if settings.player_name.trim().is_empty() {
+            DEV_PLAYER_NAME.to_string()
+        } else {
+            settings.player_name.trim().to_string()
+        };
         sender.send::<GameChannel>(ClientMessage::Connect {
             protocol_version: PROTOCOL_VERSION,
-            name: DEV_PLAYER_NAME.into(),
+            name: name.clone(),
         });
         handshake.connect_sent = true;
-        tracing::info!(name = DEV_PLAYER_NAME, "Connect sent");
+        tracing::info!(name = %name, "Connect sent");
     }
 }
 

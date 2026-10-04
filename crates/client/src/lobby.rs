@@ -9,6 +9,31 @@ use bevy::ui::widget::Button;
 
 use crate::rsi::RsiRegistry;
 
+/// Поле лобби, которое сейчас редактируется (T5.4).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LobbyField {
+    Name,
+    Server,
+}
+
+/// Какое поле лобби в фокусе (для набора текста).
+#[derive(Resource, Default)]
+pub struct LobbyInput {
+    pub focused: Option<LobbyField>,
+}
+
+/// Кликабельная строка поля (имя/сервер).
+#[derive(Component, Clone, Copy)]
+pub struct FieldButton(pub LobbyField);
+
+/// Текст значения поля (обновляется при вводе).
+#[derive(Component, Clone, Copy)]
+pub struct FieldValue(pub LobbyField);
+
+/// Строка сохранённого сервера в списке.
+#[derive(Component)]
+pub struct ServerEntry(pub String);
+
 /// Состояние клиента: лобби или игра.
 #[derive(Resource, Default, Clone, Copy, PartialEq)]
 pub enum LobbyState {
@@ -60,7 +85,12 @@ const DANGER_BG: Color = Color::srgb(0.42, 0.13, 0.13);
 const DANGER_BG_HOVER: Color = Color::srgb(0.55, 0.17, 0.17);
 
 /// Строит стартовый экран по образцу лобби мини-станции.
-pub fn spawn_lobby(mut commands: Commands, assets: Res<AssetServer>, registry: Res<RsiRegistry>) {
+pub fn spawn_lobby(
+    mut commands: Commands,
+    assets: Res<AssetServer>,
+    registry: Res<RsiRegistry>,
+    settings: Res<crate::settings::Settings>,
+) {
     let logo = assets.load(LOBBY_LOGO);
 
     // Фон: первый кадр mars.rsi, дальше система крутит анимацию.
@@ -192,9 +222,92 @@ pub fn spawn_lobby(mut commands: Commands, assets: Res<AssetServer>, registry: R
                         TextFont::from_font_size(22.0),
                         TextColor(TEXT),
                     ));
+                field_row(center, "Имя", LobbyField::Name, &settings.player_name);
+                field_row(
+                    center,
+                    "Сервер",
+                    LobbyField::Server,
+                    &server_text(&settings),
+                );
+                center
+                    .spawn((
+                        Node {
+                            flex_direction: FlexDirection::Column,
+                            row_gap: px(2),
+                            padding: UiRect::all(px(6)),
+                            ..default()
+                        },
+                        BackgroundColor(PANEL_BG),
+                    ))
+                    .with_children(|list| {
+                        list.spawn((
+                            Text::new("Сохранённые серверы"),
+                            TextFont::from_font_size(12.0),
+                            TextColor(TEXT_DIM),
+                        ));
+                        for entry in &settings.servers {
+                            list.spawn((
+                                ServerEntry(entry.clone()),
+                                Button,
+                                Node {
+                                    padding: UiRect::axes(px(8), px(2)),
+                                    ..default()
+                                },
+                                BackgroundColor(BUTTON_BG),
+                            ))
+                            .with_child((
+                                Text::new(entry.clone()),
+                                TextFont::from_font_size(13.0),
+                                TextColor(TEXT),
+                            ));
+                        }
+                    });
                 wide_button(center, "Готов", LobbyAction::Ready, false);
                 wide_button(center, "Выход", LobbyAction::Quit, true);
             });
+        });
+}
+
+/// Текст адреса сервера для показа (пусто — локальный по умолчанию).
+pub fn server_text(settings: &crate::settings::Settings) -> String {
+    if settings.server.trim().is_empty() {
+        "локальный (127.0.0.1:7777)".to_string()
+    } else {
+        settings.server.clone()
+    }
+}
+
+/// Строка поля: подпись и кликабельное значение (T5.4).
+fn field_row(parent: &mut ChildSpawnerCommands, label: &str, field: LobbyField, value: &str) {
+    parent
+        .spawn((
+            FieldButton(field),
+            Button,
+            Node {
+                width: px(280),
+                min_height: px(32),
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                padding: UiRect::horizontal(px(10)),
+                column_gap: px(8),
+                border: UiRect::all(px(2)),
+                ..default()
+            },
+            BackgroundColor(BUTTON_BG),
+            BorderColor::from(BUTTON_BORDER),
+        ))
+        .with_children(|row| {
+            row.spawn((
+                Text::new(format!("{label}:")),
+                TextFont::from_font_size(13.0),
+                TextColor(TEXT_DIM),
+            ));
+            row.spawn((
+                FieldValue(field),
+                Text::new(value.to_string()),
+                TextFont::from_font_size(14.0),
+                TextColor(TEXT),
+            ));
         });
 }
 
@@ -296,6 +409,7 @@ pub fn lobby_button(
     mut interactions: LobbyButtonQuery,
     mut state: ResMut<LobbyState>,
     mut commands: Commands,
+    mut settings: ResMut<crate::settings::Settings>,
     roots: Query<Entity, With<LobbyRoot>>,
     mut app_exit: MessageWriter<AppExit>,
 ) {
@@ -307,11 +421,21 @@ pub fn lobby_button(
                     if *state == LobbyState::Playing {
                         continue;
                     }
+                    // Сохраняем имя и адрес; новый адрес попадает в список (T5.4).
+                    let address = settings.server.trim().to_string();
+                    if !address.is_empty() && !settings.servers.contains(&address) {
+                        settings.servers.push(address.clone());
+                    }
+                    settings.save();
                     *state = LobbyState::Playing;
                     for root in roots.iter() {
                         commands.entity(root).despawn();
                     }
-                    tracing::info!("lobby: готов — подключение к серверу");
+                    tracing::info!(
+                        name = %settings.player_name,
+                        server = %address,
+                        "lobby: готов — подключение к серверу"
+                    );
                 }
                 LobbyAction::Url(url) => open_url(url),
                 LobbyAction::Quit => {
@@ -348,4 +472,165 @@ fn open_url(url: &str) {
         Ok(_) => tracing::info!(url, "lobby: открываю ссылку"),
         Err(e) => tracing::warn!(url, error = %e, "lobby: не удалось открыть ссылку"),
     }
+}
+
+/// Клики по полям лобби.
+type FieldClicks<'w, 's> = Query<
+    'w,
+    's,
+    (&'static Interaction, &'static FieldButton),
+    (Changed<Interaction>, With<Button>),
+>;
+/// Клики по строкам списка серверов.
+type ServerClicks<'w, 's> = Query<
+    'w,
+    's,
+    (&'static Interaction, &'static ServerEntry),
+    (Changed<Interaction>, With<Button>),
+>;
+
+/// Клик по полю — фокус; клик по сохранённому серверу — подставить адрес.
+pub fn lobby_field_click(
+    mut settings: ResMut<crate::settings::Settings>,
+    mut input: ResMut<LobbyInput>,
+    fields: FieldClicks,
+    entries: ServerClicks,
+) {
+    for (interaction, field) in fields.iter() {
+        if *interaction == Interaction::Pressed {
+            input.focused = Some(field.0);
+            tracing::info!(field = ?field.0, "lobby field focused");
+        }
+    }
+    for (interaction, entry) in entries.iter() {
+        if *interaction == Interaction::Pressed {
+            settings.server = entry.0.clone();
+            settings.save();
+            input.focused = None;
+            tracing::info!(server = %entry.0, "server picked");
+        }
+    }
+}
+
+/// Набор текста в выбранное поле (T5.4).
+pub fn lobby_text_input(
+    mut events: MessageReader<bevy::input::keyboard::KeyboardInput>,
+    mut input: ResMut<LobbyInput>,
+    mut settings: ResMut<crate::settings::Settings>,
+) {
+    use bevy::input::ButtonState;
+    use bevy::input::keyboard::Key;
+    let Some(field) = input.focused else {
+        return;
+    };
+    let mut changed = false;
+    for event in events.read() {
+        if event.state != ButtonState::Pressed {
+            continue;
+        }
+        match &event.logical_key {
+            Key::Enter | Key::Escape => {
+                input.focused = None;
+                changed = true;
+            }
+            Key::Backspace => {
+                let target = match field {
+                    LobbyField::Name => &mut settings.player_name,
+                    LobbyField::Server => &mut settings.server,
+                };
+                target.pop();
+                changed = true;
+            }
+            Key::Space => {
+                let target = match field {
+                    LobbyField::Name => &mut settings.player_name,
+                    LobbyField::Server => &mut settings.server,
+                };
+                // В адресе пробелы не нужны.
+                if field == LobbyField::Name {
+                    target.push(' ');
+                }
+                changed = true;
+            }
+            Key::Character(text) => {
+                let target = match field {
+                    LobbyField::Name => &mut settings.player_name,
+                    LobbyField::Server => &mut settings.server,
+                };
+                if target.chars().count() < 32 {
+                    target.push_str(text);
+                }
+                changed = true;
+            }
+            _ => {}
+        }
+    }
+    if changed {
+        settings.save();
+    }
+}
+
+/// Показывает актуальные значения полей (и подсвечивает активное).
+pub fn lobby_field_text(
+    settings: Res<crate::settings::Settings>,
+    input: Res<LobbyInput>,
+    mut texts: Query<(&mut Text, &FieldValue)>,
+    mut colors: Query<(&mut TextColor, &FieldValue), Without<Text>>,
+) {
+    if !settings.is_changed() && !input.is_changed() {
+        return;
+    }
+    for (mut text, field) in texts.iter_mut() {
+        let value = match field.0 {
+            LobbyField::Name => settings.player_name.clone(),
+            LobbyField::Server => server_text(&settings),
+        };
+        // Курсор на активном поле.
+        let shown = if input.focused == Some(field.0) {
+            format!("{value}_")
+        } else {
+            value
+        };
+        if text.0 != shown {
+            text.0 = shown;
+        }
+    }
+    for (mut color, field) in colors.iter_mut() {
+        let target = if input.focused == Some(field.0) {
+            Color::srgb(1.0, 0.85, 0.45)
+        } else {
+            Color::srgb(0.88, 0.88, 0.90)
+        };
+        if color.0 != target {
+            color.0 = target;
+        }
+    }
+}
+
+/// Тест T5.4: SSR_LOBBY_AUTO=1 — через 3 секунды сам жмёт «Готов» (проверка
+/// связки «лобби → адрес/имя из настроек → Connect» без кликов мышью).
+pub fn lobby_auto_ready(
+    time: Res<Time>,
+    mut elapsed: Local<f32>,
+    mut state: ResMut<LobbyState>,
+    mut commands: Commands,
+    settings: Res<crate::settings::Settings>,
+    roots: Query<Entity, With<LobbyRoot>>,
+) {
+    if std::env::var_os("SSR_LOBBY_AUTO").is_none() || *state == LobbyState::Playing {
+        return;
+    }
+    *elapsed += time.delta_secs();
+    if *elapsed < 3.0 {
+        return;
+    }
+    *state = LobbyState::Playing;
+    for root in roots.iter() {
+        commands.entity(root).despawn();
+    }
+    tracing::info!(
+        name = %settings.player_name,
+        server = %server_text(&settings),
+        "lobby-auto: готов — подключение"
+    );
 }
