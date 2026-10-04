@@ -106,6 +106,14 @@ pub struct LightMap {
     overlay_dim: (u32, u32),
 }
 
+impl LightMap {
+    /// Сущности слоёв CPU-пути (тьма и оттенок ламп) — их скрывает
+    /// `light_gpu::overlay::sync_light_overlay`, когда свет считает GPU.
+    pub fn sprites(&self) -> [Entity; 2] {
+        [self.sprite, self.glow_sprite]
+    }
+}
+
 /// Отпечаток мира: при изменении карта пересобирается.
 #[derive(Default, PartialEq, Clone)]
 pub(crate) struct WorldState {
@@ -177,16 +185,27 @@ pub struct GpuLight {
 /// Сцена света для GPU-конвейера: окклюдеры из тайлов, источники и камера.
 /// Заполняется при каждом пересчёте карты света — та же подписка на изменения
 /// мира, поэтому CPU- и GPU-пути не расходятся.
+///
+/// Камера и глаз обновляются каждый кадр (они едут за игроком), а геометрия
+/// (стены и источники) — только при изменении мира: `generation` растёт на
+/// каждую пересборку, и рендер-мир по ней решает, перезаливать ли буферы.
 #[derive(Resource, Default)]
 pub struct LightScene {
     pub walls: Vec<ssr_core::occluders::OccluderSegment>,
     pub lights: Vec<GpuLight>,
+    /// Прямоугольники сплошных тайлов (стены и закрытые двери) в мировых
+    /// единицах: `(x0, y0, x1, y1)`. Нужны GPU-пути как аналог стенсила движка
+    /// (`ApplyLightingFovToBuffer`): на стенах маска видимости НЕ гасит свет,
+    /// поэтому стены остаются видны (просачивание, `wall-bleed-blur`).
+    pub wall_tiles: Vec<[f32; 4]>,
     /// Левый-нижний угол видимой области мира (кадр 21×15 тайлов, как у камеры).
     pub camera: (f32, f32),
     /// Размер видимой области в мировых единицах (672×480).
     pub viewport: (f32, f32),
     /// Позиция глаза (свой игрок) — центр карты FOV.
     pub eye: (f32, f32),
+    /// Подпись геометрии: 0 — сцена ещё не собиралась.
+    pub generation: u64,
 }
 
 /// Создаёт картинки карты света и спрайты.
@@ -273,14 +292,26 @@ pub fn update_lighting(
         (player_position.0[0] / TILE_UNITS).floor() as i32,
         (player_position.0[1] / TILE_UNITS).floor() as i32,
     );
+    // Аспект окна: видимая область мира — 15 тайлов в высоту, по ширине окно
+    // (у широких мониторов видно больше тайлов). Нужен и карте света (окно
+    // карты по вьюпорту), и сцене GPU-конвейера (та же область).
+    let aspect = windows
+        .iter()
+        .next()
+        .map(|window| (window.width() / window.height().max(1.0)).clamp(1.0, 4.0))
+        .unwrap_or(16.0 / 9.0);
 
-    // Спрайты центрируем каждый кадр по игроку (дёшево), карту — по изменениям.
+    // Спрайты центрируем каждый кадр (дёшево), карту — по изменениям.
+    // При GPU-пути слой тьмы рисует квад конвейера, спрайты CPU скрыты.
     let center_x = (player_tile.0 as f32 + 0.5) * TILE_UNITS;
     let center_y = (player_tile.1 as f32 + 0.5) * TILE_UNITS;
-    for sprite in [map.sprite, map.glow_sprite] {
-        if let Ok(mut transform) = transforms.get_mut(sprite) {
-            transform.translation.x = center_x;
-            transform.translation.y = center_y;
+    let gpu = crate::light_gpu::overlay::gpu_lighting();
+    if !gpu {
+        for sprite in [map.sprite, map.glow_sprite] {
+            if let Ok(mut transform) = transforms.get_mut(sprite) {
+                transform.translation.x = center_x;
+                transform.translation.y = center_y;
+            }
         }
     }
 
@@ -314,34 +345,6 @@ pub fn update_lighting(
             .wrapping_mul(33)
             .wrapping_add(chunk.coords.0 as u64 ^ chunk.coords.1 as u64);
     }
-    // Сцена для GPU-конвейера: окклюдеры строит core (грани стен без общих
-    // рёбер — правило движка), источники — в мировых единицах.
-    if let Some(mut scene) = scene {
-        let chunk_refs: Vec<&TileChunkData> = chunks.iter().collect();
-        scene.walls = ssr_core::occluders::build_occluders(&chunk_refs, &closed_doors);
-        scene.lights = lamps
-            .iter()
-            .filter(|(_, _, powered)| powered.map(|p| p.0).unwrap_or(true))
-            .map(|(light, position, _)| GpuLight {
-                position: (position.0[0], position.0[1]),
-                radius: light.radius * TILE_UNITS,
-                energy: light.energy,
-                falloff: FALLOFF,
-                curve: 0.0,
-                color: [
-                    light.color[0] as f32 / 255.0,
-                    light.color[1] as f32 / 255.0,
-                    light.color[2] as f32 / 255.0,
-                ],
-            })
-            .collect();
-        let center = (player_position.0[0], player_position.0[1]);
-        let viewport = (VIEWPORT_TILES.0 * TILE_UNITS, VIEWPORT_TILES.1 * TILE_UNITS);
-        scene.camera = (center.0 - viewport.0 * 0.5, center.1 - viewport.1 * 0.5);
-        scene.viewport = viewport;
-        scene.eye = center;
-    }
-
     let signature = WorldState {
         player_tile,
         lamps: lamp_state.clone(),
@@ -357,6 +360,66 @@ pub fn update_lighting(
         probe != *state
     };
     let tile_changed = signature.player_tile != state.player_tile;
+    // Сцена для GPU-конвейера: камера и глаз едут за игроком каждый кадр,
+    // окклюдеры и источники пересобираются только при изменении мира
+    // (построение окклюдеров — проход по всем тайлам чанков, в кадре ему не место).
+    if let Some(mut scene) = scene {
+        if geometry_changed || scene.generation == 0 {
+            let chunk_refs: Vec<&TileChunkData> = chunks.iter().collect();
+            scene.walls = ssr_core::occluders::build_occluders(&chunk_refs, &closed_doors);
+            // Сплошные тайлы — для маски стен на GPU (стенсил движка).
+            let mut wall_tiles: Vec<[f32; 4]> = Vec::new();
+            for chunk in chunks.iter() {
+                let base = (
+                    chunk.coords.0 * CHUNK_TILES as i32,
+                    chunk.coords.1 * CHUNK_TILES as i32,
+                );
+                for ly in 0..CHUNK_TILES {
+                    for lx in 0..CHUNK_TILES {
+                        let tx = base.0 + lx as i32;
+                        let ty = base.1 + ly as i32;
+                        if !ssr_core::occluders::is_solid(chunk.get_local(lx, ly))
+                            && !closed_doors.contains(&(tx, ty))
+                        {
+                            continue;
+                        }
+                        let (x0, y0) = (tx as f32 * TILE_UNITS, ty as f32 * TILE_UNITS);
+                        wall_tiles.push([x0, y0, x0 + TILE_UNITS, y0 + TILE_UNITS]);
+                    }
+                }
+            }
+            scene.wall_tiles = wall_tiles;
+            scene.lights = lamps
+                .iter()
+                .filter(|(_, _, powered)| powered.map(|p| p.0).unwrap_or(true))
+                .map(|(light, position, _)| GpuLight {
+                    position: (position.0[0], position.0[1]),
+                    radius: light.radius * TILE_UNITS,
+                    energy: light.energy,
+                    falloff: FALLOFF,
+                    curve: 0.0,
+                    color: [
+                        light.color[0] as f32 / 255.0,
+                        light.color[1] as f32 / 255.0,
+                        light.color[2] as f32 / 255.0,
+                    ],
+                })
+                .collect();
+            scene.generation = scene.generation.wrapping_add(1);
+        }
+        let center = (player_position.0[0], player_position.0[1]);
+        // Видимая область — как у камеры: 15 тайлов в высоту, по ширине окно
+        // (у 16:9 это ~26.7 тайла, а не 21 из `VIEWPORT_TILES`): карта света
+        // конвейера обязана накрывать ВЕСЬ кадр, иначе по краям экрана свет
+        // пропадёт.
+        let viewport = (
+            (VIEWPORT_TILES.1 * aspect).ceil() * TILE_UNITS,
+            VIEWPORT_TILES.1 * TILE_UNITS,
+        );
+        scene.camera = (center.0 - viewport.0 * 0.5, center.1 - viewport.1 * 0.5);
+        scene.viewport = viewport;
+        scene.eye = center;
+    }
     if !tile_changed && !geometry_changed && map.ready {
         return;
     }
@@ -365,9 +428,12 @@ pub fn update_lighting(
     // на тайл и возвращался через 0.05 с («экран мигает после каждого шага»).
     *state = signature;
     map.ready = true;
-    use ssr_core::light::{
-        NO_OCCLUDER, attenuation, chebyshev_upper_bound, ray_segment_distance,
-    };
+    // GPU-путь считается в compute-шейдерах (`light_gpu`): CPU-карта тьмы и
+    // оттенка не нужна (её слои скрыты). CPU-путь остаётся фолбэком.
+    if gpu {
+        return;
+    }
+    use ssr_core::light::{NO_OCCLUDER, attenuation, chebyshev_upper_bound, ray_segment_distance};
     let rebuild_started = std::time::Instant::now();
 
     // Чанки — в хеш-таблицу: раньше каждый тайл сканировал все чанки линейно.
@@ -503,8 +569,7 @@ pub fn update_lighting(
                 samples[0] = plus;
                 mindist = mindist.min(plus);
             } else {
-                let minus =
-                    sample_map(map, diff.0 - offset.0, diff.1 - offset.1, LAMP_BINS);
+                let minus = sample_map(map, diff.0 - offset.0, diff.1 - offset.1, LAMP_BINS);
                 samples[k] = plus;
                 samples[k + 3] = minus;
                 mindist = mindist.min(plus).min(minus);
@@ -530,7 +595,6 @@ pub fn update_lighting(
         }
         occlusion / total.max(1e-4)
     };
-
 
     // Окно поля: вокруг центра чанка игрока, но не больше карты и не шире
     // `FIELD_MAX_TILES` (импортированные карты бывают очень большими).
@@ -588,7 +652,8 @@ pub fn update_lighting(
         map.field_valid = true;
         map.contrib.clear();
         map.field.clear();
-        map.field.resize((field_dim_x * field_dim_y) as usize, AMBIENT);
+        map.field
+            .resize((field_dim_x * field_dim_y) as usize, AMBIENT);
         map.tint_field.clear();
         map.tint_field
             .resize((field_dim_x * field_dim_y) as usize, [0.0; 3]);
@@ -759,12 +824,8 @@ pub fn update_lighting(
     // Окно — прямоугольник по вьюпорту (в движке кадр 21×15 тайлов), а не
     // квадрат 33×33: пересчёт идёт на КАЖДЫЙ шаг игрока, а квадрат считал
     // втрое больше текселей, чем видно на экране. Размер берётся по вьюпорту
-    // (у широких мониторов он шире), с полями в пару тайлов.
-    let aspect = windows
-        .iter()
-        .next()
-        .map(|window| (window.width() / window.height().max(1.0)).clamp(1.0, 4.0))
-        .unwrap_or(16.0 / 9.0);
+    // (у широких мониторов он шире), с полями в пару тайлов. Аспект посчитан
+    // выше — он же задаёт видимую область в сцене GPU-конвейера.
     let overlay_tiles = (
         // Чётные размеры: центр текстуры попадает ровно на тайл игрока.
         (((VIEWPORT_TILES.1 * aspect).ceil() as i32 + 3) & !1).max(8),
@@ -843,18 +904,15 @@ pub fn update_lighting(
     // видно по `wall-bleed`).
     for ty in 1..mask_dim_y - 1 {
         for tx in 1..mask_dim_x - 1 {
-            let tile = (
-                (tx / MASK_SUBTEXELS) as i32,
-                (ty / MASK_SUBTEXELS) as i32,
-            );
+            let tile = ((tx / MASK_SUBTEXELS) as i32, (ty / MASK_SUBTEXELS) as i32);
             if !wall_at(tile.0, tile.1) {
                 continue;
             }
             let index = (ty * mask_dim_x + tx) as usize;
             let mut visible_best = visible[index];
             for (dx, dy) in [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
-                let neighbor = (((ty as i32 + dy) as u32) * mask_dim_x
-                    + ((tx as i32 + dx) as u32)) as usize;
+                let neighbor =
+                    (((ty as i32 + dy) as u32) * mask_dim_x + ((tx as i32 + dx) as u32)) as usize;
                 visible_best = visible_best.max(visible[neighbor]);
             }
             visible[index] = visible_best;
@@ -918,12 +976,16 @@ pub fn update_lighting(
     let field_tint = |lx: u32, ly: u32| -> [f32; 3] {
         let (x0, x1, y0, y1, tx, ty) = field_coords(lx, ly);
         let mut rgb = [0.0f32; 3];
-        let (i00, i01, i10, i11) = (y0 * fdim + x0, y0 * fdim + x1, y1 * fdim + x0, y1 * fdim + x1);
+        let (i00, i01, i10, i11) = (
+            y0 * fdim + x0,
+            y0 * fdim + x1,
+            y1 * fdim + x0,
+            y1 * fdim + x1,
+        );
         for (channel, slot) in rgb.iter_mut().enumerate() {
-            let top = map.tint_field[i00][channel] * (1.0 - tx)
-                + map.tint_field[i01][channel] * tx;
-            let bottom = map.tint_field[i10][channel] * (1.0 - tx)
-                + map.tint_field[i11][channel] * tx;
+            let top = map.tint_field[i00][channel] * (1.0 - tx) + map.tint_field[i01][channel] * tx;
+            let bottom =
+                map.tint_field[i10][channel] * (1.0 - tx) + map.tint_field[i11][channel] * tx;
             *slot = top * (1.0 - ty) + bottom * ty;
         }
         rgb
@@ -1019,8 +1081,7 @@ pub fn update_lighting(
                 glow_data[target] = ((rgb[0] / norm) * 255.0) as u8;
                 glow_data[target + 1] = ((rgb[1] / norm) * 255.0) as u8;
                 glow_data[target + 2] = ((rgb[2] / norm) * 255.0) as u8;
-                glow_data[target + 3] =
-                    ((contribution * mask * GLOW_ALPHA).min(1.0) * 255.0) as u8;
+                glow_data[target + 3] = ((contribution * mask * GLOW_ALPHA).min(1.0) * 255.0) as u8;
             }
         }
     }
@@ -1036,4 +1097,3 @@ pub fn update_lighting(
         "light map rebuilt"
     );
 }
-

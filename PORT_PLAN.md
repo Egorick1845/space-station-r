@@ -15,7 +15,7 @@
 
 | # | Механика | Источники в сборке | У нас сейчас | Что сделать |
 |---|---|---|---|---|
-| 1.1 | Свет и FOV (GPU-конвейер) | `Robust.Client/Graphics/Clyde/Clyde.LightRendering.cs`, `Resources/Shaders/Internal/{light_shared,light-soft,light-hard,shadow_cast_shared,light-blur,wall-bleed-blur,wall-merge,fov-lighting,fov_shared,fov}.swsl`, `Shaders/shadow-depth.{vert,frag}` | **CPU-путь даёт ту же математику** и признан владельцем годным: 512-биновые полярные карты на источник, 7-PCF `light-soft` с VSM-Chebyshev, маска глаза одной выборкой (`fov-lighting`), wall-bleed, поле света по всей карте (тексель = 1/8 тайла), пересчёт 5 мс при ходьбе. Каркас GPU-пути (WGSL-шейдеры, текстуры, униформы, буферы, `LightPipelines`/`LightBindings`) компилируется, но в рендер-мир не подключён | Осталось: регистрация `prepare_light_pipelines` и цепочки проходов в `Core2d` перед основным, применить карту к миру, CPU — фолбэк (нужно только для перфа на больших картах) |
+| 1.1 | Свет и FOV (GPU-конвейер) | `Robust.Client/Graphics/Clyde/Clyde.LightRendering.cs`, `Resources/Shaders/Internal/{light_shared,light-soft,light-hard,shadow_cast_shared,light-blur,wall-bleed-blur,wall-merge,fov-lighting,fov_shared,fov}.swsl`, `Shaders/shadow-depth.{vert,frag}` | **готово**: GPU-путь подключён — `extract_light` (ExtractSchedule) → буферы/пайплайны в `RenderSystems::PrepareResources` → цепочка проходов в `Core2d`/`Core2dSystems::Prepass` (тени лучами, FOV, карта света, маска стен-стенсил, блюр, просачивание), оверлей мира — материал-умножение (`COLOR * LIGHT`). CPU-путь (`update_lighting`) — фолбэк под `SSR_LIGHT_CPU=1`, признан владельцем годным | Осталось: карта света пока 960×540 (подогнать под окно, как `light.resolution_scale = 0.5`) и профилирование (T7.5) |
 | 1.2 | Спрайты, слои, порядок отрисовки | `Robust.Client/GameObjects/Systems/SpriteSystem.cs` (слои, `SpriteComponent.Layer`, `DrawDepth`), `SpriteOrdering` | частичная (тело, одежда, предметы) | Перенести модель слоёв и `DrawDepth` (порядок мира), выравнивание по Y как в движке |
 | 1.3 | Тайлы и IconSmooth | `IconSmoothSystem`/`IconSmoothComponent`, `SetCornerLayers` | своя логика (уже сверена: SE→0, NE→2, NW→1, SW→3) | Перенести полностью из компонента, включая диагональные варианты и «слои углов»; тест на эталонные тайлы |
 | 1.4 | Окна интерфейса по XAML | `Content.Client/**/*.xaml` + `Stylesheets/StyleNano.cs` | стекло-тема, слоты, хотбар, инвентарь, спавн-меню (факты в SS14_UI.md) | Довести каждое окно 1:1: размеры, отступы, шрифты, цвета, позиции (HotbarGui, InventoryGui, StorageWindow, EntitySpawnWindow, VerbMenu, Chat, Admin) |
@@ -85,6 +85,9 @@
 
 ## Ближайшие три работы (в порядке старта)
 
-1. **1.1** — проводка GPU-конвейера света (всё готово: SS14_LIGHTING.md §7).
+1. **1.1** — проводка GPU-конвейера света: **сделана** (сверка с CPU-путём A/B на
+   одном спавне, `target/ab_light.ps1`); остались размер карты под окно и
+   профилирование (T7.5).
 2. **1.7 + 1.6** — ящики как EntityStorage (убрать сетку) и фантом/подсветка формы предмета.
-3. **2.2 + 2.3** — бег/спринт и выносливость по числам из таблиц.
+3. **Вербы предмета** — остаток по отчёту о `VerbSystem` (взять в руку, надеть,
+   снять, убрать в рюкзак) и админ-команды из сборки (пункт 3 очереди запросов).

@@ -191,6 +191,17 @@ fn main() {
             .load("shaders/light.wgsl");
         app.insert_resource(light_gpu::prepare::LightShader(shader));
     }
+    // Оверлей мира по GPU-карте света: материал-умножение (как `COLOR * LIGHT`
+    // в движке) и системы рендер-мира (пайплайны, буферы, цепочка проходов).
+    app.add_plugins(bevy::sprite_render::Material2dPlugin::<
+        light_gpu::overlay::LightOverlayMaterial,
+    >::default());
+    light_gpu::install_render_systems(&mut app);
+    app.add_systems(
+        Startup,
+        light_gpu::overlay::setup_light_overlay.after(light_gpu::setup_light_gpu),
+    );
+    app.add_systems(Update, light_gpu::overlay::sync_light_overlay);
     // FPS-диагностика нужна строке FPS в углу (включается в настройках).
     app.add_plugins(bevy::diagnostic::FrameTimeDiagnosticsPlugin::default());
     // RsiRegistry строится сразу после DefaultPlugins: нужен и игроку (обезьяна),

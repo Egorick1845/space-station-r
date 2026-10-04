@@ -32,6 +32,11 @@ struct Wall {
     ab: vec4<f32>,
 };
 
+struct WallTile {
+    // Мировой прямоугольник тайла стены: (x0, y0, x1, y1).
+    rect: vec4<f32>,
+};
+
 struct Light {
     // (x, y) — позиция, radius, energy, falloff, curve, (r, g, b) — цвет.
     data: vec4<f32>,   // x, y, radius, energy
@@ -45,6 +50,7 @@ struct Params {
     camera: vec2<f32>,
     light_count: u32,
     wall_count: u32,
+    wall_tile_count: u32,
     // Карта света: её размер и размер вьюпорта.
     map_size: vec2<f32>,
     viewport: vec2<f32>,
@@ -71,6 +77,20 @@ struct Params {
 // читаем (одна и та же текстура не может быть storage и sampled в одном проходе).
 @group(0) @binding(5) var dst: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(6) var src: texture_2d<f32>;
+// Те же полярные карты для ЧТЕНИЯ в шейдере карты света: текстура не может быть
+// и storage, и sampled в одном пайплайне, поэтому хост даёт на них отдельные
+// привязки (движок тоже разводит запись и чтение по проходам). Объявления — до
+// первого использования: WGSL требует порядок «объявил → применил».
+@group(0) @binding(7) var shadow_map_read: texture_2d<f32>;
+@group(0) @binding(8) var fov_read: texture_2d<f32>;
+// Маска стен: тайлы стен (и закрытых дверей) мировыми прямоугольниками плюс
+// готовая маска карты света. Аналог стенсила движка (`ApplyLightingFovToBuffer`):
+// на стенах маска видимости НЕ гасит свет, поэтому стены остаются видны
+// (просачивание света, `wall-bleed-blur`). Маска пишется проходом `wall_mask_cs`
+// и обнуляется в `light_map_cs` каждый кадр.
+@group(0) @binding(9) var<storage, read> wall_tiles: array<WallTile>;
+@group(0) @binding(10) var wall_mask: texture_storage_2d<r8unorm, write>;
+@group(0) @binding(11) var wall_mask_read: texture_2d<f32>;
 
 const SHADOW_BINS: u32 = 512u; // ShadowMapSize в движке
 const FOV_BINS: u32 = 2048u;   // FovMapSize в движке
@@ -126,7 +146,9 @@ fn shadow_map_cs(@builtin(global_invocation_id) id: vec3<u32>) {
     let angle = (f32(id.x) / f32(SHADOW_BINS)) * 2.0 * PI - PI;
     let dist = bin_distance(light_pos, angle);
     // VSM: моменты (d, d²). Дисперсию, как в движке, добавляем из малой дельты.
-    let moment = vec2<f32>(dist, dist * dist + 0.25);
+    // Запись в storage-текстуру идёт вектором из четырёх компонент (у `rg32float`
+    // значимы первые две — моменты; naga требует полный vec4).
+    let moment = vec4<f32>(dist, dist * dist + 0.25, 0.0, 0.0);
     textureStore(shadow_map, vec2<i32>(i32(id.x), i32(id.y)), moment);
 }
 
@@ -216,6 +238,10 @@ fn light_map_cs(@builtin(global_invocation_id) id: vec3<u32>) {
     let world = params.camera + uv * params.viewport;
 
     var rgb = vec3<f32>(params.ambient);
+    // Маска стен обнуляется здесь же: проход карты света — единственный, кто
+    // обходит ВСЕ тексели карты (у маски отдельный проход только по тайлам стен,
+    // и без обнуления снятая стена осталась бы «видимой» навсегда).
+    textureStore(wall_mask, vec2<i32>(i32(id.x), i32(id.y)), vec4<f32>(0.0));
     for (var i = 0u; i < params.light_count; i = i + 1u) {
         let light = lights[i];
         let diff = world - light.data.xy;
@@ -240,11 +266,8 @@ fn light_map_cs(@builtin(global_invocation_id) id: vec3<u32>) {
     textureStore(dst, vec2<i32>(i32(id.x), i32(id.y)), out);
 }
 
-/// Полярные карты для чтения в шейдере карты света (текстуры не могут быть
-/// и storage, и sampled в одном пайплайне — движок тоже использует отдельные
-/// проходы). Здесь только чтение.
-@group(0) @binding(7) var shadow_map_read: texture_2d<f32>;
-
+/// Полярные карты для чтения в шейдере карты света (объявлены вверху, у
+/// остальных привязок: WGSL требует объявление до использования).
 /// Размытие карты света (гаусс из `light-blur.swsl`), направление — из параметров
 /// (у нас оба прохода — одна и та же функция с разным `dir`).
 @compute @workgroup_size(8, 8)
@@ -266,9 +289,44 @@ fn blur_cs(@builtin(global_invocation_id) id: vec3<u32>) {
     textureStore(dst, coord, sum);
 }
 
+/// Маска стен: один воркгрупп (8×8) на тайл стены — каждый поток пишет свою
+/// долю текселей прямоугольника тайла. Все потоки разных тайлов пишут одно и то
+/// же значение (1), гонки безвредны. Аналог отрисовки стен в стенсил в движке.
+@compute @workgroup_size(8, 8)
+fn wall_mask_cs(
+    @builtin(workgroup_id) wg: vec3<u32>,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+) {
+    if wg.x >= params.wall_tile_count {
+        return;
+    }
+    let rect = wall_tiles[wg.x].rect;
+    let map = vec2<i32>(params.map_size);
+    let uv0 = (rect.xy - params.camera) / params.viewport;
+    let uv1 = (rect.zw - params.camera) / params.viewport;
+    let lo = clamp(vec2<i32>(floor(uv0 * params.map_size)), vec2<i32>(0), map);
+    let hi = clamp(vec2<i32>(ceil(uv1 * params.map_size)), vec2<i32>(0), map);
+    var y = lo.y + i32(lid.y);
+    loop {
+        if y >= hi.y {
+            break;
+        }
+        var x = lo.x + i32(lid.x);
+        loop {
+            if x >= hi.x {
+                break;
+            }
+            textureStore(wall_mask, vec2<i32>(x, y), vec4<f32>(1.0));
+            x = x + 8;
+        }
+        y = y + 8;
+    }
+}
+
 /// Умножение карты света на видимость глаза (`fov-lighting.swsl`):
 /// `occlusion = Chebyshev(момент FOV, расстояние)`, при полной видимости — без
-/// изменений, иначе свет гасится (occludeColor чёрный).
+/// изменений, иначе свет гасится (occludeColor чёрный). На тайлах стен маска не
+/// гасит свет — как стенсил `ApplyLightingFovToBuffer` в движке.
 @compute @workgroup_size(8, 8)
 fn light_apply_fov_cs(@builtin(global_invocation_id) id: vec3<u32>) {
     let map = vec2<u32>(params.map_size);
@@ -282,7 +340,10 @@ fn light_apply_fov_cs(@builtin(global_invocation_id) id: vec3<u32>) {
     let u = polar_bin(rel.x, rel.y, f32(FOV_BINS));
     let bin = clamp(i32(round(u)), 0, i32(FOV_BINS) - 1);
     let wall_dist = textureLoad(fov_read, vec2<i32>(bin, 0), 0).x;
-    let occlusion = chebyshev(vec2<f32>(wall_dist, wall_dist * wall_dist + 0.25), our_dist);
+    var occlusion = chebyshev(vec2<f32>(wall_dist, wall_dist * wall_dist + 0.25), our_dist);
+    // Стена не гасится маской видимости (стенсил движка).
+    let wall = textureLoad(wall_mask_read, vec2<i32>(i32(id.x), i32(id.y)), 0).x;
+    occlusion = max(occlusion, wall);
     var color = textureLoad(src, vec2<i32>(i32(id.x), i32(id.y)), 0);
     color = color * occlusion;
     // Тьма оверлея считается заново: alpha = 1 − свет (движок рисует
@@ -291,5 +352,3 @@ fn light_apply_fov_cs(@builtin(global_invocation_id) id: vec3<u32>) {
     let alpha = max(1.0 - luminance, 1.0 - occlusion);
     textureStore(dst, vec2<i32>(i32(id.x), i32(id.y)), vec4<f32>(color.rgb, alpha));
 }
-
-@group(0) @binding(8) var fov_read: texture_2d<f32>;
