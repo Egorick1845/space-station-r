@@ -331,6 +331,9 @@ const FOOT_SPRINT_RATE: f32 = 1.2025;
 const FOOT_MIN_SLOW: f32 = 0.35;
 const FOOT_MAX_SLOW: f32 = 1.1;
 const FOOT_MIN_SPEED_SQR: f32 = 0.04;
+/// Порог и крит выносливости — те же числа, что в ядре (`StaminaComponent`).
+const BREATHING_THRESHOLD: f32 = ssr_core::stamina::BREATHING_THRESHOLD;
+const CRIT_THRESHOLD: f32 = ssr_core::stamina::CRIT_THRESHOLD;
 const FOOT_AMPLITUDE: f32 = 2.5 / 32.0;
 /// Юнитов мира в тайле (скорость в сборке — метры/с, 1 тайл = 1 м).
 const TILE_UNITS: f32 = ssr_core::tiles::TILE_PX as f32;
@@ -352,6 +355,8 @@ pub fn foot_walk_animation(
     mut walk: Local<std::collections::HashMap<Entity, FootPhase>>,
     mut parts: Query<(&HumanoidPart, &mut Transform)>,
     owners: Query<&GlobalTransform, Without<HumanoidPart>>,
+    visuals: Query<&crate::inventory_ui::RemotePlayerVisual>,
+    staminas: Query<&ssr_core::stamina::Stamina>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
@@ -394,20 +399,63 @@ pub fn foot_walk_animation(
         entry.phase += dt * FOOT_CYCLE_SPEED * rate * slow;
         phases.insert(part.owner, entry.phase);
     }
+    // Дыхание при усталости (`StaminaComponent`: порог 50, частота
+    // 0.25 + шаг×1.75 Гц, подъём 0.04 + шаг×0.04 юнита; первая половина цикла —
+    // вверх, затем вниз до −12.5 % амплитуды и возврат).
+    let elapsed = time.elapsed_secs();
+    let mut breathing: std::collections::HashMap<Entity, f32> = std::collections::HashMap::new();
+    for (part, _) in parts.iter() {
+        if breathing.contains_key(&part.owner) {
+            continue;
+        }
+        let player = visuals
+            .get(part.owner)
+            .map(|visual| visual.player)
+            .unwrap_or(part.owner);
+        let Ok(stamina) = staminas.get(player) else {
+            breathing.insert(part.owner, 0.0);
+            continue;
+        };
+        if !stamina.breathing() {
+            breathing.insert(part.owner, 0.0);
+            continue;
+        }
+        let step = ((stamina.damage - BREATHING_THRESHOLD)
+            / (CRIT_THRESHOLD - BREATHING_THRESHOLD))
+            .clamp(0.0, 1.0);
+        let frequency = 0.25 + step * 1.75;
+        let amplitude = 0.04 + step * 0.04;
+        let phase = (elapsed * frequency).fract();
+        let wave = if phase < 0.5 {
+            (phase * 2.0 * std::f32::consts::PI).sin()
+        } else {
+            -0.125 * ((phase - 0.5) * 2.0 * std::f32::consts::PI).sin()
+        };
+        breathing.insert(part.owner, wave * amplitude);
+    }
     for (part, mut transform) in parts.iter_mut() {
         let name = part.key.rsplit('#').next().unwrap_or_default();
         let left = name.starts_with("l_leg") || name.starts_with("l_foot");
         let right = name.starts_with("r_leg") || name.starts_with("r_foot");
-        if !left && !right {
-            continue;
-        }
-        let phase = phases.get(&part.owner).copied().unwrap_or(0.0);
-        let wave = if left {
-            phase.sin().max(0.0)
+        let foot = if left {
+            phases
+                .get(&part.owner)
+                .copied()
+                .map(|phase| phase.sin().max(0.0))
+                .unwrap_or(0.0)
+        } else if right {
+            phases
+                .get(&part.owner)
+                .copied()
+                .map(|phase| (phase + std::f32::consts::PI).sin().max(0.0))
+                .unwrap_or(0.0)
         } else {
-            (phase + std::f32::consts::PI).sin().max(0.0)
+            // Руки и прочие части в шаге не участвуют (как в сборке), но дышат
+            // вместе с телом.
+            0.0
         };
-        transform.translation.y = wave * FOOT_AMPLITUDE;
+        let breath = breathing.get(&part.owner).copied().unwrap_or(0.0);
+        transform.translation.y = breath + foot * FOOT_AMPLITUDE;
     }
 }
 
