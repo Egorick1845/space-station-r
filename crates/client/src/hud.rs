@@ -39,6 +39,8 @@ pub struct PlacementGhost;
 pub struct HudState {
     pub spawn_open: bool,
     pub admin_open: bool,
+    /// Окно «Телепорт призрака» (`MiniGhostTargetWindow` в SS14).
+    pub warp_open: bool,
     pub combat: bool,
     pub search: String,
 }
@@ -52,6 +54,8 @@ pub enum HudAction {
     ToggleSpawn,
     /// Админ-меню (F7).
     ToggleAdmin,
+    /// Окно телепорта призрака (кнопка панели призрака).
+    GhostWarp,
     /// Меню настроек (Esc).
     OpenSettings,
     /// Боевой режим (F).
@@ -115,8 +119,7 @@ fn button_bg(hovered: bool, pressed: bool) -> BackgroundColor {
     }
 }
 
-/// Тонируемая картинка кнопки: цвета состояний (аналог `ModulateSelfOverride`
-/// у `MenuButton` в SS14).
+/// Тонировка фона кнопки (стеклянные кнопки StyleNano).
 #[derive(Component)]
 pub struct HudTint {
     pub normal: Color,
@@ -125,21 +128,48 @@ pub struct HudTint {
 }
 
 impl HudTint {
-    /// Тонирование обычной кнопки SS14 (`ButtonColor*` из StyleNano).
+    /// Обычная кнопка интерфейса (`glassButton*` из StyleNano).
     pub fn button() -> Self {
         Self {
-            normal: crate::ui_theme::BUTTON_DEFAULT,
-            hovered: crate::ui_theme::BUTTON_HOVERED,
-            pressed: crate::ui_theme::BUTTON_PRESSED,
+            normal: crate::ui_theme::GLASS_BUTTON,
+            hovered: crate::ui_theme::GLASS_BUTTON_HOVERED,
+            pressed: crate::ui_theme::GLASS_BUTTON_PRESSED,
         }
     }
 
-    /// Тонирование иконки верхней панели (`MenuButton.Color*`).
-    pub fn icon() -> Self {
+    fn color(&self, state: crate::ui_theme::UiButtonState) -> Color {
+        match state {
+            crate::ui_theme::UiButtonState::Normal => self.normal,
+            crate::ui_theme::UiButtonState::Hovered => self.hovered,
+            crate::ui_theme::UiButtonState::Pressed => self.pressed,
+        }
+    }
+}
+
+/// Тонировка иконки (`MenuButton.Color*` и `StyleBase` для крестиков).
+#[derive(Component)]
+pub struct IconTint {
+    pub normal: Color,
+    pub hovered: Color,
+    pub pressed: Color,
+}
+
+impl IconTint {
+    /// Иконка верхней панели (MenuButton).
+    pub fn menu() -> Self {
         Self {
             normal: crate::ui_theme::TOP_ICON,
             hovered: crate::ui_theme::TOP_ICON_HOVERED,
             pressed: crate::ui_theme::TOP_ICON_PRESSED,
+        }
+    }
+
+    /// Крестик закрытия окна (`StyleBase`: #4B596A / #7F3636 / #753131).
+    pub fn cross() -> Self {
+        Self {
+            normal: Color::srgb_u8(0x4b, 0x59, 0x6a),
+            hovered: Color::srgb_u8(0x7f, 0x36, 0x36),
+            pressed: Color::srgb_u8(0x75, 0x31, 0x31),
         }
     }
 
@@ -158,27 +188,36 @@ type TintedButtons<'w, 's> = Query<
     's,
     (
         &'static Interaction,
-        &'static HudTint,
-        &'static mut ImageNode,
+        Option<&'static HudTint>,
+        Option<&'static IconTint>,
+        &'static mut BackgroundColor,
+        Option<&'static mut ImageNode>,
         Option<&'static Children>,
     ),
     (Changed<Interaction>, With<Button>),
 >;
 
-/// Перекрашивает текстурные кнопки HUD при наведении/нажатии.
+/// Перекрашивает кнопки и их иконки при наведении/нажатии.
 pub fn hud_button_tint(
     mut buttons: TintedButtons,
-    mut icons: Query<(&HudTint, &mut ImageNode), Without<Button>>,
+    mut child_icons: Query<(&IconTint, &mut ImageNode), Without<Button>>,
 ) {
-    for (interaction, tint, mut image, children) in buttons.iter_mut() {
+    for (interaction, bg_tint, icon_tint, mut background, image, children) in buttons.iter_mut() {
         let state = crate::ui_theme::UiButtonState::from_interaction(interaction);
-        image.color = tint.color(state);
+        if let Some(tint) = bg_tint {
+            background.0 = tint.color(state);
+        }
+        if let Some(mut image) = image
+            && let Some(tint) = icon_tint
+        {
+            image.color = tint.color(state);
+        }
         let Some(children) = children else {
             continue;
         };
         for child in children.iter() {
-            if let Ok((child_tint, mut child_image)) = icons.get_mut(child) {
-                child_image.color = child_tint.color(state);
+            if let Ok((tint, mut child_image)) = child_icons.get_mut(child) {
+                child_image.color = tint.color(state);
             }
         }
     }
@@ -220,25 +259,28 @@ pub fn spawn_hud(
             },
         ))
         .with_children(|bar| {
-            for (key, action, icon_index) in top {
+            for (index, (key, action, icon_index)) in top.into_iter().enumerate() {
                 let icon = theme.icons.get(icon_index).cloned().unwrap_or_default();
+                // Первая кнопка панели в SS14 шире остальных (70×64).
+                let width = if index == 0 { 70.0 } else { 42.0 };
                 bar.spawn((
                     action,
                     Button,
                     HudTint::button(),
-                    ui::nine_slice(&theme.button, 10.0),
+                    BackgroundColor(ui::GLASS_BUTTON),
                     Node {
-                        width: px(42),
+                        width: px(width),
                         height: px(64),
                         flex_direction: FlexDirection::Column,
                         align_items: AlignItems::Center,
                         justify_content: JustifyContent::Center,
+                        row_gap: px(2),
                         ..default()
                     },
                 ))
                 .with_children(|button| {
                     button.spawn((
-                        HudTint::icon(),
+                        IconTint::menu(),
                         ImageNode::new(icon),
                         Node {
                             width: px(24),
@@ -248,18 +290,21 @@ pub fn spawn_hud(
                     ));
                     button.spawn((
                         Text::new(key),
-                        TextFont::from_font_size(13.0),
-                        TextColor(ui::TEXT),
+                        TextFont::from_font_size(ui::FONT_LABEL),
+                        TextColor(ui::TOP_ICON),
                     ));
                 });
             }
         });
-    // Колонка действий (ActionsBar): слоты 64×64, подпись клавиши в углу.
-    let actions: [(&str, &str, HudAction); 4] = [
-        ("E", "Осмотр", HudAction::Examine),
-        ("Q", "Бросить", HudAction::Drop),
-        ("C", "Крафт", HudAction::ToggleCraft),
-        ("F", "Бой", HudAction::ToggleCombat),
+    // Колонка действий (ActionsBar): слот 64×64 с фоном SlotBackground,
+    // иконка действия заполняет слот (32 px при масштабе ×2), подпись клавиши —
+    // в левом верхнем углу (ActionButton.cs: Margin(5,0,0,0), цвет whiteText).
+    // Крафт берёт молоток из иконок верхней панели, бой — иконки Actions.
+    let actions: [(&str, HudAction, usize); 4] = [
+        ("E", HudAction::Examine, 0),
+        ("Q", HudAction::Drop, 1),
+        ("C", HudAction::ToggleCraft, 4),
+        ("F", HudAction::ToggleCombat, 2),
     ];
     commands
         .spawn((
@@ -269,42 +314,84 @@ pub fn spawn_hud(
                 left: px(10),
                 top: px(84),
                 flex_direction: FlexDirection::Column,
-                row_gap: px(5),
+                row_gap: px(4),
                 ..default()
             },
         ))
         .with_children(|column| {
-            for (key, label, action) in actions {
+            for (key, action, icon_index) in actions {
+                let icon = if action == HudAction::ToggleCraft {
+                    theme.icons.get(icon_index).cloned().unwrap_or_default()
+                } else {
+                    theme
+                        .action_icons
+                        .get(icon_index)
+                        .cloned()
+                        .unwrap_or_default()
+                };
                 column
                     .spawn((
                         action,
                         Button,
-                        HudTint::button(),
-                        ui::nine_slice(&theme.button, 10.0),
+                        HudTint {
+                            normal: Color::WHITE,
+                            hovered: Color::WHITE,
+                            pressed: Color::srgb(0.92, 0.92, 0.96),
+                        },
+                        crate::ui_theme::stretched(&theme.slot_background),
+                        BackgroundColor(Color::WHITE),
                         Node {
                             width: px(64),
                             height: px(64),
-                            flex_direction: FlexDirection::Column,
                             align_items: AlignItems::Center,
                             justify_content: JustifyContent::Center,
                             ..default()
                         },
                     ))
                     .with_children(|slot| {
-                        // Подпись клавиши — слева вверху, как ActionButton.
+                        slot.spawn((
+                            ImageNode::new(icon),
+                            Node {
+                                width: px(64),
+                                height: px(64),
+                                ..default()
+                            },
+                        ));
                         slot.spawn((
                             Text::new(key),
                             TextFont::from_font_size(13.0),
-                            TextColor(ui::NANO_GOLD),
-                        ));
-                        slot.spawn((
-                            Text::new(label),
-                            TextFont::from_font_size(ui::FONT_SMALL),
                             TextColor(ui::TEXT),
+                            Node {
+                                position_type: PositionType::Absolute,
+                                left: px(5),
+                                top: px(0),
+                                ..default()
+                            },
                         ));
                     });
             }
         });
+    // Кнопка окна инвентаря (`Slots/toggle`) — внизу слева, `BottomLeft` margin 5.
+    commands.spawn((
+        HudRoot,
+        crate::inventory_ui::BackpackButton,
+        Button,
+        crate::hud::IconTint {
+            normal: Color::WHITE,
+            hovered: Color::srgb(0.92, 0.92, 0.96),
+            pressed: Color::srgb(0.85, 0.85, 0.9),
+        },
+        ImageNode::new(theme.slot_toggle.clone()),
+        Node {
+            position_type: PositionType::Absolute,
+            left: px(5),
+            bottom: px(5),
+            width: px(64),
+            height: px(64),
+            ..default()
+        },
+    ));
+
     // Панель призрака: в SS14 стоит снизу по центру с отступом 80.
     commands
         .spawn((
@@ -316,14 +403,13 @@ pub fn spawn_hud(
                 bottom: px(80),
                 flex_direction: FlexDirection::Row,
                 justify_content: JustifyContent::Center,
-                column_gap: px(5),
                 ..default()
             },
         ))
         .with_children(|bar| {
             for (label, action) in [
                 ("Вернуться в тело", HudAction::Admin("unghost".to_string())),
-                ("Телепорт призрака", HudAction::Admin("tpto".to_string())),
+                ("Телепорт призрака", HudAction::GhostWarp),
                 ("Настройки", HudAction::OpenSettings),
             ] {
                 bar.spawn((
@@ -331,10 +417,9 @@ pub fn spawn_hud(
                     action,
                     Button,
                     HudTint::button(),
-                    ui::nine_slice(&theme.button, 10.0),
+                    BackgroundColor(ui::GLASS_BUTTON),
                     Node {
-                        height: px(34),
-                        padding: UiRect::axes(px(14), px(2)),
+                        padding: UiRect::axes(px(ui::BUTTON_PADDING_H), px(ui::BUTTON_PADDING_V)),
                         align_items: AlignItems::Center,
                         justify_content: JustifyContent::Center,
                         ..default()
@@ -453,6 +538,7 @@ fn send_examine(
 pub fn hud_hotkeys(
     keys: Res<ButtonInput<KeyCode>>,
     console: Res<Console>,
+    chat: Res<crate::chat::ChatState>,
     mut state: ResMut<HudState>,
     mut crafting: ResMut<crate::crafting::CraftingState>,
     mut senders: Query<&mut MessageSender<ClientMessage>, With<Connected>>,
@@ -467,7 +553,8 @@ pub fn hud_hotkeys(
     own: Res<OwnPlayerEntity>,
     hands: Query<&ssr_core::inventory::Hands>,
 ) {
-    if console.open {
+    // Текст набирается в консоли или чате — горячие клавиши мира не работают.
+    if console.open || chat.focused {
         return;
     }
     if keys.just_pressed(KeyCode::F5) {
@@ -553,10 +640,18 @@ pub fn hud_click(
             HudAction::ToggleSpawn => {
                 state.spawn_open = !state.spawn_open;
                 state.admin_open = false;
+                state.warp_open = false;
             }
             HudAction::ToggleAdmin => {
                 state.admin_open = !state.admin_open;
                 state.spawn_open = false;
+                state.warp_open = false;
+            }
+            HudAction::GhostWarp => {
+                state.warp_open = !state.warp_open;
+                state.spawn_open = false;
+                state.admin_open = false;
+                state.search.clear();
             }
             HudAction::OpenSettings => {
                 crate::settings::open_menu(&mut commands, &settings, &menus);
@@ -626,13 +721,85 @@ pub fn admin_player_click(
     }
 }
 
-/// Каркас окна меню (заголовок + содержимое, как окна SS14).
+/// Шапка окна по SS14: плоский фон `Accent("#2A2A38D9", 0.26)`, акцентная
+/// линия 2 px снизу, заголовок `#EAF2FF` (14) и крестик `cross.svg`.
+fn window_header(header: &mut ChildSpawnerCommands, theme: &crate::ui_theme::UiTheme, title: &str) {
+    use crate::ui_theme as ui;
+    header
+        .spawn((
+            Node {
+                width: Val::Percent(100.0),
+                height: px(25.0),
+                align_items: AlignItems::Center,
+                padding: UiRect::new(px(6), px(6), px(2), px(2)),
+                column_gap: px(6),
+                border: UiRect::bottom(px(2)),
+                ..default()
+            },
+            BackgroundColor(ui::GLASS_HEADER),
+            BorderColor::from(ui::GLASS_HEADER_LINE),
+        ))
+        .with_children(|row| {
+            row.spawn((
+                Text::new(title),
+                TextFont::from_font_size(ui::FONT_LABEL),
+                TextColor(ui::WINDOW_TITLE),
+            ));
+            row.spawn((
+                MenuCloseButton,
+                Button,
+                IconTint::cross(),
+                ImageNode::new(theme.cross.clone()),
+                Node {
+                    width: px(22),
+                    height: px(22),
+                    margin: UiRect::left(Val::Auto),
+                    ..default()
+                },
+            ));
+        });
+}
+
+/// Тело окна: плоская панель StyleNano с отступом содержимого 10.
+fn window_body() -> (Node, BackgroundColor) {
+    use crate::ui_theme as ui;
+    (
+        Node {
+            width: Val::Percent(100.0),
+            flex_direction: FlexDirection::Column,
+            padding: UiRect::all(px(ui::WINDOW_CONTENT_MARGIN)),
+            row_gap: px(4),
+            overflow: Overflow::clip(),
+            ..default()
+        },
+        BackgroundColor(ui::GLASS_PANEL),
+    )
+}
+
+/// Плоское поле ввода (в сборке у LineEdit нет рамки — только фон).
+fn glass_field() -> (Node, BackgroundColor) {
+    use crate::ui_theme as ui;
+    (
+        Node {
+            height: px(24),
+            align_items: AlignItems::Center,
+            padding: UiRect::new(px(8), px(8), px(4), px(4)),
+            ..default()
+        },
+        BackgroundColor(ui::GLASS_LINEEDIT),
+    )
+}
+
+/// Каркас окна меню — как `DefaultWindow` в SS14: шапка `window_header`,
+/// заголовок цветом `NanoGold`, крестик `cross.svg` с модуляцией `#4B596A`
+/// и фон `window_background_bordered`.
 fn menu_panel(
     commands: &mut Commands,
+    theme: &crate::ui_theme::UiTheme,
     title: &str,
     left: f32,
+    top: f32,
     width: f32,
-    accent: Color,
     build: impl FnOnce(&mut ChildSpawnerCommands),
 ) {
     commands
@@ -640,27 +807,19 @@ fn menu_panel(
             HudMenuRoot,
             Node {
                 position_type: PositionType::Absolute,
-                left: px(left),
-                top: px(44),
+                left: Val::Percent(left),
+                top: Val::Percent(top),
                 width: px(width),
-                max_height: px(600),
+                max_height: px(520),
                 flex_direction: FlexDirection::Column,
-                row_gap: px(3),
-                padding: UiRect::all(px(8)),
-                border: UiRect::all(px(2)),
-                overflow: Overflow::clip(),
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.05, 0.05, 0.07, 0.96)),
-            BorderColor::from(Color::srgb(0.35, 0.35, 0.42)),
+            UiTransform::from_translation(Val2::new(Val::Percent(-50.0), Val::Percent(-50.0))),
         ))
-        .with_children(|panel| {
-            panel.spawn((
-                Text::new(title),
-                TextFont::from_font_size(14.0),
-                TextColor(accent),
-            ));
-            build(panel);
+        .with_children(|window| {
+            window_header(window, theme, title);
+            let (node, background) = window_body();
+            window.spawn((node, background)).with_children(build);
         });
 }
 
@@ -725,202 +884,151 @@ pub fn render_spawn_menu(
         })
         .collect();
 
-    // Окно: 350 px шириной у левого края, как CenterLeft в SS14.
+    // Окно 350×400 у левого края по центру экрана (`LayoutPreset.CenterLeft`).
     commands
         .spawn((
             HudMenuRoot,
             Node {
                 position_type: PositionType::Absolute,
-                left: px(280),
-                top: px(70),
+                left: px(10),
+                top: Val::Percent(50.0),
                 width: px(350),
-                max_height: px(430),
+                max_height: px(400),
                 flex_direction: FlexDirection::Column,
                 ..default()
             },
+            UiTransform::from_translation(Val2::new(Val::Px(0.0), Val::Percent(-50.0))),
         ))
         .with_children(|window| {
-            // Шапка окна: заголовок золотом + крестик (`windowTitle` в SS14).
-            window
-                .spawn((
-                    Node {
-                        width: Val::Percent(100.0),
-                        height: px(25.0),
-                        align_items: AlignItems::Center,
-                        padding: UiRect::horizontal(px(5)),
-                        column_gap: px(6),
-                        ..default()
-                    },
-                    BackgroundColor(ui::PANEL_DARK),
-                ))
-                .with_children(|header| {
-                    header.spawn((
-                        Text::new("Панель спавна сущностей"),
-                        TextFont::from_font_size(ui::FONT_LABEL),
-                        TextColor(ui::NANO_GOLD),
+            window_header(window, &theme, "Панель спавна сущностей");
+            let (node, background) = window_body();
+            window.spawn((node, background)).with_children(|body| {
+                // Строка поиска: поле ввода + «Очистить» (как в SS14).
+                body.spawn(Node {
+                    width: Val::Percent(100.0),
+                    height: px(24),
+                    column_gap: px(4),
+                    ..default()
+                })
+                .with_children(|row| {
+                    let (mut field, field_bg) = glass_field();
+                    field.flex_grow = 1.0;
+                    row.spawn((field, field_bg)).with_child((
+                        Text::new(if state.search.is_empty() {
+                            "поиск".to_string()
+                        } else {
+                            format!("{}_", state.search)
+                        }),
+                        TextFont::from_font_size(ui::FONT_BASE),
+                        TextColor(if state.search.is_empty() {
+                            ui::TEXT_MUTED
+                        } else {
+                            ui::TEXT
+                        }),
                     ));
-                    header.spawn((
-                        MenuCloseButton,
+                    row.spawn((
+                        MenuClearButton,
                         Button,
-                        ImageNode::new(theme.cross.clone()),
+                        HudTint::button(),
+                        BackgroundColor(ui::GLASS_BUTTON),
                         Node {
-                            width: px(18),
-                            height: px(18),
-                            margin: UiRect::left(Val::Auto),
+                            height: px(24),
+                            padding: UiRect::horizontal(px(ui::BUTTON_PADDING_H)),
+                            align_items: AlignItems::Center,
                             ..default()
                         },
+                    ))
+                    .with_child((
+                        Text::new("Очистить"),
+                        TextFont::from_font_size(ui::FONT_BASE),
+                        TextColor(ui::TEXT),
                     ));
                 });
-            window
-                .spawn((
-                    Node {
-                        width: Val::Percent(100.0),
-                        max_height: px(360),
-                        flex_direction: FlexDirection::Column,
-                        padding: UiRect::all(px(6)),
-                        row_gap: px(5),
-                        overflow: Overflow::clip(),
-                        ..default()
-                    },
-                    ui::nine_slice(&theme.window_background, 2.0),
-                ))
-                .with_children(|body| {
-                    // Строка поиска: поле ввода + «Очистить» (как в SS14).
-                    body.spawn(Node {
-                        width: Val::Percent(100.0),
-                        height: px(24),
-                        column_gap: px(4),
-                        ..default()
-                    })
-                    .with_children(|row| {
-                        row.spawn((
-                            ui::nine_slice(&theme.lineedit, 3.0),
-                            Node {
-                                flex_grow: 1.0,
-                                height: px(24),
-                                align_items: AlignItems::Center,
-                                padding: UiRect::horizontal(px(5)),
-                                ..default()
-                            },
-                        ))
-                        .with_child((
-                            Text::new(if state.search.is_empty() {
-                                "поиск".to_string()
-                            } else {
-                                format!("{}_", state.search)
-                            }),
-                            TextFont::from_font_size(ui::FONT_BASE),
-                            TextColor(if state.search.is_empty() {
-                                ui::TEXT_MUTED
-                            } else {
-                                ui::TEXT
-                            }),
-                        ));
-                        row.spawn((
-                            MenuClearButton,
+                // Список: строка = иконка 32×32 + имя, зазор 2 px.
+                body.spawn(Node {
+                    width: Val::Percent(100.0),
+                    flex_direction: FlexDirection::Column,
+                    row_gap: px(2),
+                    ..default()
+                })
+                .with_children(|list| {
+                    for ((id, name), icon) in matched.into_iter().zip(icons) {
+                        let selected = placement.item.as_deref() == Some(id.as_str());
+                        let tint = if selected {
+                            HudTint {
+                                normal: ui::GLASS_BUTTON_PRESSED,
+                                hovered: ui::GLASS_BUTTON_PRESSED,
+                                pressed: ui::GLASS_BUTTON_PRESSED,
+                            }
+                        } else {
+                            HudTint::button()
+                        };
+                        list.spawn((
+                            HudAction::SpawnItem(id.clone()),
                             Button,
-                            HudTint::button(),
-                            ui::nine_slice(&theme.button, 10.0),
+                            tint,
+                            BackgroundColor(if selected {
+                                ui::GLASS_BUTTON_PRESSED
+                            } else {
+                                ui::GLASS_BUTTON
+                            }),
                             Node {
-                                height: px(24),
-                                padding: UiRect::horizontal(px(10)),
+                                width: Val::Percent(100.0),
+                                height: px(32),
                                 align_items: AlignItems::Center,
+                                column_gap: px(6),
+                                padding: UiRect::horizontal(px(6)),
                                 ..default()
                             },
                         ))
-                        .with_child((
-                            Text::new("Очистить"),
-                            TextFont::from_font_size(ui::FONT_BASE),
-                            TextColor(ui::TEXT),
-                        ));
-                    });
-                    // Список: строка = иконка 32×32 + имя, зазор 2 px.
-                    body.spawn(Node {
-                        width: Val::Percent(100.0),
-                        flex_direction: FlexDirection::Column,
-                        row_gap: px(2),
-                        ..default()
-                    })
-                    .with_children(|list| {
-                        for ((id, name), icon) in matched.into_iter().zip(icons) {
-                            let selected = placement.item.as_deref() == Some(id.as_str());
-                            let tint = if selected {
-                                HudTint {
-                                    normal: ui::BUTTON_PRESSED,
-                                    hovered: ui::BUTTON_PRESSED,
-                                    pressed: ui::BUTTON_PRESSED,
+                        .with_children(|row| {
+                            // Иконка 32×32, как EntityPrototypeView в SS14.
+                            row.spawn(Node {
+                                width: px(32),
+                                height: px(32),
+                                align_items: AlignItems::Center,
+                                justify_content: JustifyContent::Center,
+                                ..default()
+                            })
+                            .with_children(|cell| {
+                                if let Some(icon) = icon {
+                                    cell.spawn((
+                                        icon,
+                                        Node {
+                                            width: px(28),
+                                            height: px(28),
+                                            ..default()
+                                        },
+                                    ));
                                 }
-                            } else {
-                                HudTint::button()
-                            };
-                            let mut image = ui::nine_slice(&theme.button, 10.0);
-                            image.color = if selected {
-                                ui::BUTTON_PRESSED
-                            } else {
-                                ui::BUTTON_DEFAULT
-                            };
-                            list.spawn((
-                                HudAction::SpawnItem(id.clone()),
-                                Button,
-                                tint,
-                                image,
-                                Node {
-                                    width: Val::Percent(100.0),
-                                    height: px(32),
-                                    align_items: AlignItems::Center,
-                                    column_gap: px(6),
-                                    padding: UiRect::horizontal(px(6)),
-                                    ..default()
-                                },
-                            ))
-                            .with_children(|row| {
-                                // Иконка 32×32, как EntityPrototypeView в SS14.
-                                row.spawn(Node {
-                                    width: px(32),
-                                    height: px(32),
-                                    align_items: AlignItems::Center,
-                                    justify_content: JustifyContent::Center,
-                                    ..default()
-                                })
-                                .with_children(|cell| {
-                                    if let Some(icon) = icon {
-                                        cell.spawn((
-                                            icon,
-                                            Node {
-                                                width: px(28),
-                                                height: px(28),
-                                                ..default()
-                                            },
-                                        ));
-                                    }
-                                });
-                                row.spawn((
-                                    Text::new(name),
-                                    TextFont::from_font_size(ui::FONT_BASE),
-                                    TextColor(ui::TEXT),
-                                ));
-                                row.spawn((
-                                    Text::new(id),
-                                    TextFont::from_font_size(ui::FONT_SMALL),
-                                    TextColor(ui::TEXT_MUTED),
-                                ));
                             });
-                        }
-                    });
-                    // Подсказка снизу: счётчик и режим размещения.
-                    let hint = match &placement.item {
-                        Some(item) => format!("Размещение: {item} — ЛКМ поставить, ПКМ отменить"),
-                        None => format!(
-                            "{}/{} · клик — размещать, Ctrl+клик — в рюкзак",
-                            total, total
-                        ),
-                    };
-                    body.spawn((
-                        Text::new(hint),
-                        TextFont::from_font_size(ui::FONT_SMALL),
-                        TextColor(ui::NANO_GOLD),
-                    ));
+                            row.spawn((
+                                Text::new(name),
+                                TextFont::from_font_size(ui::FONT_BASE),
+                                TextColor(ui::TEXT),
+                            ));
+                            row.spawn((
+                                Text::new(id),
+                                TextFont::from_font_size(ui::FONT_SMALL),
+                                TextColor(ui::TEXT_MUTED),
+                            ));
+                        });
+                    }
                 });
+                // Подсказка снизу: счётчик и режим размещения.
+                let hint = match &placement.item {
+                    Some(item) => format!("Размещение: {item} — ЛКМ поставить, ПКМ отменить"),
+                    None => format!(
+                        "{}/{} · клик — размещать, Ctrl+клик — в рюкзак",
+                        total, total
+                    ),
+                };
+                body.spawn((
+                    Text::new(hint),
+                    TextFont::from_font_size(ui::FONT_SMALL),
+                    TextColor(ui::NANO_GOLD),
+                ));
+            });
         });
 }
 
@@ -948,6 +1056,7 @@ pub fn menu_buttons_click(
         if *interaction == Interaction::Pressed {
             state.spawn_open = false;
             state.admin_open = false;
+            state.warp_open = false;
             placement.item = None;
         }
     }
@@ -1047,10 +1156,115 @@ pub fn placement_click(
     tracing::info!(command, "placement spawn sent");
 }
 
+/// Перерисовывает окно «Телепорт призрака» (MiniGhostTargetWindow в SS14):
+/// поле поиска и список игроков с координатами; клик — телепорт к игроку.
+pub fn render_warp_menu(
+    mut commands: Commands,
+    state: Res<HudState>,
+    theme: Res<crate::ui_theme::UiTheme>,
+    players: Query<(&PlayerName, &PlayerPosition)>,
+    root: Query<Entity, With<HudMenuRoot>>,
+    mut last: Local<Option<(bool, String, usize)>>,
+) {
+    use crate::ui_theme as ui;
+    let signature = (
+        state.warp_open,
+        state.search.clone(),
+        players.iter().count(),
+    );
+    if last.as_ref() == Some(&signature) {
+        return;
+    }
+    *last = Some(signature);
+    for entity in root.iter() {
+        commands.entity(entity).despawn();
+    }
+    if !state.warp_open {
+        return;
+    }
+    let query = state.search.to_lowercase();
+    let own_name = std::env::var("SSR_NAME").unwrap_or_default();
+    let mut rows: Vec<(String, [f32; 2])> = players
+        .iter()
+        .filter(|(name, _)| name.0 != own_name)
+        .filter(|(name, _)| query.is_empty() || name.0.to_lowercase().contains(&query))
+        .map(|(name, position)| (name.0.clone(), position.0))
+        .collect();
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // В SS14 окно телепорта открывается по центру экрана (`OpenCentered`).
+    commands
+        .spawn((
+            HudMenuRoot,
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Percent(50.0),
+                top: Val::Percent(50.0),
+                width: px(450),
+                height: px(450),
+                flex_direction: FlexDirection::Column,
+                row_gap: px(3),
+                ..default()
+            },
+            UiTransform::from_translation(Val2::new(Val::Percent(-50.0), Val::Percent(-50.0))),
+        ))
+        .with_children(|window| {
+            window_header(window, &theme, "Телепорт призрака");
+            let (node, background) = window_body();
+            window.spawn((node, background)).with_children(|body| {
+                body.spawn(glass_field()).with_child((
+                    Text::new(if state.search.is_empty() {
+                        "поиск".to_string()
+                    } else {
+                        format!("{}_", state.search)
+                    }),
+                    TextFont::from_font_size(ui::FONT_BASE),
+                    TextColor(if state.search.is_empty() {
+                        ui::TEXT_MUTED
+                    } else {
+                        ui::TEXT
+                    }),
+                ));
+                for (name, position) in rows {
+                    body.spawn((
+                        AdminPlayerButton {
+                            name: name.clone(),
+                            kick: false,
+                        },
+                        Button,
+                        HudTint::button(),
+                        BackgroundColor(ui::GLASS_BUTTON),
+                        Node {
+                            width: Val::Percent(100.0),
+                            height: px(26),
+                            align_items: AlignItems::Center,
+                            padding: UiRect::horizontal(px(8)),
+                            column_gap: px(6),
+                            ..default()
+                        },
+                    ))
+                    .with_children(|row| {
+                        row.spawn((
+                            Text::new(name),
+                            TextFont::from_font_size(ui::FONT_BASE),
+                            TextColor(ui::TEXT),
+                        ));
+                        row.spawn((
+                            Text::new(format!("{:.0}, {:.0}", position[0], position[1])),
+                            TextFont::from_font_size(ui::FONT_SMALL),
+                            TextColor(ui::TEXT_MUTED),
+                        ));
+                    });
+                }
+            });
+        });
+}
+
 /// Перерисовывает админ-меню (F7): действия и список игроков в интересе.
 pub fn render_admin_menu(
     mut commands: Commands,
     state: Res<HudState>,
+    theme: Res<crate::ui_theme::UiTheme>,
     players: Query<(&PlayerName, &PlayerRole, &PlayerPosition)>,
     root: Query<Entity, With<HudMenuRoot>>,
     mut last: Local<Option<(bool, usize, String)>>,
@@ -1081,10 +1295,11 @@ pub fn render_admin_menu(
     let _ = own_name;
     menu_panel(
         &mut commands,
-        "Админ-меню (F7 — закрыть)",
-        950.0,
-        320.0,
-        Color::srgb(1.0, 0.55, 0.45),
+        &theme,
+        "Админ-меню",
+        50.0,
+        50.0,
+        360.0,
         |panel| {
             for (label, command) in [
                 ("Лечить себя", "heal"),
@@ -1166,7 +1381,7 @@ pub fn spawn_menu_input(
     keys: Res<ButtonInput<KeyCode>>,
     mut state: ResMut<HudState>,
 ) {
-    if !state.spawn_open {
+    if !state.spawn_open && !state.warp_open {
         return;
     }
     if keys.just_pressed(KeyCode::F5) || keys.just_pressed(KeyCode::Escape) {

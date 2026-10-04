@@ -19,6 +19,7 @@ use ssr_core::{GAME_NAME, PlayerPosition};
 
 mod audio;
 mod bot;
+mod chat;
 mod console;
 mod containers;
 mod content;
@@ -127,6 +128,7 @@ fn main() {
     app.init_resource::<inventory_ui::OwnPlayerEntity>();
     app.init_resource::<inventory_ui::ActionMenu>();
     app.init_resource::<console::Console>();
+    app.init_resource::<chat::ChatState>();
     app.init_resource::<windows::WindowPositions>();
     app.init_resource::<settings::Settings>();
     app.init_resource::<doors::DeniedDoors>();
@@ -237,6 +239,11 @@ fn main() {
     app.add_systems(
         Update,
         (
+            chat::spawn_chat,
+            chat::render_chat,
+            chat::chat_input,
+            chat::chat_health_notices,
+            chat::chat_test_mode,
             hud::spawn_hud,
             hud::hud_hotkeys,
             hud::hud_click,
@@ -246,6 +253,7 @@ fn main() {
             hud::menu_buttons_click,
             hud::render_spawn_menu,
             hud::render_admin_menu,
+            hud::render_warp_menu,
             hud::spawn_menu_input,
             hud::update_placement_ghost,
             hud::placement_click,
@@ -458,14 +466,15 @@ fn send_input(
     time: Res<Time>,
     player_entity: Res<PlayerEntity>,
     console: Res<console::Console>,
+    chat: Res<chat::ChatState>,
     hud_state: Res<hud::HudState>,
     mut connected_elapsed: Local<f32>,
     mut state: Local<InputSendState>,
     connected: Query<(), With<Connected>>,
     mut senders: Query<&mut MessageSender<ClientMessage>, With<Connected>>,
 ) {
-    // При открытой консоли персонаж не двигается (текст набирается).
-    let console_open = console.open;
+    // При открытой консоли или наборе текста в чате персонаж не двигается.
+    let console_open = console.open || chat.focused;
     if !input_ready(&player_entity) {
         return;
     }
@@ -561,6 +570,7 @@ fn receive_server(
     mut denied: ResMut<doors::DeniedDoors>,
     mut sounds: ResMut<audio::SoundRequests>,
     mut console: ResMut<console::Console>,
+    mut chat: ResMut<chat::ChatState>,
 ) {
     for mut receiver in receivers.iter_mut() {
         for message in receiver.receive() {
@@ -577,12 +587,21 @@ fn receive_server(
                         }
                         None if kind == "hit" => sounds.punch += 1,
                         None if let Some(text) = kind.strip_prefix("admin:") => {
-                            // Ответ админ-команды (T5.5) — в консоль.
+                            // Ответ админ-команды (T5.5) — в консоль и в чат.
                             console.push_line(format!("[сервер] {text}"));
+                            chat.system(text);
                             tracing::info!(reply = %text, "admin reply");
                         }
                         None => tracing::info!(kind, "server event"),
                     }
+                }
+                ServerMessage::Chat {
+                    channel,
+                    from,
+                    text,
+                } => {
+                    chat.push(channel, from.clone(), text.clone());
+                    tracing::info!(?channel, %from, %text, "chat received");
                 }
                 ServerMessage::Welcome {
                     player_entity: entity,

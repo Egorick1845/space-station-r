@@ -242,7 +242,7 @@ pub fn render_map_chunks(
     let chunk_px = (CHUNK_TILES * TILE_PX) as f32;
     for (chunk_entity, data) in chunks.iter() {
         let canvas = compose_chunk(data, &visuals, &map);
-        let image = Image::new(
+        let mut image = Image::new(
             Extent3d {
                 width: canvas.width(),
                 height: canvas.height(),
@@ -253,6 +253,7 @@ pub fn render_map_chunks(
             TextureFormat::Rgba8UnormSrgb,
             RenderAssetUsages::default(),
         );
+        image.sampler = bevy::image::ImageSampler::nearest();
         let handle = images.add(image);
         let center = Vec3::new(
             (data.coords.0 as f32 + 0.5) * chunk_px,

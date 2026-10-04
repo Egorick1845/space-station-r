@@ -329,13 +329,6 @@ impl ItemSprites<'_, '_> {
         self.items.get(client).ok().map(|item| item.name.clone())
     }
 
-    /// Спрайт предмета «в руке» по bits его сущности (для плашки руки).
-    pub fn inhand(&self, bits: u64) -> Option<&RsiSprite> {
-        let name = self.item_name(bits)?;
-        item_inhand(&self.registry, &self.catalog.items, &name)
-            .or_else(|| item_icon(&self.registry, &self.catalog.items, &name))
-    }
-
     /// Название предмета для UI по серверным bits (русское имя из каталога).
     pub fn display_name(&self, bits: u64) -> Option<String> {
         let name = self.item_name(bits)?;
@@ -413,7 +406,8 @@ pub fn panel_buttons_click(mut ui: ResMut<InventoryUi>, mut clicks: PanelClicks)
     }
 }
 
-/// Картинка/подпись на всю площадь клетки или предмета.
+/// Картинка/подпись на всю площадь клетки или предмета (задел для панелей).
+#[allow(dead_code)]
 pub fn fill_node() -> Node {
     Node {
         width: Val::Percent(100.0),
@@ -490,18 +484,15 @@ pub fn render_inventory_panel(
             node,
         ))
         .with_children(|window| {
-            // Сайдбар: крестик закрытия сверху (Storage/exit.png, ×2).
+            // Сайдбар: крестик сверху, затем сегменты — как StorageWindow.cs.
             window
-                .spawn((
-                    crate::ui_theme::stretched(&theme.storage_sidebar),
-                    Node {
-                        width: px(ui::STORAGE_CELL),
-                        height: px(grid_height),
-                        flex_direction: FlexDirection::Column,
-                        align_items: AlignItems::Center,
-                        ..default()
-                    },
-                ))
+                .spawn(Node {
+                    width: px(ui::STORAGE_CELL),
+                    height: px(grid_height),
+                    flex_direction: FlexDirection::Column,
+                    align_items: AlignItems::Center,
+                    ..default()
+                })
                 .with_children(|sidebar| {
                     sidebar.spawn((
                         InventoryCloseButton,
@@ -513,6 +504,23 @@ pub fn render_inventory_panel(
                             ..default()
                         },
                     ));
+                    let rows = (grid_height / ui::STORAGE_CELL).round() as usize;
+                    for row in 1..rows {
+                        let index = if row == rows - 1 { 2 } else { 1 };
+                        let handle = theme
+                            .storage_sidebar_segments
+                            .get(index)
+                            .cloned()
+                            .unwrap_or_default();
+                        sidebar.spawn((
+                            crate::ui_theme::stretched(&handle),
+                            Node {
+                                width: px(ui::STORAGE_CELL),
+                                height: px(ui::STORAGE_CELL),
+                                ..default()
+                            },
+                        ));
+                    }
                 });
             // Сетка: ячейки вплотную, фон #222222 (StorageWindow.cs).
             window
@@ -534,17 +542,33 @@ pub fn render_inventory_panel(
                         tile.color = ui::GRID_BACKGROUND;
                         grid.spawn((InvSlot(index), Button, storage_cell_node(x, y), tile));
                     }
-                    // Предметы поверх сетки: иконка на все занятые ячейки.
+                    // Предметы: рамка по футпринту (`Storage/piece_*`) и спрайт ×2
+                    // по центру занятой площади (ItemGridPiece.cs).
                     for (bits, x, y, w, h) in ssr_core::inventory::item_layout(&inventory.cells) {
                         let Some(sprite) = sprites.icon(bits) else {
                             continue;
                         };
+                        let mut frame = crate::ui_theme::stretched(&theme.storage_tile);
+                        frame.color = ui::GRID_BACKGROUND;
                         grid.spawn((
                             InvSlot(y * INVENTORY_COLS + x),
                             Button,
                             storage_item_node(x, y, w, h),
+                            BackgroundColor(ui::GLASS_BUTTON),
                         ))
-                        .with_child((icon_node(sprite), fill_node()));
+                        .with_children(|piece| {
+                            piece.spawn((
+                                icon_node(sprite),
+                                Node {
+                                    position_type: PositionType::Absolute,
+                                    left: px((w as f32 - 1.0) * ui::STORAGE_CELL * 0.5),
+                                    top: px((h as f32 - 1.0) * ui::STORAGE_CELL * 0.5),
+                                    width: px(ui::STORAGE_CELL),
+                                    height: px(ui::STORAGE_CELL),
+                                    ..default()
+                                },
+                            ));
+                        });
                     }
                 });
         });
@@ -590,7 +614,6 @@ pub fn render_hands_panel(
     root: Query<Entity, With<HandsPanel>>,
     mut last: Local<Option<(Hands, bool)>>,
 ) {
-    use crate::ui_theme as ui;
     let Some(own_state) = own_hands(&own, &hands).cloned() else {
         return;
     };
@@ -605,13 +628,17 @@ pub fn render_hands_panel(
         commands.entity(entity).despawn();
     }
 
+    // В SS14 панель рук привязана снизу по всей ширине с отступом 5
+    // (`SetAnchorAndMarginPreset(Hotbar, BottomWide, margin: 5)`).
     let mut node = Node {
         position_type: PositionType::Absolute,
-        left: px(560),
-        bottom: px(10),
+        left: px(0),
+        right: px(0),
+        bottom: px(5),
         flex_direction: FlexDirection::Row,
-        align_items: AlignItems::Center,
-        column_gap: px(ui::SLOT_GAP),
+        justify_content: JustifyContent::Center,
+        align_items: AlignItems::FlexEnd,
+        column_gap: px(0),
         ..default()
     };
     windows::apply_saved_position(windows::WindowKind::Hands, &mut node, &positions);
@@ -626,43 +653,51 @@ pub fn render_hands_panel(
             node,
         ))
         .with_children(|bar| {
-            // Левая рука: панель статуса слева, затем слот (как в SS14).
-            status_panel(bar, &theme, &sprites, item_of(0), false);
+            // Порядок как в HotbarGui.xaml: слот правой руки стоит на экране
+            // ЛЕВЕЕ левой, панели статуса — по краям (правая/левая).
+            status_panel(
+                bar,
+                &theme,
+                &sprites,
+                item_of(0),
+                false,
+                own_state.active == 0,
+            );
             hand_slot(bar, &theme, &sprites, 0, &own_state);
             hand_slot(bar, &theme, &sprites, 1, &own_state);
-            status_panel(bar, &theme, &sprites, item_of(1), true);
-            // Кнопка окна рюкзака (в SS14 — `Slots/toggle`).
-            bar.spawn((
-                BackpackButton,
-                Button,
-                crate::hud::HudTint::button(),
-                ImageNode::new(theme.slot_toggle.clone()),
-                Node {
-                    width: px(ui::SLOT_SIZE),
-                    height: px(ui::SLOT_SIZE),
-                    margin: UiRect::left(px(ui::SLOT_GAP)),
-                    ..default()
-                },
-            ));
+            status_panel(
+                bar,
+                &theme,
+                &sprites,
+                item_of(1),
+                true,
+                own_state.active == 1,
+            );
         });
 }
 
 /// Панель статуса руки (`ItemStatusPanel`): имя предмета или «В руке пусто».
+/// Сторона задаёт текстуру и patch margin: у левой панели скос слева (наружу),
+/// у правой — справа (как в `ItemStatusPanel.xaml.cs`).
+#[allow(clippy::too_many_arguments)]
 fn status_panel(
     bar: &mut ChildSpawnerCommands,
     theme: &crate::ui_theme::UiTheme,
     sprites: &ItemSprites,
     item: Option<u64>,
     right: bool,
+    active: bool,
 ) {
     use crate::ui_theme as ui;
-    let texture = if right {
-        &theme.status_right
+    // Панель справа от рук берёт item_status_left, слева — item_status_right.
+    let (texture, left, right_margin) = if right {
+        (&theme.status_left, 8.0, 14.0)
     } else {
-        &theme.status_left
+        (&theme.status_right, 14.0, 8.0)
     };
-    // Patch margin из разметки SS14: top 6 / bottom 4 при масштабе ×2.
-    let mut image = crate::ui_theme::nine_slice_rect(texture, 4.0, 4.0, 12.0, 8.0);
+    // Патчи из темы (`_itemstatus_patch_margin = "#07060404"` при масштабе ×2)
+    // и отступы текста: `Margin(4,0,0,2)`, шрифт 10.
+    let mut image = crate::ui_theme::nine_slice_rect(texture, left, right_margin, 12.0, 8.0);
     image.color = Color::WHITE;
     bar.spawn((
         image,
@@ -670,18 +705,48 @@ fn status_panel(
             width: px(ui::STATUS_WIDTH),
             height: px(ui::STATUS_HEIGHT),
             align_items: AlignItems::Center,
-            padding: UiRect::new(px(4), px(4), px(6), px(4)),
+            padding: UiRect::new(px(6), px(6), px(6), px(4)),
             overflow: Overflow::clip(),
             ..default()
         },
     ))
-    .with_children(
-        |panel| match item.and_then(|bits| sprites.display_name(bits)) {
+    .with_children(|panel| {
+        // Подсветка панели активной руки (`item_status_*_highlight`).
+        if active && let Some(handle) = theme.status_highlights.get(if right { 1 } else { 0 }) {
+            let mut highlight =
+                crate::ui_theme::nine_slice_rect(handle, left, right_margin, 12.0, 8.0);
+            highlight.image_mode = NodeImageMode::Sliced(TextureSlicer::default());
+            highlight.image_mode = NodeImageMode::Sliced(TextureSlicer {
+                border: BorderRect {
+                    min_inset: Vec2::new(left, 12.0),
+                    max_inset: Vec2::new(right_margin, 8.0),
+                },
+                center_scale_mode: SliceScaleMode::Stretch,
+                sides_scale_mode: SliceScaleMode::Stretch,
+                max_corner_scale: 1.0,
+            });
+            panel.spawn((
+                highlight,
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: px(0),
+                    top: px(0),
+                    width: px(ui::STATUS_WIDTH),
+                    height: px(ui::STATUS_HEIGHT),
+                    ..default()
+                },
+            ));
+        }
+        match item.and_then(|bits| sprites.display_name(bits)) {
             Some(name) => {
                 panel.spawn((
                     Text::new(name),
                     TextFont::from_font_size(ui::FONT_SMALL),
                     TextColor(ui::TEXT),
+                    Node {
+                        margin: UiRect::new(px(4), px(0), px(0), px(2)),
+                        ..default()
+                    },
                 ));
             }
             None => {
@@ -689,10 +754,14 @@ fn status_panel(
                     Text::new("В руке пусто"),
                     TextFont::from_font_size(ui::FONT_SMALL),
                     TextColor(ui::TEXT_MUTED),
+                    Node {
+                        margin: UiRect::new(px(4), px(0), px(0), px(2)),
+                        ..default()
+                    },
                 ));
             }
-        },
-    );
+        }
+    });
 }
 
 /// Слот руки: текстура SS14 64×64, предмет внутри, подсветка активной руки.
@@ -706,10 +775,11 @@ fn hand_slot(
     use crate::ui_theme as ui;
     let item = hands.slots.get(hand as usize).copied().flatten();
     let active = hands.active == hand;
+    // В SS14 правая рука на экране слева (`ItemStatusPanel.xaml.cs`).
     let texture = if hand == 0 {
-        theme.hand_l.clone()
-    } else {
         theme.hand_r.clone()
+    } else {
+        theme.hand_l.clone()
     };
     bar.spawn((
         HandSlot(hand),

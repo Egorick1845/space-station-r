@@ -194,14 +194,17 @@ pub fn render_container_panel(
     let cell = crate::ui_theme::STORAGE_CELL;
     let grid_width = ssr_core::inventory::INVENTORY_COLS as f32 * cell;
     let grid_height = ssr_core::inventory::INVENTORY_ROWS as f32 * cell;
+    // Окно хранилища в SS14 открывается по левому краю по центру (`CenterLeft`).
     let mut node = Node {
         position_type: PositionType::Absolute,
-        left: px(1030),
-        bottom: px(120),
+        left: px(10),
+        top: Val::Percent(50.0),
         flex_direction: FlexDirection::Row,
         align_items: AlignItems::Start,
         ..default()
     };
+    let transform = UiTransform::from_translation(Val2::new(Val::Px(0.0), Val::Percent(-50.0)));
+    let _ = &transform;
     crate::windows::apply_saved_position(
         crate::windows::WindowKind::Container,
         &mut node,
@@ -281,10 +284,18 @@ pub fn render_container_panel(
                             },
                             Button,
                             storage_cell_span(x, y, w, h),
+                            BackgroundColor(crate::ui_theme::GLASS_BUTTON),
                         ))
                         .with_child((
                             crate::inventory_ui::icon_node(sprite),
-                            crate::inventory_ui::fill_node(),
+                            Node {
+                                position_type: PositionType::Absolute,
+                                left: px((w as f32 - 1.0) * cell * 0.5),
+                                top: px((h as f32 - 1.0) * cell * 0.5),
+                                width: px(cell),
+                                height: px(cell),
+                                ..default()
+                            },
                         ));
                     }
                 });

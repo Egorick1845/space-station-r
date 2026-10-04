@@ -33,8 +33,8 @@ use ssr_core::{
 };
 use ssr_protocol::net::GameChannel;
 use ssr_protocol::{
-    ActionKind, ActionOption, ClientMessage, DEFAULT_SERVER_PORT, PROTOCOL_VERSION, ProtocolPlugin,
-    ServerMessage, is_compatible,
+    ActionKind, ActionOption, ChatChannel, ClientMessage, DEFAULT_SERVER_PORT, PROTOCOL_VERSION,
+    ProtocolPlugin, ServerMessage, is_compatible,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -98,6 +98,7 @@ fn main() {
     app.init_resource::<Players>();
     app.init_resource::<TickState>();
     app.init_resource::<ChunkRooms>();
+    app.init_resource::<ChatCooldowns>();
     app.init_resource::<SpawnCursor>();
     app.init_resource::<MapIndex>();
     app.init_resource::<ActionQueue>();
@@ -1330,6 +1331,34 @@ struct DeathEvent {
     killer: Option<Entity>,
 }
 
+/// Предел длины сообщения чата и антиспам-пауза между репликами (сек).
+const CHAT_MAX_LEN: usize = 200;
+const CHAT_COOLDOWN: f32 = 0.6;
+/// Дальность слышимости локального чата (LOOC), юнитов.
+const CHAT_LOCAL_RANGE: f32 = 320.0;
+
+/// Время последнего сообщения игрока (антиспам).
+#[derive(Resource, Default)]
+struct ChatCooldowns(HashMap<u64, f32>);
+
+/// Часы и кулдауны чата одним параметром: у функций-систем Bevy лимит 16
+/// SystemParam, а handle_client_messages уже на пределе.
+#[derive(bevy::ecs::system::SystemParam)]
+struct ChatParams<'w> {
+    time: Res<'w, Time>,
+    cooldowns: ResMut<'w, ChatCooldowns>,
+}
+
+/// Имя игрока по его сущности (для чата): из реестра подключений.
+fn items_name(players: &Players, player: Entity) -> String {
+    players
+        .entries
+        .iter()
+        .find(|entry| entry.player == player)
+        .map(|entry| entry.name.clone())
+        .unwrap_or_else(|| "Кто-то".to_string())
+}
+
 /// Комната, назначенная сущности для репликации предметов: предмет виден
 /// клиенту, когда наборы комнат пересекаются (`Rooms` пустой = невидим всем).
 #[derive(Component, Clone, Copy, PartialEq, Debug)]
@@ -1675,6 +1704,7 @@ fn handle_client_messages(
     items: Query<&Item>,
     mut actions: ResMut<ActionQueue>,
     mut players: ResMut<Players>,
+    mut chat: ChatParams,
 ) {
     // Новый раунд (никого нет): выдача ролей с начала списка — первый игрок
     // сессии снова получает инженера (и его доступы к дверям).
@@ -2097,6 +2127,56 @@ fn handle_client_messages(
                             player: player.to_bits(),
                         });
                     tracing::info!(item, name, "item picked up");
+                }
+                ClientMessage::Chat { channel, text } => {
+                    let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {
+                        continue;
+                    };
+                    let player = entry.player;
+                    let name = items_name(&players, player);
+                    let text: String = text.trim().chars().take(CHAT_MAX_LEN).collect();
+                    if text.is_empty() {
+                        continue;
+                    }
+                    // Антиспам: не чаще одной реплики в CHAT_COOLDOWN секунд.
+                    let now = chat.time.elapsed_secs();
+                    if let Some(last) = chat.cooldowns.0.get(&player.to_bits())
+                        && now - last < CHAT_COOLDOWN
+                    {
+                        tracing::debug!(%name, "chat: rate limited");
+                        continue;
+                    }
+                    chat.cooldowns.0.insert(player.to_bits(), now);
+                    let from = positions.get(player).map(|p| p.0).unwrap_or_default();
+                    let mut recipients = 0;
+                    for (link, mut sender) in senders.iter_mut() {
+                        // LOOC слышат только те, кто рядом; OOC — все.
+                        if channel == ChatChannel::Looc {
+                            let Some(target) = players
+                                .entries
+                                .iter()
+                                .find(|entry| entry.link == link)
+                                .map(|entry| entry.player)
+                            else {
+                                continue;
+                            };
+                            let Ok(target_position) = positions.get(target) else {
+                                continue;
+                            };
+                            let dx = target_position.0[0] - from[0];
+                            let dy = target_position.0[1] - from[1];
+                            if (dx * dx + dy * dy).sqrt() > CHAT_LOCAL_RANGE {
+                                continue;
+                            }
+                        }
+                        sender.send::<GameChannel>(ServerMessage::Chat {
+                            channel,
+                            from: name.clone(),
+                            text: text.clone(),
+                        });
+                        recipients += 1;
+                    }
+                    tracing::info!(%name, ?channel, recipients, %text, "chat message");
                 }
                 ClientMessage::Attack { target } => {
                     let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {

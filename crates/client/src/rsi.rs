@@ -270,7 +270,7 @@ fn upload_state(
         );
     }
 
-    let image = Image::new(
+    let mut image = Image::new(
         Extent3d {
             width: packed.width(),
             height: packed.height(),
@@ -281,6 +281,8 @@ fn upload_state(
         TextureFormat::Rgba8UnormSrgb,
         RenderAssetUsages::default(),
     );
+    // Спрайты SS14 — пиксель-арт: только ближайший тексель (FilterMode.Point).
+    image.sampler = bevy::image::ImageSampler::nearest();
     let image_handle = images.add(image);
     let layout_handle = layouts.add(layout);
     (image_handle, layout_handle)

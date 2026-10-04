@@ -13,15 +13,54 @@
 //! * верхняя панель — `MenuButton`: иконка 42×64 и подпись горячей клавиши
 //!   (цвета #99a7b3 / #acbac6 / #75838e).
 
+use bevy::image::ImageLoaderSettings;
 use bevy::prelude::*;
 
 // ------------------------------------------------------------------ цвета
+//
+// В сборке mini-station-goob активна не «классическая» StyleNano, а её
+// стеклянный вариант (`StylesheetManager.UpdateMiniStyles` → StyleNano):
+// панели и кнопки — плоские StyleBoxFlat, тонированные акцентом
+// `ui.interface_accent_* = 127,183,255` (#7FB7FF). Значения ниже посчитаны
+// той же формулой, что `StyleNano.Accent()` (alpha ≥ 0.92, mix × 0.85).
 
-/// `StyleNano.ButtonColorDefault`.
+/// Акцент интерфейса (`CCVars.Interface`: 127,183,255).
+#[allow(dead_code)]
+pub const ACCENT: Color = Color::srgb_u8(0x7f, 0xb7, 0xff);
+/// Кнопка в покое: `Accent("#20202ACC", 0.16)`.
+pub const GLASS_BUTTON: Color = Color::srgba(0.188, 0.208, 0.267, 0.92);
+/// Кнопка под курсором: `Accent("#30303CCC", 0.24)`.
+pub const GLASS_BUTTON_HOVERED: Color = Color::srgba(0.267, 0.298, 0.373, 0.92);
+/// Кнопка нажата: `Accent("#181822E6", 0.12)`.
+pub const GLASS_BUTTON_PRESSED: Color = Color::srgba(0.145, 0.157, 0.212, 0.92);
+/// Кнопка недоступна: `Accent("#14141C8A", 0.08)`.
+#[allow(dead_code)]
+pub const GLASS_BUTTON_DISABLED: Color = Color::srgba(0.114, 0.122, 0.165, 0.92);
+/// Тело окна: `Accent("#14141CF0", 0.06)`.
+pub const GLASS_PANEL: Color = Color::srgba(0.106, 0.110, 0.149, 0.94);
+/// Шапка окна: `Accent("#2A2A38D9", 0.26)`.
+pub const GLASS_HEADER: Color = Color::srgba(0.259, 0.290, 0.373, 0.92);
+/// Поле ввода: `Accent("#12121CCF", 0.06)`.
+pub const GLASS_LINEEDIT: Color = Color::srgba(0.098, 0.106, 0.149, 0.92);
+/// Подчёркивание шапки — акцент с альфой 0.72 (`WindowHeadingBackground`).
+pub const GLASS_HEADER_LINE: Color = Color::srgba(0.498, 0.718, 1.0, 0.72);
+/// Заголовок окна (`DefaultWindow`: `windowTitle` = #EAF2FF).
+pub const WINDOW_TITLE: Color = Color::srgb_u8(0xea, 0xf2, 0xff);
+/// Отступ содержимого окна (`DefaultWindow.xaml`: `ContentsContainer Margin="10"`).
+pub const WINDOW_CONTENT_MARGIN: f32 = 10.0;
+/// Отступ кнопки по горизонтали (content margin H14 + padding 1).
+pub const BUTTON_PADDING_H: f32 = 12.0;
+/// Отступ кнопки по вертикали (content margin V2 + padding 1).
+pub const BUTTON_PADDING_V: f32 = 4.0;
+
+/// `StyleNano.ButtonColorDefault` (классическая нанопалитра — задел).
+#[allow(dead_code)]
 pub const BUTTON_DEFAULT: Color = Color::srgb_u8(0x46, 0x49, 0x66);
 /// `StyleNano.ButtonColorHovered`.
+#[allow(dead_code)]
 pub const BUTTON_HOVERED: Color = Color::srgb_u8(0x57, 0x5b, 0x7f);
 /// `StyleNano.ButtonColorPressed`.
+#[allow(dead_code)]
 pub const BUTTON_PRESSED: Color = Color::srgb_u8(0x3e, 0x6c, 0x45);
 /// `StyleNano.ButtonColorDisabled`.
 #[allow(dead_code)]
@@ -31,7 +70,8 @@ pub const BUTTON_DISABLED: Color = Color::srgb_u8(0x30, 0x31, 0x3c);
 pub const BUTTON_RED: Color = Color::srgb_u8(0xd4, 0x3b, 0x3b);
 /// `StyleNano.NanoGold` — заголовки окон.
 pub const NANO_GOLD: Color = Color::srgb_u8(0xa8, 0x8b, 0x5e);
-/// `StyleNano.PanelDark`.
+/// `StyleNano.PanelDark` (задел: фон панелей без текстуры).
+#[allow(dead_code)]
 pub const PANEL_DARK: Color = Color::srgb_u8(0x1e, 0x1e, 0x22);
 /// `themes.yml whiteText` — основной текст.
 pub const TEXT: Color = Color::srgb_u8(0xff, 0xf5, 0xee);
@@ -46,16 +86,16 @@ pub const TOP_ICON_PRESSED: Color = Color::srgb_u8(0x75, 0x83, 0x8e);
 /// `StyleNano.ChatBackgroundColor`.
 #[allow(dead_code)]
 pub const CHAT_BACKGROUND: Color = Color::srgba(0.145, 0.145, 0.165, 0.86);
-/// Модуляция ячеек хранилища: в `StorageWindow.cs` таблица затемняется `#222222`,
-/// но на светлой текстуре `tile_empty.png` этого мало — берём чуть светлее,
-/// чтобы границы клеток читались (как на скриншотах SS14).
-pub const GRID_BACKGROUND: Color = Color::srgb_u8(0x55, 0x55, 0x5c);
+/// Модуляция ячеек хранилища — ровно как `StorageWindow.cs` (`#222222`):
+/// светлая текстура `tile_empty.png` затемняется до тёмных ячеек SS14.
+pub const GRID_BACKGROUND: Color = Color::srgb_u8(0x22, 0x22, 0x22);
 
 // ------------------------------------------------------------------ размеры
 
 /// `SlotControl.DefaultButtonSize` — сторона слота руки/хотбара.
 pub const SLOT_SIZE: f32 = 64.0;
 /// `GridContainer.Separations` — зазор между слотами.
+#[allow(dead_code)]
 pub const SLOT_GAP: f32 = 4.0;
 /// Сторона ячейки хранилища (16 px × 2).
 pub const STORAGE_CELL: f32 = 32.0;
@@ -84,6 +124,11 @@ pub struct UiTheme {
     pub slot_highlight: Handle<Image>,
     /// `Slots/toggle` — кнопка окна инвентаря.
     pub slot_toggle: Handle<Image>,
+    /// `SlotBackground` — фон слота действия (`ActionButton` в SS14).
+    pub slot_background: Handle<Image>,
+
+    /// Иконки действий: [взгляд, бросок, удар, удар выключен].
+    pub action_icons: Vec<Handle<Image>>,
     /// `item_status_left` — панель статуса слева от рук.
     pub status_left: Handle<Image>,
     /// `item_status_right` — панель статуса справа.
@@ -94,18 +139,45 @@ pub struct UiTheme {
     pub storage_exit: Handle<Image>,
     /// `Storage/sidebar_fat` — сайдбар окна хранилища.
     pub storage_sidebar: Handle<Image>,
-    /// `Nano/button.svg.96dpi` — текстура кнопок.
-    pub button: Handle<Image>,
-    /// `Nano/lineedit` — текстура поля ввода (поиск в спавн-меню).
-    pub lineedit: Handle<Image>,
-    /// `Nano/window_background_bordered` — фон окна.
-    pub window_background: Handle<Image>,
     /// `Nano/cross.svg` — крестик закрытия окна.
     pub cross: Handle<Image>,
+    /// `Storage/piece_*` — рамки предметов в хранилище (центр, края, углы).
+    #[allow(dead_code)]
+    pub storage_pieces: Vec<Handle<Image>>,
+    /// `Storage/sidebar_top|mid|bottom` — сегменты сайдбара хранилища.
+    pub storage_sidebar_segments: Vec<Handle<Image>>,
+    /// `item_status_*_highlight` — подсветка панели активной руки.
+    pub status_highlights: Vec<Handle<Image>>,
     /// Иконки верхней панели (MenuButton): [меню, гайд, персонаж, эмоции,
     /// молот (крафт), кулак (бой), молоток судьи (админ), песочница (спавн)].
     pub icons: Vec<Handle<Image>>,
 }
+
+/// Рамки предметов в хранилище (`Storage/piece_*`, 8×8 при масштабе ×2).
+pub const STORAGE_PIECES: [&str; 9] = [
+    "sprites/ss14/Interface/Default/Storage/piece_center.png",
+    "sprites/ss14/Interface/Default/Storage/piece_top.png",
+    "sprites/ss14/Interface/Default/Storage/piece_bottom.png",
+    "sprites/ss14/Interface/Default/Storage/piece_left.png",
+    "sprites/ss14/Interface/Default/Storage/piece_right.png",
+    "sprites/ss14/Interface/Default/Storage/piece_topLeft.png",
+    "sprites/ss14/Interface/Default/Storage/piece_topRight.png",
+    "sprites/ss14/Interface/Default/Storage/piece_bottomLeft.png",
+    "sprites/ss14/Interface/Default/Storage/piece_bottomRight.png",
+];
+
+/// Сегменты сайдбара хранилища: [верх, середина, низ].
+pub const STORAGE_SIDEBAR: [&str; 3] = [
+    "sprites/ss14/Interface/Default/Storage/sidebar_top.png",
+    "sprites/ss14/Interface/Default/Storage/sidebar_mid.png",
+    "sprites/ss14/Interface/Default/Storage/sidebar_bottom.png",
+];
+
+/// Подсветка панели статуса активной руки: [правая (слева на экране), левая].
+pub const STATUS_HIGHLIGHTS: [&str; 2] = [
+    "sprites/ss14/Interface/Default/item_status_right_highlight.png",
+    "sprites/ss14/Interface/Default/item_status_left_highlight.png",
+];
 
 /// Пути иконок верхней панели (порядок — как в [`UiTheme::icons`]).
 pub const TOP_ICONS: [&str; 8] = [
@@ -119,37 +191,57 @@ pub const TOP_ICONS: [&str; 8] = [
     "sprites/ss14/Interface/sandbox.svg.192dpi.png",
 ];
 
-/// Загружает текстуры темы при старте.
-pub fn load_ui_theme(mut commands: Commands, assets: Res<AssetServer>) {
-    commands.insert_resource(UiTheme {
-        hand_l: assets.load("sprites/ss14/Interface/Default/Slots/hand_l.png"),
-        hand_r: assets.load("sprites/ss14/Interface/Default/Slots/hand_r.png"),
-        slot_highlight: assets.load("sprites/ss14/Interface/Default/Slots/slot_highlight.png"),
-        slot_toggle: assets.load("sprites/ss14/Interface/Default/Slots/toggle.png"),
-        status_left: assets.load("sprites/ss14/Interface/Default/item_status_left.png"),
-        status_right: assets.load("sprites/ss14/Interface/Default/item_status_right.png"),
-        storage_tile: assets.load("sprites/ss14/Interface/Default/Storage/tile_empty.png"),
-        storage_exit: assets.load("sprites/ss14/Interface/Default/Storage/exit.png"),
-        storage_sidebar: assets.load("sprites/ss14/Interface/Default/Storage/sidebar_fat.png"),
-        button: assets.load("sprites/ss14/Interface/Nano/button.svg.96dpi.png"),
-        lineedit: assets.load("sprites/ss14/Interface/Nano/lineedit.png"),
-        window_background: assets
-            .load("sprites/ss14/Interface/Nano/window_background_bordered.png"),
-        cross: assets.load("sprites/ss14/Interface/Nano/cross.svg.png"),
-        icons: TOP_ICONS.iter().map(|path| assets.load(*path)).collect(),
-    });
+/// Пути иконок действий (порядок — как в [`UiTheme::action_icons`]).
+pub const ACTION_ICONS: [&str; 4] = [
+    "sprites/ss14/Interface/Actions/eyeopen.png",
+    "sprites/ss14/Interface/Actions/drop.png",
+    "sprites/ss14/Interface/Actions/harm.png",
+    "sprites/ss14/Interface/Actions/harmOff.png",
+];
+
+/// Грузит PNG интерфейса с пиксельной фильтрацией (`FilterMode.Point` в SS14):
+/// без неё спрайты слотов и иконки размываются при масштабе ×2.
+fn load_pixel(assets: &AssetServer, path: &'static str) -> Handle<Image> {
+    assets
+        .load_builder()
+        .with_settings(|settings: &mut ImageLoaderSettings| {
+            settings.sampler = bevy::image::ImageSampler::nearest();
+        })
+        .load(path)
 }
 
-/// 9-slice картинка с растянутым центром — аналог `StyleBoxTexture` движка.
-pub fn nine_slice(handle: &Handle<Image>, border: f32) -> ImageNode {
-    let mut node = ImageNode::new(handle.clone());
-    node.image_mode = NodeImageMode::Sliced(TextureSlicer {
-        border: border_rect(border),
-        center_scale_mode: SliceScaleMode::Stretch,
-        sides_scale_mode: SliceScaleMode::Stretch,
-        max_corner_scale: 1.0,
+/// Грузит PNG интерфейса с линейной фильтрацией — как текстуры с
+/// `sample.filter: true` в сборке (`cross.svg.png.yml`).
+fn load_linear(assets: &AssetServer, path: &'static str) -> Handle<Image> {
+    assets
+        .load_builder()
+        .with_settings(|settings: &mut ImageLoaderSettings| {
+            settings.sampler = bevy::image::ImageSampler::linear();
+        })
+        .load(path)
+}
+
+/// Загружает текстуры темы при старте.
+pub fn load_ui_theme(mut commands: Commands, assets: Res<AssetServer>) {
+    let load = |path: &'static str| load_pixel(&assets, path);
+    commands.insert_resource(UiTheme {
+        hand_l: load("sprites/ss14/Interface/Default/Slots/hand_l.png"),
+        hand_r: load("sprites/ss14/Interface/Default/Slots/hand_r.png"),
+        slot_highlight: load("sprites/ss14/Interface/Default/slot_highlight.png"),
+        slot_toggle: load("sprites/ss14/Interface/Default/Slots/toggle.png"),
+        slot_background: load("sprites/ss14/Interface/Default/SlotBackground.png"),
+        status_left: load("sprites/ss14/Interface/Default/item_status_left.png"),
+        status_right: load("sprites/ss14/Interface/Default/item_status_right.png"),
+        storage_tile: load("sprites/ss14/Interface/Default/Storage/tile_empty.png"),
+        storage_exit: load("sprites/ss14/Interface/Default/Storage/exit.png"),
+        storage_sidebar: load("sprites/ss14/Interface/Default/Storage/sidebar_fat.png"),
+        cross: load_linear(&assets, "sprites/ss14/Interface/Nano/cross.svg.png"),
+        storage_pieces: STORAGE_PIECES.iter().map(|path| load(path)).collect(),
+        storage_sidebar_segments: STORAGE_SIDEBAR.iter().map(|path| load(path)).collect(),
+        status_highlights: STATUS_HIGHLIGHTS.iter().map(|path| load(path)).collect(),
+        icons: TOP_ICONS.iter().map(|path| load(path)).collect(),
+        action_icons: ACTION_ICONS.iter().map(|path| load(path)).collect(),
     });
-    node
 }
 
 /// 9-slice с разными отступами по сторонам (панель статуса: top 6 / bottom 4).
@@ -171,13 +263,6 @@ pub fn nine_slice_rect(
         max_corner_scale: 1.0,
     });
     node
-}
-
-fn border_rect(border: f32) -> BorderRect {
-    BorderRect {
-        min_inset: Vec2::splat(border),
-        max_inset: Vec2::splat(border),
-    }
 }
 
 /// Картинка с текстурой, растянутой на весь узел (ячейки хранилища и иконки).
