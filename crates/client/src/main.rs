@@ -32,9 +32,15 @@ use ssr_protocol::{
 /// Тик-рейт сети (совпадает с сервером, T0.3).
 const NET_TPS: f64 = 20.0;
 
-/// Адрес сервера (T5.4 добавит экран подключения).
-const SERVER_ADDR: SocketAddr =
-    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), DEFAULT_SERVER_PORT);
+/// Адрес сервера (T5.4 добавит экран подключения). Порт переопределяется
+/// `SSR_PORT` — тестовые прогоны идут на отдельном порту, не мешая игре в 7777.
+fn server_addr() -> SocketAddr {
+    let port = std::env::var("SSR_PORT")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(DEFAULT_SERVER_PORT);
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
+}
 
 /// Локальный конец линка (порт 0 — любой свободный).
 const CLIENT_ADDR: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
@@ -108,6 +114,8 @@ fn main() {
             inventory_ui::sync_inhand_items,
             inventory_ui::render_inventory_panel,
             inventory_ui::render_hands_panel,
+            inventory_ui::spawn_health_hud,
+            inventory_ui::update_health_hud,
             inventory_ui::render_action_menu,
             inventory_ui::inventory_slot_click,
             inventory_ui::hands_ui_click,
@@ -210,7 +218,7 @@ fn enter_game(
         .spawn((
             Client,
             LocalAddr(CLIENT_ADDR),
-            PeerAddr(SERVER_ADDR),
+            PeerAddr(server_addr()),
             Link::default(),
             RawClient,
             UdpIo::default(),

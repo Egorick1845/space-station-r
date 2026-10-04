@@ -8,7 +8,7 @@ use lightyear::prelude::client::*;
 use lightyear::prelude::*;
 use ssr_core::PlayerPosition;
 use ssr_core::inventory::{
-    HAND_SLOTS, Hands, HeldBy, INVENTORY_COLS, INVENTORY_ROWS, Inventory, SLOT_ANY,
+    HAND_SLOTS, Hands, Health, HeldBy, INVENTORY_COLS, INVENTORY_ROWS, Inventory, SLOT_ANY,
 };
 use ssr_protocol::net::GameChannel;
 use ssr_protocol::{ActionOption, ClientMessage};
@@ -449,6 +449,76 @@ pub fn render_hands_panel(
                 TextColor(Color::srgb(0.88, 0.88, 0.90)),
             ));
         });
+}
+
+/// HUD здоровья своего игрока (T4.1): «HP 100/100» над панелью рук.
+#[derive(Component)]
+pub struct HealthHudRoot;
+
+/// Текст HUD здоровья.
+#[derive(Component)]
+pub struct HealthHudText;
+
+/// Создаёт HUD здоровья один раз, когда свой игрок появился.
+pub fn spawn_health_hud(
+    mut commands: Commands,
+    own: Res<OwnPlayerEntity>,
+    roots: Query<(), With<HealthHudRoot>>,
+) {
+    if own.0.is_none() || !roots.is_empty() {
+        return;
+    }
+    commands
+        .spawn((
+            HealthHudRoot,
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(12),
+                bottom: px(295),
+                padding: UiRect::new(px(10), px(10), px(6), px(6)),
+                border: UiRect::all(px(2)),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.06, 0.06, 0.08, 0.72)),
+            BorderColor::from(Color::srgb(0.28, 0.28, 0.33)),
+        ))
+        .with_child((
+            HealthHudText,
+            Text::new("HP 100/100"),
+            TextFont::from_font_size(14.0),
+            TextColor(Color::srgb(0.55, 0.85, 0.55)),
+        ));
+}
+
+/// Обновляет HUD здоровья из реплицированного Health (T4.1).
+pub fn update_health_hud(
+    own: Res<OwnPlayerEntity>,
+    healths: Query<&Health>,
+    mut texts: Query<(&mut Text, &mut TextColor), With<HealthHudText>>,
+) {
+    let Some(entity) = own.0 else {
+        return;
+    };
+    let Ok(health) = healths.get(entity) else {
+        return;
+    };
+    let value = format!("HP {}/{}", health.current, health.max);
+    let color = if health.current > 60 {
+        Color::srgb(0.55, 0.85, 0.55)
+    } else if health.current > 30 {
+        Color::srgb(0.92, 0.82, 0.35)
+    } else {
+        Color::srgb(0.92, 0.35, 0.32)
+    };
+    for (mut text, mut text_color) in &mut texts {
+        if text.0 != value {
+            text.0 = value.clone();
+            tracing::info!(hp = health.current, "own health changed");
+        }
+        if text_color.0 != color {
+            text_color.0 = color;
+        }
+    }
 }
 
 /// Меню действий: строится из ответа сервера, позиционируется у курсора.

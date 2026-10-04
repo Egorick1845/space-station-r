@@ -42,9 +42,15 @@ const INTEREST_RADIUS: i32 = 2;
 /// Число сущностей нагрузочного теста (критерий T1.4: клиент получает < 100 из 1000).
 const LOAD_TEST_ENTITIES: u32 = 1000;
 
-/// Адрес, который слушает сервер.
-const SERVER_ADDR: SocketAddr =
-    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), DEFAULT_SERVER_PORT);
+/// Адрес, который слушает сервер. Порт переопределяется `SSR_PORT` — тестовые
+/// прогоны идут на отдельном порту и не перехватывают живую игру в 7777.
+fn server_addr() -> SocketAddr {
+    let port = std::env::var("SSR_PORT")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(DEFAULT_SERVER_PORT);
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
+}
 
 fn main() {
     // Фильтр логов берётся из RUST_LOG (например, `RUST_LOG=debug`), по умолчанию info.
@@ -94,16 +100,20 @@ fn main() {
         )
             .chain(),
     );
+    app.add_message::<DamageEvent>();
+    app.add_message::<DeathEvent>();
     app.add_systems(
         Update,
         (
             tick_logger,
             handle_client_messages,
-            process_actions,
+            // Урон применяется сразу после разбора очереди действий (T4.1).
+            (process_actions, apply_damage, respawn_dead).chain(),
             movement,
             sync_replicated_position,
             update_client_rooms,
             log_player_position,
+            damage_test,
         ),
     );
     app.add_observer(on_link_connected);
@@ -130,11 +140,12 @@ fn main() {
 /// Сетевой сервер: одна сущность-линк на клиента.
 fn startup(mut commands: Commands) -> Result {
     // RawServer: идентификация клиента по адресу (netcode/авторизация — позже, с привязкой к сайту).
+    let addr = server_addr();
     let server = commands
-        .spawn((RawServer, LocalAddr(SERVER_ADDR), ServerUdpIo::default()))
+        .spawn((RawServer, LocalAddr(addr), ServerUdpIo::default()))
         .id();
     commands.trigger(Start { entity: server });
-    tracing::info!(%SERVER_ADDR, "server listening");
+    tracing::info!(%addr, "server listening");
     Ok(())
 }
 
@@ -332,6 +343,32 @@ struct ActionQueue(Vec<(Entity, QueuedAction)>);
 enum QueuedAction {
     Do(ActionKind),
     RequestActions { entity: u64, tx: i32, ty: i32 },
+}
+
+/// Источник урона (T4.1): кто и чем нанёс удар. Новые источники (среда,
+/// удушье, электричество) добавляются сюда по мере задач T4.3/T4.4.
+#[derive(Debug, Clone)]
+enum DamageSource {
+    /// Ближний бой: атакующий и предмет в его активной руке.
+    Melee {
+        attacker: Entity,
+        weapon: Option<String>,
+    },
+}
+
+/// Урон, нанесённый за кадр (T4.1): пишется атакой, применяется apply_damage.
+#[derive(Message, Debug)]
+struct DamageEvent {
+    target: Entity,
+    amount: i32,
+    source: DamageSource,
+}
+
+/// Смерть игрока — Health дошёл до нуля (T4.1): лог и возврат на спавн.
+#[derive(Message, Debug)]
+struct DeathEvent {
+    target: Entity,
+    killer: Option<Entity>,
 }
 
 /// Чанк → комната (T1.4). Комнаты выделяются лениво из RoomAllocator.
@@ -879,18 +916,17 @@ fn process_actions(
     mut queue: ResMut<ActionQueue>,
     mut index: ResMut<MapIndex>,
     mut chunks: Query<&mut TileChunkData>,
-    mut bodies: Query<&mut Position>,
     positions: Query<&PlayerPosition>,
     mut inventories: Query<&mut Inventory>,
     mut hands: Query<&mut Hands>,
-    mut healths: Query<&mut Health>,
+    healths: Query<&Health>,
     mut doors: Query<&mut Door>,
     mut containers: Query<&mut Container>,
     container_positions: Query<&ItemPosition>,
     items: Query<&Item>,
     mut senders: Query<&mut MessageSender<ServerMessage>, With<Connected>>,
-    map: Res<GameMap>,
     players: Res<Players>,
+    mut damage_events: MessageWriter<DamageEvent>,
 ) {
     if queue.0.is_empty() {
         return;
@@ -984,11 +1020,11 @@ fn process_actions(
                     tracing::warn!(?target_entity, "attack: too far");
                     continue;
                 }
-                let Ok(mut health) = healths.get_mut(target_entity) else {
+                if healths.get(target_entity).is_err() {
                     tracing::warn!(?target_entity, "attack: target has no health");
                     continue;
-                };
-                // Урон по предмету в активной руке: лом — 15, кулак — 5 (T4.1-мини).
+                }
+                // Урон по предмету в активной руке: лом — 15, кулак — 5.
                 let weapon = hands
                     .get(player)
                     .ok()
@@ -1001,22 +1037,14 @@ fn process_actions(
                 } else {
                     5
                 };
-                let dead = health.damage(damage);
-                tracing::info!(
-                    ?player,
-                    ?target_entity,
-                    damage,
-                    hp = health.current,
-                    "attack hit"
-                );
-                if dead {
-                    health.current = health.max;
-                    let spawn = map.spawn_points.first().copied().unwrap_or((0.0, 0.0));
-                    if let Ok(mut body) = bodies.get_mut(target_entity) {
-                        body.0 = Vector::new(spawn.0, spawn.1);
-                    }
-                    tracing::info!(?target_entity, "player died and respawned");
-                }
+                damage_events.write(DamageEvent {
+                    target: target_entity,
+                    amount: damage,
+                    source: DamageSource::Melee {
+                        attacker: player,
+                        weapon,
+                    },
+                });
             }
             ActionKind::Interact { entity } => {
                 let Some(target) = Entity::try_from_bits(entity) else {
@@ -1168,6 +1196,94 @@ fn process_actions(
             }
         }
     }
+}
+
+/// Применяет урон из событий (T4.1): Health − amount, лог каждого попадания
+/// с источником, при нуле — событие смерти.
+fn apply_damage(
+    mut damage_events: MessageReader<DamageEvent>,
+    mut death_events: MessageWriter<DeathEvent>,
+    mut healths: Query<&mut Health>,
+) {
+    for event in damage_events.read() {
+        let Ok(mut health) = healths.get_mut(event.target) else {
+            tracing::warn!(target = ?event.target, "damage: target has no health");
+            continue;
+        };
+        let dead = health.damage(event.amount);
+        let (killer, weapon) = match &event.source {
+            DamageSource::Melee { attacker, weapon } => {
+                (Some(*attacker), weapon.as_deref().unwrap_or("fist"))
+            }
+        };
+        tracing::info!(
+            target = ?event.target,
+            amount = event.amount,
+            killer = ?killer,
+            weapon,
+            hp = health.current,
+            "damage applied"
+        );
+        if dead {
+            death_events.write(DeathEvent {
+                target: event.target,
+                killer,
+            });
+        }
+    }
+}
+
+/// Смерть (T4.1): Health обратно к максимуму, тело на точку спавна, лог.
+fn respawn_dead(
+    mut death_events: MessageReader<DeathEvent>,
+    mut healths: Query<&mut Health>,
+    mut bodies: Query<&mut Position>,
+    map: Res<GameMap>,
+) {
+    for event in death_events.read() {
+        if let Ok(mut health) = healths.get_mut(event.target) {
+            health.current = health.max;
+        }
+        let spawn = map.spawn_points.first().copied().unwrap_or((0.0, 0.0));
+        if let Ok(mut body) = bodies.get_mut(event.target) {
+            body.0 = Vector::new(spawn.0, spawn.1);
+        }
+        tracing::info!(
+            target = ?event.target,
+            killer = ?event.killer,
+            spawn = ?spawn,
+            "player died and respawned"
+        );
+    }
+}
+
+/// Тест T4.1: SSR_DAMAGE_TEST=1 — раз в секунду 25 урона первому игроку
+/// (4 удара → смерть → респавн; весь цикл проверяется одним клиентом).
+fn damage_test(
+    time: Res<Time>,
+    players: Res<Players>,
+    mut next_hit: Local<f32>,
+    mut damage_events: MessageWriter<DamageEvent>,
+) {
+    if std::env::var_os("SSR_DAMAGE_TEST").is_none() {
+        return;
+    }
+    *next_hit += time.delta_secs();
+    if *next_hit < 1.0 {
+        return;
+    }
+    *next_hit = 0.0;
+    let Some(entry) = players.entries.first() else {
+        return;
+    };
+    damage_events.write(DamageEvent {
+        target: entry.player,
+        amount: 25,
+        source: DamageSource::Melee {
+            attacker: entry.player,
+            weapon: None,
+        },
+    });
 }
 
 /// Тест коллизии T2.2: SSR_COLLISION_TEST=1 ставит стену 32×4096 с центром
