@@ -13,7 +13,9 @@ use ssr_protocol::net::GameChannel;
 
 use crate::rsi::RsiRegistry;
 
-/// RSI ящика из сборки: состояния closed/open.
+/// RSI ящика из сборки: корпус (`base`) и крышка (`closed`/`open`) — в
+/// движке это отдельные стейты, рисуются друг поверх друга.
+const CRATE_BASE: &str = "sprites/ss14/Structures/Storage/Crates/generic.rsi#base";
 const CRATE_CLOSED: &str = "sprites/ss14/Structures/Storage/Crates/generic.rsi#closed";
 const CRATE_OPEN: &str = "sprites/ss14/Structures/Storage/Crates/generic.rsi#open";
 /// Иконка предмета в слотах (до системы прототипов — лом).
@@ -21,9 +23,15 @@ const ITEM_ICON: &str = "sprites/ss14/Objects/Tools/crowbar.rsi#icon";
 /// Радиус, в котором открытый ящик показывается на экране.
 const CONTAINER_UI_RANGE: f32 = 96.0;
 
-/// Спрайт ящика, привязанный к реплицированной сущности.
+/// Спрайт ящика (корпус), привязанный к реплицированной сущности.
 #[derive(Component)]
 pub struct CrateVisual {
+    container: Entity,
+}
+
+/// Крышка ящика — дочерний спрайт поверх корпуса (стейты closed/open).
+#[derive(Component)]
+pub struct CrateLid {
     container: Entity,
 }
 
@@ -50,45 +58,65 @@ type ContainerSlotClicks<'w, 's> = Query<
 /// Контейнеры мира (сущность, состояние, позиция).
 type WorldContainers<'w, 's> = Query<'w, 's, (Entity, &'static Container, &'static ItemPosition)>;
 
-/// Спавнит спрайты ящиков (закрытый/открытый состояния).
+/// Спавнит спрайты ящиков: корпус + крышка (closed/open) поверх него.
 pub fn spawn_crate_visuals(
     mut commands: Commands,
     registry: Res<RsiRegistry>,
     added: Query<(Entity, &Container, &ItemPosition), Added<Container>>,
 ) {
-    let (Some(closed), Some(open)) = (registry.get(CRATE_CLOSED), registry.get(CRATE_OPEN)) else {
+    let (Some(base), Some(closed), Some(open)) = (
+        registry.get(CRATE_BASE),
+        registry.get(CRATE_CLOSED),
+        registry.get(CRATE_OPEN),
+    ) else {
         tracing::warn!("crate rsi sprites missing");
         return;
     };
     for (entity, container, position) in added.iter() {
-        let target = if container.open { open } else { closed };
-        let mut sprite = Sprite::from_image(target.image.clone());
-        sprite.texture_atlas = Some(TextureAtlas {
-            layout: target.layout.clone(),
+        let lid = if container.open { open } else { closed };
+        let mut base_sprite = Sprite::from_image(base.image.clone());
+        base_sprite.texture_atlas = Some(TextureAtlas {
+            layout: base.layout.clone(),
             index: 0,
         });
-        commands.spawn((
-            CrateVisual { container: entity },
-            sprite,
-            Transform::from_xyz(position.0[0], position.0[1], 0.7),
-        ));
+        let mut lid_sprite = Sprite::from_image(lid.image.clone());
+        lid_sprite.texture_atlas = Some(TextureAtlas {
+            layout: lid.layout.clone(),
+            index: 0,
+        });
+        commands
+            .spawn((
+                CrateVisual { container: entity },
+                base_sprite,
+                Transform::from_xyz(position.0[0], position.0[1], 0.7),
+            ))
+            .with_child((
+                CrateLid { container: entity },
+                lid_sprite,
+                Transform::from_xyz(0.0, 0.0, 0.1),
+            ));
         tracing::info!(container = ?entity, open = container.open, "crate visual spawned");
     }
 }
 
-/// Меняет спрайт при открытии/закрытии и убирает осиротевшие визуалы.
+/// Меняет крышку при открытии/закрытии и убирает осиротевшие визуалы.
 pub fn update_crate_visuals(
     mut commands: Commands,
     registry: Res<RsiRegistry>,
     containers: Query<&Container>,
-    mut visuals: Query<(Entity, &mut CrateVisual, &mut Sprite)>,
+    visuals: Query<(Entity, &CrateVisual)>,
+    mut lids: Query<(&CrateLid, &mut Sprite)>,
 ) {
     let (Some(closed), Some(open)) = (registry.get(CRATE_CLOSED), registry.get(CRATE_OPEN)) else {
         return;
     };
-    for (visual_entity, visual, mut sprite) in visuals.iter_mut() {
-        let Ok(container) = containers.get(visual.container) else {
+    for (visual_entity, visual) in visuals.iter() {
+        if containers.get(visual.container).is_err() {
             commands.entity(visual_entity).despawn();
+        }
+    }
+    for (lid, mut sprite) in lids.iter_mut() {
+        let Ok(container) = containers.get(lid.container) else {
             continue;
         };
         let target = if container.open { open } else { closed };
@@ -98,7 +126,7 @@ pub fn update_crate_visuals(
                 layout: target.layout.clone(),
                 index: 0,
             });
-            tracing::info!(container = ?visual.container, open = container.open, "crate state changed");
+            tracing::info!(container = ?lid.container, open = container.open, "crate state changed");
         }
     }
 }
