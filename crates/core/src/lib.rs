@@ -14,6 +14,7 @@ pub mod clothing;
 pub mod inventory;
 pub mod items;
 pub mod mechanics;
+pub mod occluders;
 pub mod power;
 pub mod prototypes;
 pub mod recipes;

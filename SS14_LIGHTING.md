@@ -55,9 +55,39 @@ highp float ChebyshevUpperBound(highp vec2 moments, highp float t)
 }
 ```
 
-Строка карты теней = один источник: `Строка N хранит для каждого угла (атлас 512 px по кругу)
-`vec2(расстояние, расстояние²)` — моменты VSM. Окклюдеры пишут максимум расстояния по своему
-угловому сектору; свет позже сравнивает своё расстояние с моментом.
+Строка карты теней = один источник: для каждого угла (512 px по кругу, ≈0.7°/px)
+хранится `vec2(расстояние, расстояние²)` — моменты VSM. Заполнение —
+`Robust.Client/Graphics/Clyde/Shaders/shadow-depth.vert/.frag`:
+
+- на каждое РЕБРО окклюдера — квад с атрибутами `aPos = (A.xy, B.xy)`; вершинный шейдер
+  считает `xA = atan2(A−light)`, `xB = atan2(B−light)`, расширяет ребро на
+  `DEPTH_LEFTRIGHT_EXPAND_BIAS = 0.001`; два прохода (`shadowOverlapSide = 0/1`)
+  закрывают разрыв на ±180°;
+- глубина пишется как `zbufferDepth = 1 − 1/(length + 1)` (`DEPTH_ZBUFFER_PREDIV_BIAS = 1.0`);
+- фрагмент: `dist = |fragControl.z / cos(fragControl.x − fragControl.y)|` — расстояние от
+  лампы до ПРЯМОЙ ребра вдоль запрашиваемого угла (аналитика, не рейкаст);
+- моменты: `pack(vec2(dist, dist² + 0.25·(dx²+dy²)))`, где dx/dy — производные (дисперсия);
+- клир-цвет «нет окклюдера» = `(1234, 1234²)` — фактически бесконечность.
+
+Свойства: ближняя по углу грань стены даёт глубину, за которой всё в тени; швы между
+тайлами стен не дают артефактов, потому что общие рёбра подавляются
+(`ShouldSuppressSharedOccluderEdge`, `ClientOccluderSystem`), а лампа, встроенная внутрь
+окклюдера, тени у себя отключает (`IsLightEmbeddedInOccluder`).
+
+## 2а. Как рисуются лампы
+
+- Квад `[-R, +R]²` с центром в позиции лампы (`lightCenter`), смещение маски
+  (`offset`, напр. `0,-0.5` у настенной) учитывается.
+- Смешивание: `BlendFunc(SrcAlpha, One)` — аддитивно с премультипликацией;
+  HDR-таргет `R11FG11FB10F`, там же живёт ambient (клир = цвет `MapLight`).
+- Стенсил: лампы рисуются только туда, где FOV-проход не пометил пиксель
+  (`StencilFunc(Equal, 0xFF)`), см. §5.
+- Униформы: `lightRange = Radius`, `lightPower = Energy`, `lightColor = Color`,
+  `lightSoftness`, `lightFalloff = Falloff (6.8)`, `lightCurveFactor = CurveFactor (0)`,
+  `lightIndex = (row + 0.5) / rows`.
+- Маска FOV подаётся в Texture0 (белая, если маски нет), карта теней — в Texture1
+  (`uniform mask = zTexture(UV).r` в `light_shared.swsl`).
+
 
 ## 3. Свет: формула и мягкие тени
 
