@@ -24,6 +24,11 @@ pub struct Settings {
     /// Активная вкладка окна настроек (не сохраняется между запусками).
     #[serde(skip)]
     pub tab: SettingsTab,
+    /// Показывать прицел боевого режима у курсора
+    /// (`hud.combat_mode_indicators_point_show` в сборке, default true).
+    pub combat_indicators: bool,
+    /// Процедурная анимация шага (`accessibility.foot_walk_animation`, default true).
+    pub foot_walk_animation: bool,
 }
 
 impl Default for Settings {
@@ -36,6 +41,10 @@ impl Default for Settings {
             server: String::new(),
             servers: vec!["127.0.0.1:7777".to_string()],
             tab: SettingsTab::default(),
+            // Как CVar-ы сборки: `hud.combat_mode_indicators_point_show = true`,
+            // `accessibility.foot_walk_animation = true`.
+            combat_indicators: true,
+            foot_walk_animation: true,
         }
     }
 }
@@ -80,11 +89,30 @@ impl Settings {
 #[derive(Component)]
 pub struct SettingsMenu;
 
+/// Корень игрового меню (Escape) — как `EscapeMenu.xaml` в сборке.
+#[derive(Component)]
+pub struct EscapeMenuRoot;
+
+/// Кнопка игрового меню.
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+pub enum EscapeAction {
+    /// «Продолжить» — закрыть меню.
+    Resume,
+    /// «Настройки» — открыть окно настроек (`ui-escape-options`).
+    Options,
+    /// «Управление» — окно настроек на вкладке «Управление».
+    Controls,
+    /// «Выйти» — завершить клиент (`ui-escape-quit`).
+    Quit,
+}
+
 /// Кнопка меню настроек.
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsAction {
     ToggleFullscreen,
     ToggleFps,
+    ToggleCombatIndicators,
+    ToggleFootWalk,
     Close,
 }
 
@@ -94,15 +122,43 @@ pub enum SettingsValue {
     Volume,
     Fullscreen,
     Fps,
+    CombatIndicators,
+    FootWalk,
 }
 
-/// Активная вкладка окна настроек (как вкладки в опциях SS14).
+/// Активная вкладка окна настроек — порядок и названия как у вкладок
+/// `OptionsMenu.xaml` сборки (Основные, Графика, Управление, Аудио, Доступность).
 #[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SettingsTab {
+    Misc,
     #[default]
-    Sound,
     Graphics,
     Controls,
+    Audio,
+    Accessibility,
+}
+
+impl SettingsTab {
+    /// Все вкладки в порядке XAML сборки (без «Админ» и «Сеть»: таких настроек
+    /// у нас пока нет).
+    pub const ALL: [SettingsTab; 5] = [
+        SettingsTab::Misc,
+        SettingsTab::Graphics,
+        SettingsTab::Controls,
+        SettingsTab::Audio,
+        SettingsTab::Accessibility,
+    ];
+
+    /// Заголовок вкладки (`ui-options-tab-*` из options-menu.ftl).
+    pub fn title(self) -> &'static str {
+        match self {
+            SettingsTab::Misc => "Основные",
+            SettingsTab::Graphics => "Графика",
+            SettingsTab::Controls => "Управление",
+            SettingsTab::Audio => "Аудио",
+            SettingsTab::Accessibility => "Доступность",
+        }
+    }
 }
 
 /// Кнопка вкладки.
@@ -159,6 +215,46 @@ pub fn apply_saved_window_mode(settings: Res<Settings>, mut windows: Query<&mut 
     }
 }
 
+/// Тест интерфейса (SSR_MENU_TEST): `1` — через 2 с открыть игровое меню,
+/// `2` — игровое меню, через 5 с окно настроек. Для скриншот-проверки.
+pub fn menu_test(
+    mut commands: Commands,
+    mut settings: ResMut<Settings>,
+    mut state: Local<(u8, f32)>,
+    time: Res<Time>,
+    escape_root: Query<Entity, With<EscapeMenuRoot>>,
+    settings_root: Query<Entity, With<SettingsMenu>>,
+) {
+    let Ok(mode) = std::env::var("SSR_MENU_TEST") else {
+        return;
+    };
+    let mode: u8 = mode.parse().unwrap_or(1);
+    if state.0 == 0 {
+        state.1 += time.delta_secs();
+        if state.1 >= 2.0 {
+            state.0 = 1;
+            if escape_root.is_empty() {
+                spawn_escape_menu(&mut commands, &settings);
+            }
+        }
+        return;
+    }
+    if mode >= 2 && state.0 == 1 {
+        state.1 += time.delta_secs();
+        if state.1 >= 7.0 {
+            state.0 = 2;
+            for entity in escape_root.iter() {
+                commands.entity(entity).despawn();
+            }
+            for entity in settings_root.iter() {
+                commands.entity(entity).despawn();
+            }
+            settings.tab = SettingsTab::Graphics;
+            spawn_menu(&mut commands, &settings);
+        }
+    }
+}
+
 /// Применяет громкость к общему миксу.
 pub fn apply_volume(settings: Res<Settings>, mut volume: ResMut<GlobalVolume>) {
     if settings.is_changed() {
@@ -166,23 +262,174 @@ pub fn apply_volume(settings: Res<Settings>, mut volume: ResMut<GlobalVolume>) {
     }
 }
 
-/// Esc открывает и закрывает меню настроек (когда консоль закрыта).
-pub fn toggle_settings_menu(
+/// Esc: закрыть верхнее окно, иначе открыть/закрыть игровое меню
+/// (`EscapeContextUIController` в сборке: `CloseMostRecentWindow` →
+/// `ToggleWindow`).
+pub fn toggle_escape_menu(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
     console: Res<crate::console::Console>,
     settings: Res<Settings>,
-    root: Query<Entity, With<SettingsMenu>>,
+    escape_root: Query<Entity, With<EscapeMenuRoot>>,
+    settings_root: Query<Entity, With<SettingsMenu>>,
 ) {
     if !keys.just_pressed(KeyCode::Escape) || console.open {
         return;
     }
-    let existing: Vec<Entity> = root.iter().collect();
+    // Открыто окно настроек — Escape закрывает именно его.
+    let settings_open: Vec<Entity> = settings_root.iter().collect();
+    if !settings_open.is_empty() {
+        for entity in settings_open {
+            commands.entity(entity).despawn();
+        }
+        return;
+    }
+    let existing: Vec<Entity> = escape_root.iter().collect();
     for &entity in &existing {
         commands.entity(entity).despawn();
     }
     if existing.is_empty() {
-        spawn_menu(&mut commands, &settings);
+        spawn_escape_menu(&mut commands, &settings);
+    }
+}
+
+/// Игровое меню (`EscapeMenu.xaml`): заголовок окна, список кнопок в
+/// `BoxContainer` с разделителями `LowDivider`, «Выйти» красной кнопкой.
+fn spawn_escape_menu(commands: &mut Commands, settings: &Settings) {
+    let _ = settings;
+    commands
+        .spawn((
+            EscapeMenuRoot,
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Percent(38.0),
+                top: Val::Percent(28.0),
+                width: px(220),
+                flex_direction: FlexDirection::Column,
+                row_gap: px(4),
+                padding: UiRect::all(px(10)),
+                border: UiRect::all(px(2)),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.06, 0.06, 0.08, 0.96)),
+            BorderColor::from(Color::srgb(0.30, 0.30, 0.36)),
+        ))
+        .with_children(|window| {
+            window
+                .spawn((
+                    Node {
+                        width: Val::Percent(100.0),
+                        padding: UiRect::axes(px(8), px(3)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(0.133, 0.133, 0.165, 0.85)),
+                ))
+                .with_child((
+                    Text::new("Игровое меню"),
+                    TextFont::from_font_size(16.0),
+                    TextColor(Color::srgb(0.92, 0.95, 1.0)),
+                ));
+            escape_button(window, "Продолжить", EscapeAction::Resume, false);
+            divider(window);
+            escape_button(window, "Настройки", EscapeAction::Options, false);
+            escape_button(window, "Управление", EscapeAction::Controls, false);
+            divider(window);
+            escape_button(window, "Выйти", EscapeAction::Quit, true);
+        });
+}
+
+/// Кнопка игрового меню (`MinWidth 150`, ContentMargin 14/2 в StyleNano).
+fn escape_button(
+    window: &mut RelatedSpawnerCommands<'_, ChildOf>,
+    label: &str,
+    action: EscapeAction,
+    danger: bool,
+) {
+    window
+        .spawn((
+            action,
+            Button,
+            Node {
+                width: Val::Percent(100.0),
+                height: px(28),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                border: UiRect::all(px(2)),
+                ..default()
+            },
+            BackgroundColor(if danger {
+                Color::srgba(0.831, 0.231, 0.231, 0.85)
+            } else {
+                Color::srgba(0.275, 0.286, 0.400, 0.85)
+            }),
+            BorderColor::from(Color::srgb(0.30, 0.30, 0.35)),
+        ))
+        .with_child((
+            Text::new(label.to_string()),
+            TextFont::from_font_size(14.0),
+            TextColor(Color::srgb(0.92, 0.92, 0.94)),
+        ));
+}
+
+/// Разделитель `LowDivider` (`Margin="0 2.5"`, цвет `#444`).
+fn divider(window: &mut RelatedSpawnerCommands<'_, ChildOf>) {
+    window.spawn((
+        Node {
+            width: Val::Percent(100.0),
+            height: px(2),
+            margin: UiRect::vertical(px(2)),
+            ..default()
+        },
+        BackgroundColor(Color::srgb(0.267, 0.267, 0.267)),
+    ));
+}
+
+/// Клики по кнопкам игрового меню.
+type EscapeClicks<'w, 's> = Query<
+    'w,
+    's,
+    (&'static Interaction, &'static EscapeAction),
+    (Changed<Interaction>, With<Button>),
+>;
+
+/// Обработка игрового меню: продолжить, настройки, управление, выход.
+pub fn escape_click(
+    mut commands: Commands,
+    mut settings: ResMut<Settings>,
+    mut exit: MessageWriter<AppExit>,
+    escape_root: Query<Entity, With<EscapeMenuRoot>>,
+    settings_root: Query<Entity, With<SettingsMenu>>,
+    clicks: EscapeClicks,
+) {
+    for (interaction, action) in clicks.iter() {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        match action {
+            EscapeAction::Resume => {
+                for entity in escape_root.iter() {
+                    commands.entity(entity).despawn();
+                }
+            }
+            EscapeAction::Options | EscapeAction::Controls => {
+                settings.tab = if matches!(action, EscapeAction::Controls) {
+                    SettingsTab::Controls
+                } else {
+                    settings.tab
+                };
+                for entity in escape_root.iter() {
+                    commands.entity(entity).despawn();
+                }
+                for entity in settings_root.iter() {
+                    commands.entity(entity).despawn();
+                }
+                spawn_menu(&mut commands, &settings);
+            }
+            EscapeAction::Quit => {
+                tracing::info!("escape menu: quit");
+                exit.write(AppExit::Success);
+            }
+        }
     }
 }
 
@@ -231,13 +478,38 @@ fn spawn_menu(commands: &mut Commands, settings: &Settings) {
                     BackgroundColor(Color::srgb(0.10, 0.10, 0.13)),
                 ))
                 .with_child((
-                    Text::new("Настройки"),
+                    Text::new("Игровые настройки"),
                     TextFont::from_font_size(16.0),
                     TextColor(Color::srgb(1.0, 0.75, 0.25)),
                 ));
             tabs_row(panel, settings.tab);
             match settings.tab {
-                SettingsTab::Sound => volume_slider(panel, settings.volume),
+                SettingsTab::Misc => {
+                    settings_row(
+                        panel,
+                        "Показывать счётчик FPS",
+                        if settings.show_fps {
+                            "Вкл"
+                        } else {
+                            "Выкл"
+                        },
+                        SettingsValue::Fps,
+                        SettingsAction::ToggleFps,
+                        SettingsAction::ToggleFps,
+                    );
+                    settings_row(
+                        panel,
+                        "Прицел боевого режима у курсора",
+                        if settings.combat_indicators {
+                            "Вкл"
+                        } else {
+                            "Выкл"
+                        },
+                        SettingsValue::CombatIndicators,
+                        SettingsAction::ToggleCombatIndicators,
+                        SettingsAction::ToggleCombatIndicators,
+                    );
+                }
                 SettingsTab::Graphics => {
                     settings_row(
                         panel,
@@ -253,7 +525,7 @@ fn spawn_menu(commands: &mut Commands, settings: &Settings) {
                     );
                     settings_row(
                         panel,
-                        "Показывать FPS",
+                        "Показывать счётчик FPS",
                         if settings.show_fps {
                             "Вкл"
                         } else {
@@ -264,12 +536,27 @@ fn spawn_menu(commands: &mut Commands, settings: &Settings) {
                         SettingsAction::ToggleFps,
                     );
                 }
+                SettingsTab::Audio => volume_slider(panel, settings.volume),
                 SettingsTab::Controls => {
                     panel.spawn((
                         Text::new(KEYBINDS_HELP),
                         TextFont::from_font_size(12.0),
                         TextColor(Color::srgb(0.78, 0.78, 0.82)),
                     ));
+                }
+                SettingsTab::Accessibility => {
+                    settings_row(
+                        panel,
+                        "Анимация шага",
+                        if settings.foot_walk_animation {
+                            "Вкл"
+                        } else {
+                            "Выкл"
+                        },
+                        SettingsValue::FootWalk,
+                        SettingsAction::ToggleFootWalk,
+                        SettingsAction::ToggleFootWalk,
+                    );
                 }
             }
             panel
@@ -295,14 +582,14 @@ fn spawn_menu(commands: &mut Commands, settings: &Settings) {
 }
 
 /// Справка по управлению (вкладка «Управление»).
-pub const KEYBINDS_HELP: &str = "WASD — движение, Shift — бег
-ЛКМ — использовать (в бою — удар), Ctrl+ЛКМ — передать предмет
+pub const KEYBINDS_HELP: &str = "WASD — движение, Shift — ходьба, Space — спринт
+ЛКМ — использовать (в бою — удар), Ctrl+ЛКМ — тянуть/передать предмет
 ПКМ — действия по объекту, E — действие, Shift+E — осмотр
 1/2 — руки, X — сменить руку, Q — бросить предмет
-F — боевой режим, C — крафт, F5 — спавн-меню, F7 — админ-меню
-` — консоль, Esc — это меню";
+F — боевой режим, C — крафт, I — персонаж, F5 — спавн-меню, F7 — админ-меню
+` — консоль, Esc — закрыть окно/игровое меню";
 
-/// Ряд вкладок окна настроек.
+/// Ряд вкладок окна настроек: порядок и подписи как в `OptionsMenu.xaml`.
 fn tabs_row(panel: &mut RelatedSpawnerCommands<'_, ChildOf>, active: SettingsTab) {
     panel
         .spawn(Node {
@@ -311,11 +598,7 @@ fn tabs_row(panel: &mut RelatedSpawnerCommands<'_, ChildOf>, active: SettingsTab
             ..default()
         })
         .with_children(|tabs| {
-            for (label, tab) in [
-                ("Звук", SettingsTab::Sound),
-                ("Графика", SettingsTab::Graphics),
-                ("Управление", SettingsTab::Controls),
-            ] {
+            for tab in SettingsTab::ALL {
                 let selected = tab == active;
                 tabs.spawn((
                     TabButton(tab),
@@ -328,10 +611,12 @@ fn tabs_row(panel: &mut RelatedSpawnerCommands<'_, ChildOf>, active: SettingsTab
                         border: UiRect::all(px(2)),
                         ..default()
                     },
+                    // `glassTabActive` / `glassTabInactive` из StyleNano:
+                    // активная #323240D9, неактивная #1A1A24B3.
                     BackgroundColor(if selected {
-                        Color::srgb(0.20, 0.20, 0.26)
+                        Color::srgba(0.196, 0.196, 0.251, 0.85)
                     } else {
-                        Color::srgb(0.13, 0.13, 0.16)
+                        Color::srgba(0.102, 0.102, 0.141, 0.70)
                     }),
                     BorderColor::from(if selected {
                         Color::srgb(1.0, 0.75, 0.25)
@@ -340,7 +625,7 @@ fn tabs_row(panel: &mut RelatedSpawnerCommands<'_, ChildOf>, active: SettingsTab
                     }),
                 ))
                 .with_child((
-                    Text::new(label),
+                    Text::new(tab.title()),
                     TextFont::from_font_size(13.0),
                     TextColor(Color::srgb(0.88, 0.88, 0.90)),
                 ));
@@ -559,6 +844,12 @@ pub fn settings_click(
                 }
             }
             SettingsAction::ToggleFps => settings.show_fps = !settings.show_fps,
+            SettingsAction::ToggleCombatIndicators => {
+                settings.combat_indicators = !settings.combat_indicators;
+            }
+            SettingsAction::ToggleFootWalk => {
+                settings.foot_walk_animation = !settings.foot_walk_animation;
+            }
             SettingsAction::Close => {
                 for entity in root.iter() {
                     commands.entity(entity).despawn();
@@ -590,6 +881,18 @@ pub fn update_settings_text(
             })
             .into(),
             SettingsValue::Fps => (if settings.show_fps {
+                "Вкл"
+            } else {
+                "Выкл"
+            })
+            .into(),
+            SettingsValue::CombatIndicators => (if settings.combat_indicators {
+                "Вкл"
+            } else {
+                "Выкл"
+            })
+            .into(),
+            SettingsValue::FootWalk => (if settings.foot_walk_animation {
                 "Вкл"
             } else {
                 "Выкл"

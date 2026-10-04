@@ -352,12 +352,21 @@ const SPRINT_EXPECTED: f32 = 4.5;
 /// спринта (PORT_PLAN 2.2) — тогда брать флаг, как в `GetStepRate`.
 pub fn foot_walk_animation(
     time: Res<Time>,
+    settings: Res<crate::settings::Settings>,
     mut walk: Local<std::collections::HashMap<Entity, FootPhase>>,
     mut parts: Query<(&HumanoidPart, &mut Transform)>,
     owners: Query<&GlobalTransform, Without<HumanoidPart>>,
     visuals: Query<&crate::inventory_ui::RemotePlayerVisual>,
     staminas: Query<&ssr_core::stamina::Stamina>,
 ) {
+    // Настройка «Доступность» → «Анимация шага»
+    // (`accessibility.foot_walk_animation` в сборке).
+    if !settings.foot_walk_animation {
+        for (_, mut transform) in parts.iter_mut() {
+            transform.translation.y = 0.0;
+        }
+        return;
+    }
     let dt = time.delta_secs();
     if dt <= 0.0 {
         return;

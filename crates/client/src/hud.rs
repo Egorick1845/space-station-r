@@ -149,6 +149,7 @@ pub fn sync_combat_button(
 pub fn combat_cursor_marker(
     mut commands: Commands,
     state: Res<HudState>,
+    settings: Res<crate::settings::Settings>,
     registry: Res<crate::rsi::RsiRegistry>,
     windows: Query<&Window>,
     markers: Query<Entity, With<CombatCursor>>,
@@ -159,7 +160,11 @@ pub fn combat_cursor_marker(
         .and_then(|window| window.cursor_position());
     let existing: Vec<Entity> = markers.iter().collect();
     let sight = registry.get("sprites/ss14/Interface/Misc/crosshair_pointers.rsi#melee_sight");
-    let (Some(cursor), true, Some(sight)) = (cursor, state.combat, sight) else {
+    // Настройка «Основные» → «Прицел боевого режима»
+    // (`hud.combat_mode_indicators_point_show` в сборке).
+    let (Some(cursor), true, true, Some(sight)) =
+        (cursor, state.combat, settings.combat_indicators, sight)
+    else {
         for entity in existing {
             commands.entity(entity).despawn();
         }

@@ -223,6 +223,7 @@ fn main() {
             startup_map,
             lighting::setup_lighting,
             install_default_font,
+            load_ui_fonts,
             settings::load_settings,
             settings::apply_saved_window_mode,
             content::load_content,
@@ -350,15 +351,17 @@ fn main() {
         )
             .run_if(in_game),
     );
-    // Настройки (Esc) работают и в лобби, и в игре (T5.4).
+    // Игровое меню (Esc) и настройки работают и в лобби, и в игре (T5.4).
     app.add_systems(
         Update,
         (
-            settings::toggle_settings_menu,
+            settings::toggle_escape_menu,
+            settings::escape_click,
             settings::settings_click,
             settings::settings_tab_click,
             settings::volume_slider_drag,
             settings::update_settings_text,
+            settings::menu_test,
         ),
     );
     // Тест-режимы клиента (SSR_*_TEST) — отдельной группой.
@@ -428,6 +431,32 @@ fn main() {
     // Репликация — см. register_replication (тот же список у бота).
     register_replication(&mut app);
     app.run();
+}
+
+/// Шрифты интерфейса: чат — Cozette (`/Fonts/_Mini/Cozette/CozetteVector.ttf`
+/// из сборки, `ui.font_style = "Cozette"` по умолчанию в мини-станции).
+#[derive(Resource, Default)]
+pub struct UiFonts {
+    pub chat: Handle<Font>,
+}
+
+/// Шрифт чата. В сборке это Cozette (`ui.font_style = "Cozette"` по умолчанию,
+/// `/Fonts/_Mini/Cozette/CozetteVector.ttf`), но Cozette объявляет кириллические
+/// коды, не имея кириллических глифов, а стек шрифтов Robust (`UiFontStackManager`:
+/// CozetteVector + NotoSans-*) в bevy повторить нельзя — parley в bevy_text собран
+/// без фичи `system`, и fallback-семейства для кириллицы не подхватываются
+/// (проверено: `append_fallbacks` регистрируется, рендер не меняется). Поэтому
+/// чат рисуется шрифтом по умолчанию (Noto Sans с кириллицей), а файл Cozette
+/// лежит в assets и подключён — вернёмся к нему, когда будет свой стек шрифтов.
+pub fn chat_text_font() -> TextFont {
+    TextFont::from_font_size(12.0)
+}
+
+/// Грузит шрифт чата (Cozette из сборки, `_Mini/Cozette/CozetteVector.ttf`).
+fn load_ui_fonts(mut commands: Commands, assets: Res<AssetServer>) {
+    let chat = assets.load("fonts/CozetteVector.ttf");
+    commands.insert_resource(UiFonts { chat });
+    tracing::info!("шрифт Cozette загружен (чат пока на Noto Sans: см. chat_text_font)");
 }
 
 /// Ставит Noto Sans (из сборки мини-станции, OFL) шрифтом по умолчанию:
