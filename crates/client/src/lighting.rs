@@ -395,6 +395,38 @@ pub fn update_lighting(
         }
     }
 
+    // 1а) Мягкий край видимости: маска сглаживается по соседям, иначе свет у
+    //      границы видимого — резкая ступенька (владелец: «сделай свет мягче»).
+    //      В движке эту мягкость даёт VSM-маска FOV (`fov-lighting.swsl`).
+    let fov = {
+        let mut soft = vec![0.0f32; (side * side) as usize];
+        for ly in 0..side as i32 {
+            for lx in 0..side as i32 {
+                let mut sum = 0.0;
+                let mut count = 0.0;
+                for oy in -1..=1 {
+                    for ox in -1..=1 {
+                        let (nx, ny) = (lx + ox, ly + oy);
+                        if nx < 0 || ny < 0 || nx >= side as i32 || ny >= side as i32 {
+                            continue;
+                        }
+                        let weight = if ox == 0 && oy == 0 {
+                            4.0
+                        } else if ox == 0 || oy == 0 {
+                            2.0
+                        } else {
+                            1.0
+                        };
+                        sum += fov[(ny as u32 * side + nx as u32) as usize] * weight;
+                        count += weight;
+                    }
+                }
+                soft[(ly as u32 * side + lx as u32) as usize] = sum / count;
+            }
+        }
+        soft
+    };
+
     // 2) Свет: ambient + BFS от каждой лампы по нестенным клеткам.
     //    Складываем вклады аддитивно (как SrcAlpha+One в SS14).
     let mut light = vec![AMBIENT; (side * side) as usize];
