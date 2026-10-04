@@ -2571,14 +2571,7 @@ struct MoveVel(Vec2);
 fn movement(
     time: Res<Time>,
     mut clock: ResMut<StaminaClock>,
-    mut players: Query<(
-        Entity,
-        &PlayerInput,
-        &mut LinearVelocity,
-        &mut MoveVel,
-        Option<&KnockedDown>,
-        Option<&mut ssr_core::stamina::Stamina>,
-    )>,
+    mut players: MovingPlayers,
     mut commands: Commands,
     mut damage_events: MessageWriter<DamageEvent>,
 ) {
@@ -2823,6 +2816,20 @@ fn has_door_access(access: &Query<&Access>, player: Entity, door: &Door) -> bool
         .map(|access| access.list.iter().any(|key| key == required))
         .unwrap_or(false)
 }
+
+/// Игроки для системы движения: ввод, скорость, выносливость, лежание.
+type MovingPlayers<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static PlayerInput,
+        &'static mut LinearVelocity,
+        &'static mut MoveVel,
+        Option<&'static KnockedDown>,
+        Option<&'static mut ssr_core::stamina::Stamina>,
+    ),
+>;
 
 /// Часы выносливости: единая шкала времени для трат, пауз и буферов
 /// (`SharedStaminaSystem` работает по `Timing.CurTime`).
