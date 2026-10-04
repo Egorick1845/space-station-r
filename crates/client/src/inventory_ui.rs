@@ -1182,11 +1182,19 @@ pub fn inventory_slot_click(
         if own_inventory(&own, &inventories).is_none() {
             continue;
         }
-        let active_has_item = own_hands(&own, &hands)
-            .map(|h| h.active_item().is_some())
-            .unwrap_or(true);
-        if active_has_item {
-            tracing::debug!("slot click: active hand is busy");
+        // Предмет в руке — клик по клетке кладёт его сюда (владелец: «чтобы
+        // можно было из руки предмет разместить в рюкзак, ткнув по сетке»).
+        // Направление в SS14 то же: с предметом в руке клик по клетке хранилища
+        // вставляет его, без предмета — забирает лежащий в руку.
+        if let Some(item) = own_hands(&own, &hands).and_then(|hands| hands.active_item()) {
+            for mut sender in senders.iter_mut() {
+                sender.send::<GameChannel>(ClientMessage::TransferItem {
+                    item,
+                    to_slot: slot.0,
+                    target_player: 0,
+                });
+            }
+            tracing::info!(item, slot = slot.0, "hand item placed into slot");
             continue;
         }
         for mut sender in senders.iter_mut() {
