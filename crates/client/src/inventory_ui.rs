@@ -630,6 +630,63 @@ pub fn render_inventory_panel(
                             BackgroundColor(ui::GLASS_BUTTON),
                         ))
                         .with_children(|piece| {
+                            // Рамка формы (`ItemGridPiece.cs` сборки): клетка
+                            // рисует ЧЕТЫРЕ кусочка по 16×16 (полклетки), каждый
+                            // выбирается по своим соседям — есть ли за краем ещё
+                            // клетка формы. Текстуры не режутся: каждый кусочек
+                            // (8×8 px) растягивается в свою четверть.
+                            let pick = |edge_y: bool,
+                                        edge_x: bool,
+                                        corner: u8,
+                                        along_y: u8,
+                                        along_x: u8| {
+                                if edge_y && edge_x {
+                                    corner as usize
+                                } else if edge_y {
+                                    along_y as usize
+                                } else if edge_x {
+                                    along_x as usize
+                                } else {
+                                    0 // центр: соседи со всех сторон
+                                }
+                            };
+                            for dy in 0..h {
+                                for dx in 0..w {
+                                    let top = dy == 0;
+                                    let bottom = dy + 1 == h;
+                                    let left = dx == 0;
+                                    let right = dx + 1 == w;
+                                    // (четверть, «нет соседа» по Y, «нет соседа» по X,
+                                    //  угловой кусочек, кусочек по Y, кусочек по X)
+                                    let quarters = [
+                                        ((0.0f32, 0.0f32), top, left, 5u8, 1u8, 3u8),
+                                        ((16.0, 0.0), top, right, 6, 1, 4),
+                                        ((0.0, 16.0), bottom, left, 7, 2, 3),
+                                        ((16.0, 16.0), bottom, right, 8, 2, 4),
+                                    ];
+                                    for ((qx, qy), edge_y, edge_x, corner, along_y, along_x) in
+                                        quarters
+                                    {
+                                        let index = pick(edge_y, edge_x, corner, along_y, along_x);
+                                        let handle = theme
+                                            .storage_pieces
+                                            .get(index)
+                                            .cloned()
+                                            .unwrap_or_default();
+                                        piece.spawn((
+                                            crate::ui_theme::stretched(&handle),
+                                            Node {
+                                                position_type: PositionType::Absolute,
+                                                left: px(dx as f32 * ui::STORAGE_CELL + qx),
+                                                top: px(dy as f32 * ui::STORAGE_CELL + qy),
+                                                width: px(16.0),
+                                                height: px(16.0),
+                                                ..default()
+                                            },
+                                        ));
+                                    }
+                                }
+                            }
                             // Иконка ×2 (64 px) по центру формы — как `ItemGridPiece.cs`
                             // в сборке: спрайт рисуется с `TextureScale = 2` и выходит
                             // за клетку, поэтому предметы выглядят крупными.
