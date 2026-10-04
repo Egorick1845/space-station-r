@@ -1602,7 +1602,8 @@ type BackpackSlots<'w, 's> =
 type CrateSlots<'w, 's> =
     Query<'w, 's, (&'static Interaction, &'static ContainerSlot), (With<Button>, Without<InvSlot>)>;
 
-/// Начало перетаскивания: ЛКМ по занятой клетке рюкзака или ящика.
+/// Начало перетаскивания: ЛКМ по занятой клетке рюкзака, ящика или по руке.
+#[allow(clippy::too_many_arguments)]
 pub fn drag_start(
     mouse: Res<ButtonInput<MouseButton>>,
     mut drag: ResMut<DragItem>,
