@@ -60,6 +60,32 @@ pub struct AppearanceUi {
     pub synced: bool,
 }
 
+/// Внутренний контейнер списка: прокрутка двигает его целиком, поэтому при
+/// прокрутке окно НЕ пересобирается и ничего не мигает (раньше каждое
+/// изменение прокрутки вызывало despawn+respawn — на кадр окно исчезало).
+#[derive(Component, Clone, Copy)]
+pub struct ScrollInner {
+    pub beard: bool,
+}
+
+/// Сколько причёсок проходит поиск (без аллокации списка).
+fn hair_count(search: &str) -> usize {
+    let query = search.to_lowercase();
+    hair_style_names()
+        .iter()
+        .filter(|name| query.is_empty() || name.to_lowercase().contains(&query))
+        .count()
+}
+
+/// Сколько строк в списке бород («нет» + стили) проходит поиск.
+fn beard_count(search: &str) -> usize {
+    let query = search.to_lowercase();
+    1 + facial_hair_style_names()
+        .iter()
+        .filter(|name| query.is_empty() || name.to_lowercase().contains(&query))
+        .count()
+}
+
 /// Строка списка стилей: клик — выбрать. `index` — глобальный индекс
 /// (у бороды 0 — «нет»).
 #[derive(Component, Clone, Copy)]
@@ -93,7 +119,7 @@ pub struct AppearanceSearchField;
 pub struct AppearanceClearButton;
 
 /// Отпечаток окна внешности для сравнения при перерисовке.
-type AppearanceSignature = (bool, usize, usize, bool, usize, i32, i32, String, u32);
+type AppearanceSignature = (bool, usize, usize, bool, usize, String, u32);
 
 /// Клики по строкам списков, квадратикам и стрелкам окна внешности.
 type AppearanceClicks<'w, 's> = Query<
@@ -220,8 +246,8 @@ pub fn render_appearance_menu(
         state.beard,
         state.female,
         state.color,
-        state.hair_scroll.round() as i32,
-        state.beard_scroll.round() as i32,
+        // Прокрутка в подписи НЕ участвует: её применяет отдельная система
+        // сдвигом строк, иначе окно пересобиралось бы на каждый пиксель.
         state.search.clone(),
         registry.generation(),
     );
@@ -565,9 +591,9 @@ fn style_list(
     let view_h = list_view_h(visible_rows);
     let content_h = list_content_h(rows.len());
     let scroll = scroll.clamp(0.0, (content_h - view_h).max(0.0));
-    let first = ((scroll / STYLE_ROW_STEP).floor() as usize).min(rows.len());
-    let offset = scroll - first as f32 * STYLE_ROW_STEP;
-    let visible = rows.iter().skip(first).take(visible_rows + 1);
+    // Рисуем ВСЕ строки списка, а прокрутку применяет сдвиг контейнера
+    // (`appearance_scroll_apply`): при прокрутке окно не пересобирается.
+    let visible = rows.iter();
     // Как `ScrollContainer` в SS14: при видимой полосе контент ужимается на её
     // ширину, чтобы полоса не закрывала текст.
     let bar_width = if content_h > view_h + 1e-3 {
@@ -588,6 +614,7 @@ fn style_list(
         ))
         .with_children(|list| {
             list.spawn((
+                ScrollInner { beard },
                 Node {
                     position_type: PositionType::Absolute,
                     left: px(0),
@@ -597,7 +624,7 @@ fn style_list(
                     row_gap: px(2),
                     ..default()
                 },
-                UiTransform::from_translation(Val2::new(Val::Px(0.0), Val::Px(-offset))),
+                UiTransform::from_translation(Val2::new(Val::Px(0.0), Val::Px(-scroll))),
             ))
             .with_children(|inner| {
                 for (index, name) in visible {
@@ -677,6 +704,41 @@ fn style_list(
             };
             crate::hud::spawn_scrollbar(list, content_h, view_h, scroll, kind);
         });
+}
+
+/// Применяет прокрутку сдвигом готовых строк и двигает грабберы — без
+/// пересборки окна, поэтому при прокрутке ничего не мигает.
+pub fn appearance_scroll_apply(
+    state: Res<AppearanceUi>,
+    mut inners: Query<(&ScrollInner, &mut UiTransform)>,
+    mut grabbers: Query<(&crate::hud::ScrollbarGrabber, &mut Node)>,
+) {
+    use crate::hud::ScrollList;
+    for (inner, mut transform) in inners.iter_mut() {
+        let scroll = if inner.beard {
+            clamp_scroll(&state.beard_scroll, beard_count(&state.search), BEARD_ROWS)
+        } else {
+            clamp_scroll(&state.hair_scroll, hair_count(&state.search), HAIR_ROWS)
+        };
+        transform.translation = Val2::new(Val::Px(0.0), Val::Px(-scroll));
+    }
+    for (grabber, mut node) in grabbers.iter_mut() {
+        let (rows, visible, scroll) = match grabber.list {
+            ScrollList::AppearanceHair => (hair_count(&state.search), HAIR_ROWS, state.hair_scroll),
+            ScrollList::AppearanceBeard => {
+                (beard_count(&state.search), BEARD_ROWS, state.beard_scroll)
+            }
+            ScrollList::SpawnMenu => continue,
+        };
+        // Геометрия граббера — как в `ScrollBar.cs`.
+        let view_h = list_view_h(visible);
+        let content_h = list_content_h(rows);
+        let track = (view_h - ui::SCROLLBAR_MIN_GRABBER).max(0.0);
+        let scroll = scroll.clamp(0.0, (content_h - view_h).max(0.0));
+        let ratio = (scroll / content_h).clamp(0.0, 1.0);
+        node.top = px((ratio * track).round());
+        node.height = px(((view_h / content_h) * track).round() + ui::SCROLLBAR_MIN_GRABBER);
+    }
 }
 
 /// Отправляет текущую внешность на сервер (кукла на экране — превью).

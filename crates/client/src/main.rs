@@ -159,6 +159,7 @@ fn main() {
             appearance::appearance_search_input,
             appearance::appearance_scroll,
             appearance::appearance_scroll_anim,
+            appearance::appearance_scroll_apply,
             appearance::appearance_scrollbar_drag,
             appearance::appearance_click,
             appearance::render_appearance_menu,
@@ -950,6 +951,9 @@ pub fn fit_world_viewport(
     let scale = logical_h / VIRTUAL_H;
     if (orthographic.scale - scale).abs() > 1e-4 {
         orthographic.scale = scale;
-        tracing::info!(scale, "world viewport updated (15 tiles tall, no letterbox)");
+        tracing::info!(
+            scale,
+            "world viewport updated (15 tiles tall, no letterbox)"
+        );
     }
 }
