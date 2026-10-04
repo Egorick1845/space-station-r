@@ -385,6 +385,9 @@ pub struct DragItem {
     pub from_slot: u8,
     /// Тащим из рюкзака игрока (иначе — из открытого ящика).
     pub from_backpack: bool,
+    /// Взято из руки (тогда отпускание вне окон роняет предмет на пол, а не
+    /// пытается убрать его в рюкзак) — SS14 позволяет тащить из рук.
+    pub from_hand: bool,
     /// Смещение курсора для спрайта-призрака.
     pub grabbed: bool,
 }
@@ -1604,14 +1607,36 @@ pub fn drag_start(
     mouse: Res<ButtonInput<MouseButton>>,
     mut drag: ResMut<DragItem>,
     slots: BackpackSlots,
+    hand_slots: Query<(&'static HandSlot, &'static Interaction), With<Button>>,
     container_slots: CrateSlots,
     own: Res<OwnPlayerEntity>,
     inventories: Query<&Inventory>,
+    hands: Query<&ssr_core::inventory::Hands>,
 ) {
     if !mouse.just_pressed(MouseButton::Left) {
         return;
     }
     drag.item = 0;
+    drag.from_hand = false;
+    // Руки: в SS14 предмет тащат и из руки (без этого вернуть вещь из руки в
+    // рюкзак было нечем — владелец: «нельзя положить предмет обратно»).
+    if let Some(player) = own.0
+        && let Ok(hands) = hands.get(player)
+    {
+        for (hand, interaction) in hand_slots.iter() {
+            if *interaction != Interaction::Pressed {
+                continue;
+            }
+            if let Some(item) = hands.slots.get(hand.0 as usize).copied().flatten() {
+                drag.item = item;
+                drag.from_slot = hand.0;
+                drag.from_backpack = false;
+                drag.from_hand = true;
+                drag.grabbed = false;
+                tracing::info!(item, hand = hand.0, "drag started (hand)");
+            }
+        }
+    }
     // Рюкзак: предмет, лежащий в клетке под курсором.
     if let Some(inventory) = own_inventory(&own, &inventories) {
         for (interaction, slot) in slots.iter() {
@@ -1707,6 +1732,7 @@ pub fn drag_release(
     let item = drag.item;
     let from_slot = drag.from_slot;
     let from_backpack = drag.from_backpack;
+    let drag_hand = drag.from_hand;
     drag.item = 0;
     // Клетка рюкзака под курсором.
     for (interaction, slot) in slots.iter() {
@@ -1764,11 +1790,11 @@ pub fn drag_release(
         tracing::info!(item, "drag cancelled over ui");
         return;
     }
-    if from_backpack {
+    if from_backpack || drag_hand {
         for mut sender in senders.iter_mut() {
             sender.send::<GameChannel>(ClientMessage::DropItem { item });
         }
-        tracing::info!(item, "drag: item thrown on floor");
+        tracing::info!(item, from_hand = drag_hand, "drag: item thrown on floor");
     } else {
         for mut sender in senders.iter_mut() {
             sender.send::<GameChannel>(ClientMessage::TransferItem {
