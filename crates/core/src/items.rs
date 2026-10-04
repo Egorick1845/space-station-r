@@ -24,6 +24,14 @@ pub struct ItemProto {
     /// Теги (материал/инструмент/еда) — для рецептов и правил.
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Слот одежды, если предмет надевается (`ClothingSlot` как строка:
+    /// "jumpsuit", "shoes", "gloves", "head", "back", ...).
+    #[serde(default)]
+    pub slot: Option<String>,
+    /// Спрайт «надетым»: `"path.rsi#equipped-INNERCLOTHING"` (состояние из
+    /// сборки: `equipped-<слот>` по карте `ClientClothingSystem.TemporarySlotMap`).
+    #[serde(default)]
+    pub worn: Option<String>,
 }
 
 fn default_size() -> (u8, u8) {
@@ -50,6 +58,16 @@ impl ItemSet {
     /// Размер предмета в клетках (неизвестный — 1×1).
     pub fn size_of(&self, id: &str) -> (u8, u8) {
         self.by_id(id).map(|item| item.size).unwrap_or((1, 1))
+    }
+
+    /// Слот одежды предмета (None — не надевается).
+    pub fn slot_of(&self, id: &str) -> Option<&str> {
+        self.by_id(id).and_then(|item| item.slot.as_deref())
+    }
+
+    /// Спрайт «надетым» (ключ `path.rsi#state`).
+    pub fn worn_of(&self, id: &str) -> Option<&str> {
+        self.by_id(id).and_then(|item| item.worn.as_deref())
     }
 
     /// Название для UI (неизвестный предмет — сам id).

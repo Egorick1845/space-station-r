@@ -43,6 +43,8 @@ pub struct HudState {
     pub warp_open: bool,
     pub combat: bool,
     pub search: String,
+    /// Прокрутка списка спавн-меню (строк).
+    pub spawn_scroll: usize,
 }
 
 /// Действие кнопки HUD.
@@ -828,7 +830,7 @@ fn menu_panel(
 const SPAWN_MENU_ROWS: usize = 11;
 
 /// Отпечаток состояния спавн-меню (открыто, поиск, спрайты, режим размещения).
-type SpawnMenuSignature = (bool, String, u32, Option<String>);
+type SpawnMenuSignature = (bool, String, u32, Option<String>, usize);
 
 /// Перерисовывает спавн-меню (F5) по образцу `EntitySpawnWindow.xaml`:
 /// окно 350×400 у левого края, поле поиска с кнопкой «Очистить», список
@@ -850,6 +852,7 @@ pub fn render_spawn_menu(
         state.search.clone(),
         registry.generation(),
         placement.item.clone(),
+        state.spawn_scroll,
     );
     if last.as_ref() == Some(&signature) {
         return;
@@ -875,6 +878,10 @@ pub fn render_spawn_menu(
         .collect();
     matched.sort_by(|a, b| a.1.cmp(&b.1));
     let total = matched.len();
+    // Прокрутка колесом (`EntitySpawnWindow` прокручивается целиком).
+    let max_scroll = total.saturating_sub(SPAWN_MENU_ROWS);
+    let scroll = state.spawn_scroll.min(max_scroll);
+    matched = matched.split_off(scroll);
     matched.truncate(SPAWN_MENU_ROWS);
     let icons: Vec<Option<ImageNode>> = matched
         .iter()
@@ -1394,10 +1401,52 @@ pub fn spawn_menu_input(
         match &event.logical_key {
             Key::Backspace => {
                 state.search.pop();
+                state.spawn_scroll = 0;
             }
-            Key::Space => state.search.push(' '),
-            Key::Character(text) => state.search.push_str(text),
+            Key::Space => {
+                state.search.push(' ');
+                state.spawn_scroll = 0;
+            }
+            Key::Character(text) => {
+                state.search.push_str(text);
+                state.spawn_scroll = 0;
+            }
             _ => {}
+        }
+    }
+}
+
+/// Прокрутка списков меню колесом мыши (спавн-меню и телепорт призрака).
+pub fn menu_scroll(
+    mut wheel: MessageReader<bevy::input::mouse::MouseWheel>,
+    mut state: ResMut<HudState>,
+    chat: Res<crate::chat::ChatState>,
+    content: Res<ClientContent>,
+) {
+    if chat.focused {
+        wheel.clear();
+        return;
+    }
+    if !state.spawn_open && !state.warp_open {
+        return;
+    }
+    let query = state.search.to_lowercase();
+    let total = content
+        .items
+        .items
+        .iter()
+        .filter(|item| {
+            query.is_empty()
+                || format!("{} {}", item.id.to_lowercase(), item.name.to_lowercase())
+                    .contains(&query)
+        })
+        .count();
+    let max_scroll = total.saturating_sub(SPAWN_MENU_ROWS);
+    for event in wheel.read() {
+        if event.y > 0.0 {
+            state.spawn_scroll = (state.spawn_scroll + 1).min(max_scroll);
+        } else if event.y < 0.0 {
+            state.spawn_scroll = state.spawn_scroll.saturating_sub(1);
         }
     }
 }

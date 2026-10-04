@@ -166,7 +166,7 @@ pub fn spawn_door_visuals(
                 },
                 base_sprite,
                 // Поверх тайлов (z=0), но под игроком (z=1).
-                Transform::from_xyz(door.position[0], door.position[1], 0.5),
+                Transform::from_xyz(door.position[0], door.position[1], 1.5),
             ))
             .add_child(overlay);
         tracing::info!(door = ?entity, open = door.open, "door spawned");
@@ -355,12 +355,15 @@ pub fn send_interact(
     Some(())
 }
 
-/// Обводка объекта под курсором (T3.1; задел под предметы в T3.2):
-/// жёлтая рамка вокруг двери, на которую наведён курсор.
+/// Обводка объекта под курсором — как `InteractionOutline` в SS14: подсвечиваются
+/// все предметы (лежащие на полу и в руках), ящики и шлюзы; цвет — жёлтый
+/// «в зоне взаимодействия» (`SelectionOutlineInrange` — зелёный, вне зоны — красный).
 pub fn hover_outline(
     windows: Query<&Window>,
     camera: Single<(&Camera, &GlobalTransform), With<Camera2d>>,
     doors: Query<&Door>,
+    containers: Query<&ssr_core::inventory::ItemPosition, With<ssr_core::inventory::Container>>,
+    floor_items: Query<&ssr_core::inventory::ItemPosition, With<ssr_core::inventory::Item>>,
     mut gizmos: Gizmos,
 ) {
     let Ok(window) = windows.single() else {
@@ -373,6 +376,7 @@ pub fn hover_outline(
     let Ok(world) = camera.viewport_to_world_2d(camera_transform, cursor) else {
         return;
     };
+    // Шлюзы: рамка тайла.
     for door in doors.iter() {
         let position = Vec2::from_array(door.position);
         if position.distance(world) <= CLICK_RADIUS {
@@ -380,6 +384,21 @@ pub fn hover_outline(
                 Isometry2d::from_translation(position),
                 Vec2::splat(DOOR_HALF * 2.0 + 4.0),
                 Color::srgb(1.0, 0.9, 0.35),
+            );
+        }
+    }
+    // Предметы и ящики: рамка по размеру спрайта (у ящика — тайл).
+    for (position, half) in containers
+        .iter()
+        .map(|position| (position, DOOR_HALF))
+        .chain(floor_items.iter().map(|position| (position, 16.0)))
+    {
+        let point = Vec2::from_array(position.0);
+        if point.distance(world) <= 24.0 {
+            gizmos.rect_2d(
+                Isometry2d::from_translation(point),
+                Vec2::splat(half * 2.0 + 4.0),
+                Color::srgb(1.0, 0.95, 0.55),
             );
         }
     }

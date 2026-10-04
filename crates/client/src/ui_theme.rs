@@ -124,6 +124,14 @@ pub struct UiTheme {
     pub slot_highlight: Handle<Image>,
     /// `Slots/toggle` — кнопка окна инвентаря.
     pub slot_toggle: Handle<Image>,
+    /// `Slots/back` — слот рюкзака.
+    pub slot_back: Handle<Image>,
+    /// `Slots/belt` — слот пояса.
+    pub slot_belt: Handle<Image>,
+    /// `Slots/pocket` — слот кармана.
+    pub slot_pocket: Handle<Image>,
+    /// `Slots/id` — слот ID-карты.
+    pub slot_id: Handle<Image>,
     /// `SlotBackground` — фон слота действия (`ActionButton` в SS14).
     pub slot_background: Handle<Image>,
 
@@ -229,6 +237,10 @@ pub fn load_ui_theme(mut commands: Commands, assets: Res<AssetServer>) {
         hand_r: load("sprites/ss14/Interface/Default/Slots/hand_r.png"),
         slot_highlight: load("sprites/ss14/Interface/Default/slot_highlight.png"),
         slot_toggle: load("sprites/ss14/Interface/Default/Slots/toggle.png"),
+        slot_back: load("sprites/ss14/Interface/Default/Slots/back.png"),
+        slot_belt: load("sprites/ss14/Interface/Default/Slots/belt.png"),
+        slot_pocket: load("sprites/ss14/Interface/Default/Slots/pocket.png"),
+        slot_id: load("sprites/ss14/Interface/Default/Slots/id.png"),
         slot_background: load("sprites/ss14/Interface/Default/SlotBackground.png"),
         status_left: load("sprites/ss14/Interface/Default/item_status_left.png"),
         status_right: load("sprites/ss14/Interface/Default/item_status_right.png"),

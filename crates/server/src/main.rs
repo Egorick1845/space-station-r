@@ -20,6 +20,7 @@ use lightyear::connection::server::Start;
 use lightyear::prelude::server::*;
 use lightyear::prelude::*;
 use ssr_core::atmosphere::{ChunkAtmosphere, Gas};
+use ssr_core::clothing::{Clothing, ClothingSlot};
 use ssr_core::inventory::{
     Container, Hands, Health, HeldBy, Inventory, Item, ItemPosition, SLOT_ANY,
 };
@@ -177,6 +178,7 @@ fn main() {
     // Контейнеры (T3.4). Тот же порядок, что у клиента!
     app.component::<Container>().replicate();
     app.component::<ItemPosition>().replicate();
+    app.component::<Clothing>().replicate();
     // Роли (T4.2). Тот же порядок, что у клиента!
     app.component::<PlayerRole>().replicate();
     // Расы (T5.3). Тот же порядок, что у клиента!
@@ -1341,12 +1343,13 @@ const CHAT_LOCAL_RANGE: f32 = 320.0;
 #[derive(Resource, Default)]
 struct ChatCooldowns(HashMap<u64, f32>);
 
-/// Часы и кулдауны чата одним параметром: у функций-систем Bevy лимит 16
-/// SystemParam, а handle_client_messages уже на пределе.
+/// Вспомогательные параметры одним SystemParam: у функций-систем Bevy лимит
+/// 16 SystemParam, а handle_client_messages уже на пределе.
 #[derive(bevy::ecs::system::SystemParam)]
-struct ChatParams<'w> {
+struct AuxParams<'w, 's> {
     time: Res<'w, Time>,
     cooldowns: ResMut<'w, ChatCooldowns>,
+    clothings: Query<'w, 's, &'static mut Clothing>,
 }
 
 /// Имя игрока по его сущности (для чата): из реестра подключений.
@@ -1704,7 +1707,7 @@ fn handle_client_messages(
     items: Query<&Item>,
     mut actions: ResMut<ActionQueue>,
     mut players: ResMut<Players>,
-    mut chat: ChatParams,
+    mut aux: AuxParams,
 ) {
     // Новый раунд (никого нет): выдача ролей с начала списка — первый игрок
     // сессии снова получает инженера (и его доступы к дверям).
@@ -2128,6 +2131,98 @@ fn handle_client_messages(
                         });
                     tracing::info!(item, name, "item picked up");
                 }
+                ClientMessage::DropItem { item } => {
+                    let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {
+                        continue;
+                    };
+                    let player = entry.player;
+                    let Ok(position) = positions.get(player) else {
+                        continue;
+                    };
+                    // Предмет должен лежать в рюкзаке этого игрока.
+                    let Ok(mut inventory) = inventories.get_mut(player) else {
+                        continue;
+                    };
+                    if inventory.anchor_of(item).is_none() {
+                        tracing::warn!(item, "drop item: not in inventory");
+                        continue;
+                    }
+                    inventory.take(item);
+                    if let Some(entity) = Entity::try_from_bits(item) {
+                        commands.entity(entity).insert((
+                            HeldBy { player: 0 },
+                            ItemPosition([position.0[0], position.0[1] - TILE_SIZE * 0.8]),
+                        ));
+                        tracing::info!(item, "item dropped from inventory to floor");
+                    }
+                }
+                ClientMessage::Equip { item } => {
+                    let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {
+                        continue;
+                    };
+                    let player = entry.player;
+                    let name = items
+                        .get(Entity::try_from_bits(item).unwrap_or(player))
+                        .map(|item| item.name.clone())
+                        .unwrap_or_default();
+                    let Some(slot) = content
+                        .catalogs
+                        .items
+                        .slot_of(&name)
+                        .and_then(ClothingSlot::from_id)
+                    else {
+                        tracing::warn!(%name, "equip: item is not clothing");
+                        continue;
+                    };
+                    // Предмет должен лежать в рюкзаке: забираем и надеваем.
+                    let Ok(mut inventory) = inventories.get_mut(player) else {
+                        continue;
+                    };
+                    if inventory.anchor_of(item).is_none() {
+                        tracing::warn!(%name, "equip: item not in inventory");
+                        continue;
+                    }
+                    inventory.take(item);
+                    let Ok(mut clothing) = aux.clothings.get_mut(player) else {
+                        continue;
+                    };
+                    if let Some(previous) = clothing.equip(slot, item) {
+                        // Прежняя вещь из слота возвращается в рюкзак.
+                        let (w, h) = item_size_of(&content.catalogs, &items, previous);
+                        inventory.put_first_fit(previous, w, h);
+                    }
+                    tracing::info!(%name, slot = slot.id(), "clothing equipped");
+                }
+                ClientMessage::Unequip { slot } => {
+                    let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {
+                        continue;
+                    };
+                    let player = entry.player;
+                    let Some(slot) = ClothingSlot::from_id(&slot) else {
+                        continue;
+                    };
+                    let Ok(mut clothing) = aux.clothings.get_mut(player) else {
+                        continue;
+                    };
+                    let Some(item) = clothing.unequip(slot) else {
+                        continue;
+                    };
+                    let (w, h) = item_size_of(&content.catalogs, &items, item);
+                    if let Ok(mut inventory) = inventories.get_mut(player)
+                        && inventory.put_first_fit(item, w, h).is_none()
+                    {
+                        // Рюкзак полон — вещь падает под ноги.
+                        if let (Ok(position), Some(entity)) =
+                            (positions.get(player), Entity::try_from_bits(item))
+                        {
+                            commands.entity(entity).insert((
+                                HeldBy { player: 0 },
+                                ItemPosition([position.0[0], position.0[1] - TILE_SIZE * 0.8]),
+                            ));
+                        }
+                    }
+                    tracing::info!(slot = slot.id(), item, "clothing unequipped");
+                }
                 ClientMessage::Chat { channel, text } => {
                     let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {
                         continue;
@@ -2139,14 +2234,14 @@ fn handle_client_messages(
                         continue;
                     }
                     // Антиспам: не чаще одной реплики в CHAT_COOLDOWN секунд.
-                    let now = chat.time.elapsed_secs();
-                    if let Some(last) = chat.cooldowns.0.get(&player.to_bits())
+                    let now = aux.time.elapsed_secs();
+                    if let Some(last) = aux.cooldowns.0.get(&player.to_bits())
                         && now - last < CHAT_COOLDOWN
                     {
                         tracing::debug!(%name, "chat: rate limited");
                         continue;
                     }
-                    chat.cooldowns.0.insert(player.to_bits(), now);
+                    aux.cooldowns.0.insert(player.to_bits(), now);
                     let from = positions.get(player).map(|p| p.0).unwrap_or_default();
                     let mut recipients = 0;
                     for (link, mut sender) in senders.iter_mut() {
@@ -2303,6 +2398,33 @@ fn handle_client_messages(
             }
         }
         commands.entity(player).insert(inventory);
+        // Одежда: стартовый комплект как у ассистента/инженера в SS14 —
+        // рюкзак, комбинезон и ботинки (без рюкзака окно инвентаря не открыть).
+        let mut clothing = Clothing::default();
+        for worn_name in ["Backpack", "JumpsuitEngineering", "ShoesBlack"] {
+            let item = commands
+                .spawn((
+                    Item {
+                        name: worn_name.to_string(),
+                    },
+                    HeldBy {
+                        player: player_bits,
+                    },
+                    Replicate::to_clients(NetworkTarget::All),
+                    Rooms::default(),
+                ))
+                .id();
+            let Some(slot) = content
+                .catalogs
+                .items
+                .slot_of(worn_name)
+                .and_then(ClothingSlot::from_id)
+            else {
+                continue;
+            };
+            clothing.equip(slot, item.to_bits());
+        }
+        commands.entity(player).insert(clothing);
         if let Some(role) = role {
             commands.entity(player).insert((
                 PlayerRole {

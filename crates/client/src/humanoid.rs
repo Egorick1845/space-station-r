@@ -17,6 +17,12 @@ use crate::rsi::RsiRegistry;
 /// Chest, Groin, Head, Eyes, RArm, LArm, RHand, LHand, RLeg, LLeg, RFoot, LFoot —
 /// ноги и ступни рисуются ПОВЕРХ торса, поэтому контуры частей не режут тело.
 /// z — слой внутри тайла.
+/// Цвет кожи по умолчанию: в SS14 арт `parts.rsi` нейтральный, а цвет задаёт
+/// профиль (Human: HSV(25°, 20%, 100%) ≈ #FFE1CC).
+pub const DEFAULT_SKIN: Color = Color::srgb_u8(0xff, 0xe1, 0xcc);
+/// Цвет глаз по умолчанию (`HumanoidCharacterAppearance`: чёрный).
+pub const DEFAULT_EYES: Color = Color::srgb_u8(0x10, 0x10, 0x10);
+
 const PARTS: &[(&str, f32)] = &[
     ("chest_m", 0.00),
     ("groin_m", 0.01),
@@ -99,6 +105,8 @@ pub fn attach_body(
                 layout: sprite.layout.clone(),
                 index: sprite.index(0, 0),
             });
+            // Арт частей нейтральный: цвет кожи задаёт тонировка (как в SS14).
+            component.color = DEFAULT_SKIN;
             parent.spawn((
                 HumanoidPart { owner, key },
                 component,
@@ -115,6 +123,7 @@ pub fn attach_body(
                 layout: sprite.layout.clone(),
                 index: sprite.index(0, 0),
             });
+            component.color = DEFAULT_EYES;
             parent.spawn((
                 HumanoidPart {
                     owner,
@@ -301,5 +310,101 @@ pub fn update_facing(
         {
             atlas.index = index;
         }
+    }
+}
+
+/// Слой надетой одежды (для пересборки при смене одежды).
+#[derive(Component)]
+pub struct WornLayer {
+    pub owner: Entity,
+}
+
+/// Доступ к каталогу и предметам для одежды (bits → имя → спрайт `worn`).
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct WornContext<'w, 's> {
+    content: Res<'w, crate::content::ClientContent>,
+    items: Query<'w, 's, &'static ssr_core::inventory::Item>,
+    entity_map: Option<Res<'w, bevy_replicon::shared::server_entity_map::ServerEntityMap>>,
+}
+
+impl WornContext<'_, '_> {
+    /// Ключ спрайта «надетым» по bits предмета.
+    fn key(&self, bits: u64) -> Option<String> {
+        let server = Entity::try_from_bits(bits)?;
+        let client = self
+            .entity_map
+            .as_deref()?
+            .to_client()
+            .get(&server)
+            .copied()?;
+        let name = self.items.get(client).ok()?.name.clone();
+        let worn = self.content.items.worn_of(&name)?;
+        Some(format!("sprites/ss14/{worn}"))
+    }
+}
+
+/// Рисует надетую одежду поверх тела: спрайт `equipped-*` из каталога,
+/// z — из [`ssr_core::clothing::ClothingSlot::layer_z`] (порядок `base.yml`).
+/// Направление обновляет общая система `update_facing` (тот же `HumanoidPart`).
+#[allow(clippy::too_many_arguments)]
+pub fn sync_worn_clothes(
+    mut commands: Commands,
+    registry: Res<RsiRegistry>,
+    context: WornContext,
+    clothings: Query<(Entity, &ssr_core::clothing::Clothing)>,
+    visuals: Query<(Entity, &crate::inventory_ui::RemotePlayerVisual)>,
+    own_visual: Res<crate::inventory_ui::OwnPlayerEntity>,
+    worn: Query<(Entity, &WornLayer)>,
+    last: Local<std::collections::HashMap<Entity, Vec<(ssr_core::clothing::ClothingSlot, u64)>>>,
+) {
+    for (entity, clothing) in clothings.iter() {
+        if last.get(&entity) == Some(&clothing.slots) {
+            continue;
+        }
+        // Визуал игрока: у своего — сама сущность, у чужого — его визуал.
+        let visual = if Some(entity) == own_visual.0 {
+            Some(entity)
+        } else {
+            visuals
+                .iter()
+                .find(|(_, remote)| remote.player == entity)
+                .map(|(visual, _)| visual)
+        };
+        let Some(visual) = visual else {
+            continue;
+        };
+        for (layer, worn) in worn.iter() {
+            if worn.owner == visual {
+                commands.entity(layer).despawn();
+            }
+        }
+        let mut spawned = 0;
+        commands.entity(visual).with_children(|parent| {
+            for (slot, item) in clothing.slots.iter() {
+                let Some(key) = context.key(*item) else {
+                    continue;
+                };
+                let Some(sprite) = registry.get(&key) else {
+                    continue;
+                };
+                let mut component = Sprite::from_image(sprite.image.clone());
+                component.texture_atlas = Some(TextureAtlas {
+                    layout: sprite.layout.clone(),
+                    index: sprite.index(0, 0),
+                });
+                parent.spawn((
+                    HumanoidPart { owner: visual, key },
+                    WornLayer { owner: visual },
+                    component,
+                    Transform::from_xyz(0.0, 0.0, slot.layer_z()),
+                ));
+                spawned += 1;
+            }
+        });
+        tracing::info!(
+            slots = clothing.slots.len(),
+            spawned,
+            "worn clothes updated"
+        );
     }
 }

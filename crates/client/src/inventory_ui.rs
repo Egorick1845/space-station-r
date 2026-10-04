@@ -9,13 +9,14 @@ use lightyear::prelude::client::*;
 use lightyear::prelude::*;
 use ssr_core::PlayerPosition;
 use ssr_core::inventory::{
-    Hands, Health, HeldBy, INVENTORY_COLS, INVENTORY_ROWS, Inventory, Item, SLOT_ANY,
+    Container, Hands, Health, HeldBy, INVENTORY_COLS, INVENTORY_ROWS, Inventory, Item, SLOT_ANY,
 };
 use ssr_core::roles::PlayerRole;
 use ssr_protocol::net::GameChannel;
 use ssr_protocol::{ActionOption, ClientMessage};
 
 use crate::PlayerEntity;
+use crate::containers::ContainerSlot;
 use crate::rsi::{RsiRegistry, RsiSprite};
 use crate::windows;
 
@@ -240,8 +241,9 @@ pub fn sync_inhand_items(
         let Ok((position, facing)) = holders.get(holder_client) else {
             continue;
         };
-        transform.translation.x = position.0[0] + 14.0;
-        transform.translation.y = position.0[1] - 6.0;
+        // Спрайт inhand уже содержит положение руки: рисуем в точке держателя.
+        transform.translation.x = position.0[0];
+        transform.translation.y = position.0[1];
         let name = items
             .get(visual.item)
             .ok()
@@ -289,12 +291,12 @@ pub fn sync_inhand_items(
         });
         let (x, y) = holders
             .get(holder_client)
-            .map(|(position, _)| (position.0[0] + 14.0, position.0[1] - 6.0))
+            .map(|(position, _)| (position.0[0], position.0[1]))
             .unwrap_or((0.0, 0.0));
         commands.spawn((
             InHandVisual { item: item_entity },
             sprite,
-            Transform::from_xyz(x, y, 1.1),
+            Transform::from_xyz(x, y, 1.13),
         ));
     }
 }
@@ -352,7 +354,24 @@ impl ItemSprites<'_, '_> {
 }
 
 /// Отпечаток состояния окна рюкзака: открыто ли, содержимое, поколение RSI.
-type InventorySignature = (bool, Vec<Option<u64>>, u32);
+type InventorySignature = (bool, bool, Vec<Option<u64>>, u32);
+
+/// Перетаскиваемый предмет (SS14: ЛКМ по предмету — тащишь, отпускаешь над клеткой).
+#[derive(Resource, Default)]
+pub struct DragItem {
+    /// bits предмета (0 — ничего не тащим).
+    pub item: u64,
+    /// Клетка-источник, чтобы не перекладывать предмет в ту же клетку.
+    pub from_slot: u8,
+    /// Тащим из рюкзака игрока (иначе — из открытого ящика).
+    pub from_backpack: bool,
+    /// Смещение курсора для спрайта-призрака.
+    pub grabbed: bool,
+}
+
+/// Спрайт-призрак перетаскиваемого предмета (следует за курсором).
+#[derive(Component)]
+pub struct DragGhost;
 
 /// Открыто ли окно рюкзака (кнопка-сумка в панели рук открывает/закрывает).
 #[derive(Resource)]
@@ -435,13 +454,20 @@ pub fn render_inventory_panel(
     ui: Res<InventoryUi>,
     own: Res<OwnPlayerEntity>,
     inventories: Query<&Inventory>,
+    clothings: Query<&ssr_core::clothing::Clothing>,
     positions: Res<windows::WindowPositions>,
     root: Query<Entity, With<InventoryPanel>>,
     mut last: Local<Option<InventorySignature>>,
 ) {
     use crate::ui_theme as ui;
+    // Правило владельца (как в SS14): инвентарь — это рюкзак; без него окна нет.
+    let has_backpack = own
+        .0
+        .and_then(|entity| clothings.get(entity).ok())
+        .is_some_and(|clothing| clothing.has_backpack());
     let signature = (
         ui_open(&ui),
+        has_backpack,
         own_inventory(&own, &inventories)
             .map(|inventory| inventory.cells.clone())
             .unwrap_or_default(),
@@ -454,7 +480,7 @@ pub fn render_inventory_panel(
     for entity in root.iter() {
         commands.entity(entity).despawn();
     }
-    if !ui_open(&ui) {
+    if !ui_open(&ui) || !has_backpack {
         return;
     }
     let Some(inventory) = own_inventory(&own, &inventories) else {
@@ -602,6 +628,9 @@ fn storage_item_node(x: u8, y: u8, w: u8, h: u8) -> Node {
 /// справа панель статуса руки, слоты 64×64 с текстурами `Slots/hand_l/r`,
 /// предмет изображается прямо в слоте, активная рука подсвечивается рамкой
 /// `Slots/slot_highlight`; справа снизу — кнопка окна рюкзака (`Slots/toggle`).
+/// Отпечаток панели рук: руки, окно рюкзака и надетая одежда.
+type HandsSignature = (Hands, bool, Vec<(ssr_core::clothing::ClothingSlot, u64)>);
+
 #[allow(clippy::too_many_arguments)]
 pub fn render_hands_panel(
     mut commands: Commands,
@@ -610,14 +639,20 @@ pub fn render_hands_panel(
     ui: Res<InventoryUi>,
     own: Res<OwnPlayerEntity>,
     hands: Query<&Hands>,
+    clothings: Query<&ssr_core::clothing::Clothing>,
     positions: Res<windows::WindowPositions>,
     root: Query<Entity, With<HandsPanel>>,
-    mut last: Local<Option<(Hands, bool)>>,
+    mut last: Local<Option<HandsSignature>>,
 ) {
     let Some(own_state) = own_hands(&own, &hands).cloned() else {
         return;
     };
-    let signature = (own_state.clone(), ui_open(&ui));
+    let clothing_signature = own
+        .0
+        .and_then(|entity| clothings.get(entity).ok())
+        .map(|clothing| clothing.slots.clone())
+        .unwrap_or_default();
+    let signature = (own_state.clone(), ui_open(&ui), clothing_signature);
     if last.as_ref() == Some(&signature) {
         return;
     }
@@ -673,6 +708,19 @@ pub fn render_hands_panel(
                 true,
                 own_state.active == 1,
             );
+            // Слоты экипировки (`SecondHotbar` в SS14): id, belt, back.
+            let clothing = own
+                .0
+                .and_then(|entity| clothings.get(entity).ok())
+                .cloned()
+                .unwrap_or_default();
+            for slot in [
+                ssr_core::clothing::ClothingSlot::Id,
+                ssr_core::clothing::ClothingSlot::Belt,
+                ssr_core::clothing::ClothingSlot::Back,
+            ] {
+                equip_slot(bar, &theme, &sprites, slot, &clothing);
+            }
         });
 }
 
@@ -1500,3 +1548,316 @@ pub fn attack_test_mode(
     state.1 = true;
     tracing::info!("attack-test: attack sent");
 }
+
+/// Клетки рюкзака, доступные мышью (для перетаскивания).
+type BackpackSlots<'w, 's> =
+    Query<'w, 's, (&'static Interaction, &'static InvSlot), (With<Button>, Without<ContainerSlot>)>;
+/// Клетки открытого ящика, доступные мышью.
+type CrateSlots<'w, 's> =
+    Query<'w, 's, (&'static Interaction, &'static ContainerSlot), (With<Button>, Without<InvSlot>)>;
+
+/// Начало перетаскивания: ЛКМ по занятой клетке рюкзака или ящика.
+pub fn drag_start(
+    mouse: Res<ButtonInput<MouseButton>>,
+    mut drag: ResMut<DragItem>,
+    slots: BackpackSlots,
+    container_slots: CrateSlots,
+    own: Res<OwnPlayerEntity>,
+    inventories: Query<&Inventory>,
+) {
+    if !mouse.just_pressed(MouseButton::Left) {
+        return;
+    }
+    drag.item = 0;
+    // Рюкзак: предмет, лежащий в клетке под курсором.
+    if let Some(inventory) = own_inventory(&own, &inventories) {
+        for (interaction, slot) in slots.iter() {
+            if *interaction != Interaction::Pressed {
+                continue;
+            }
+            if let Some(item) = inventory.cells.get(slot.0 as usize).copied().flatten() {
+                drag.item = item;
+                drag.from_slot = inventory.anchor_of(item).unwrap_or(slot.0);
+                drag.from_backpack = true;
+                drag.grabbed = false;
+                tracing::info!(item, slot = slot.0, "drag started (backpack)");
+            }
+        }
+    }
+    // Ящик: предмет из открытого контейнера.
+    for (interaction, slot) in container_slots.iter() {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        let Ok(inventory) = inventories.get(slot.container) else {
+            continue;
+        };
+        if let Some(item) = inventory.cells.get(slot.slot as usize).copied().flatten() {
+            drag.item = item;
+            drag.from_slot = inventory.anchor_of(item).unwrap_or(slot.slot);
+            drag.from_backpack = false;
+            drag.grabbed = false;
+            tracing::info!(item, slot = slot.slot, "drag started (container)");
+        }
+    }
+}
+
+/// Спрайт-призрак предмета следует за курсором, пока идёт перетаскивание.
+pub fn drag_ghost(
+    mut commands: Commands,
+    drag: Res<DragItem>,
+    sprites: ItemSprites,
+    windows: Query<&Window>,
+    ghosts: Query<Entity, With<DragGhost>>,
+) {
+    let mut existing = ghosts.iter();
+    let current = existing.next();
+    if drag.item == 0 {
+        if let Some(entity) = current {
+            commands.entity(entity).despawn();
+        }
+        return;
+    }
+    let Some(sprite) = sprites.icon(drag.item) else {
+        return;
+    };
+    let cursor = windows
+        .single()
+        .ok()
+        .and_then(|window| window.cursor_position());
+    let Some(cursor) = cursor else {
+        return;
+    };
+    let mut image = icon_node(sprite);
+    image.color = Color::srgba(1.0, 1.0, 1.0, 0.75);
+    let node = Node {
+        position_type: PositionType::Absolute,
+        left: px(cursor.x - 16.0),
+        top: px(cursor.y - 16.0),
+        width: px(32),
+        height: px(32),
+        ..default()
+    };
+    match current {
+        Some(entity) => {
+            commands.entity(entity).insert((image, node));
+        }
+        None => {
+            commands.spawn((DragGhost, image, node));
+        }
+    }
+}
+
+/// Отпускание ЛКМ: перенос предмета в клетку под курсором или на пол.
+pub fn drag_release(
+    mouse: Res<ButtonInput<MouseButton>>,
+    mut drag: ResMut<DragItem>,
+    mut senders: Query<&mut MessageSender<ClientMessage>, With<Connected>>,
+    slots: BackpackSlots,
+    container_slots: CrateSlots,
+    ui: Query<&Interaction, With<Button>>,
+) {
+    if !mouse.just_released(MouseButton::Left) || drag.item == 0 {
+        return;
+    }
+    let item = drag.item;
+    let from_slot = drag.from_slot;
+    let from_backpack = drag.from_backpack;
+    drag.item = 0;
+    // Клетка рюкзака под курсором.
+    for (interaction, slot) in slots.iter() {
+        if *interaction != Interaction::Hovered {
+            continue;
+        }
+        if from_backpack && slot.0 == from_slot {
+            return;
+        }
+        for mut sender in senders.iter_mut() {
+            sender.send::<GameChannel>(ClientMessage::TransferItem {
+                item,
+                to_slot: slot.0,
+                target_player: 0,
+            });
+        }
+        tracing::info!(item, to_slot = slot.0, "drag: item moved in backpack");
+        return;
+    }
+    // Клетка ящика под курсором.
+    for (interaction, slot) in container_slots.iter() {
+        if *interaction != Interaction::Hovered {
+            continue;
+        }
+        for mut sender in senders.iter_mut() {
+            sender.send::<GameChannel>(ClientMessage::TransferItem {
+                item,
+                to_slot: slot.slot,
+                target_player: slot.container.to_bits(),
+            });
+        }
+        tracing::info!(item, slot = slot.slot, "drag: item moved into container");
+        return;
+    }
+    // Отпустили вне окон: из рюкзака — на пол (как перетаскивание в мир в SS14),
+    // из ящика — в свой рюкзак.
+    let cursor_on_ui = ui
+        .iter()
+        .any(|interaction| *interaction != Interaction::None);
+    if cursor_on_ui {
+        tracing::info!(item, "drag cancelled over ui");
+        return;
+    }
+    if from_backpack {
+        for mut sender in senders.iter_mut() {
+            sender.send::<GameChannel>(ClientMessage::DropItem { item });
+        }
+        tracing::info!(item, "drag: item thrown on floor");
+    } else {
+        for mut sender in senders.iter_mut() {
+            sender.send::<GameChannel>(ClientMessage::TransferItem {
+                item,
+                to_slot: SLOT_ANY,
+                target_player: 0,
+            });
+        }
+        tracing::info!(item, "drag: item taken from container");
+    }
+}
+
+/// Тест-режим SSR_DRAG_TEST=1: берёт первый предмет рюкзака «в руку» перетаскивания
+/// (виден призрак), затем кладёт его в открытый ящик — проверка обеих веток.
+pub fn drag_test_mode(
+    time: Res<Time>,
+    mut state: Local<(f32, u8)>,
+    mut drag: ResMut<DragItem>,
+    own: Res<OwnPlayerEntity>,
+    inventories: Query<&Inventory>,
+    containers: Query<(Entity, &Container)>,
+    mut senders: Query<&mut MessageSender<ClientMessage>, With<Connected>>,
+) {
+    if std::env::var_os("SSR_DRAG_TEST").is_none() {
+        return;
+    }
+    state.0 += time.delta_secs();
+    let elapsed = state.0;
+    if state.1 == 0 && elapsed >= 4.0 {
+        let Some(inventory) = own_inventory(&own, &inventories) else {
+            return;
+        };
+        let Some(item) = inventory.cells.iter().flatten().copied().next() else {
+            tracing::warn!("drag-test: inventory empty");
+            return;
+        };
+        state.1 = 1;
+        drag.item = item;
+        drag.from_slot = inventory.anchor_of(item).unwrap_or(0);
+        drag.from_backpack = true;
+        tracing::info!(item, "drag-test: ghost shown");
+    }
+    if state.1 == 1 && elapsed >= 7.0 {
+        state.1 = 2;
+        let item = drag.item;
+        drag.item = 0;
+        let Some((container, _)) = containers.iter().next() else {
+            tracing::warn!("drag-test: no container");
+            return;
+        };
+        for mut sender in senders.iter_mut() {
+            sender.send::<GameChannel>(ClientMessage::TransferItem {
+                item,
+                to_slot: SLOT_ANY,
+                target_player: container.to_bits(),
+            });
+        }
+        tracing::info!(item, "drag-test: transferred to container");
+    }
+}
+
+/// Слот экипировки в хотбаре: текстура `Slots/*` из сборки, при надетом
+/// предмете — иконка поверх, клик — снять (SS14: клик по слоту снимает вещь).
+fn equip_slot(
+    bar: &mut ChildSpawnerCommands,
+    theme: &crate::ui_theme::UiTheme,
+    sprites: &ItemSprites,
+    slot: ssr_core::clothing::ClothingSlot,
+    clothing: &ssr_core::clothing::Clothing,
+) {
+    use crate::ui_theme as ui;
+    let texture = match slot {
+        ssr_core::clothing::ClothingSlot::Back => theme.slot_back.clone(),
+        ssr_core::clothing::ClothingSlot::Belt => theme.slot_belt.clone(),
+        ssr_core::clothing::ClothingSlot::Id => theme.slot_id.clone(),
+        _ => theme.slot_pocket.clone(),
+    };
+    let item = clothing.get(slot);
+    bar.spawn((
+        EquipSlotButton(slot),
+        Button,
+        ImageNode::new(texture),
+        Node {
+            width: px(ui::SLOT_SIZE),
+            height: px(ui::SLOT_SIZE),
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::Center,
+            ..default()
+        },
+    ))
+    .with_children(|cell| {
+        if let Some(sprite) = item.and_then(|bits| sprites.icon(bits)) {
+            cell.spawn((
+                icon_node(sprite),
+                Node {
+                    width: px(ui::SLOT_SIZE),
+                    height: px(ui::SLOT_SIZE),
+                    ..default()
+                },
+            ));
+        }
+    });
+}
+
+type EquipSlotClicks<'w, 's> = Query<
+    'w,
+    's,
+    (&'static Interaction, &'static EquipSlotButton),
+    (Changed<Interaction>, With<Button>),
+>;
+
+/// Клик по слоту экипировки: занят — снять вещь, пуст и в руке вещь — надеть.
+pub fn equip_slot_click(
+    buttons: EquipSlotClicks,
+    own: Res<OwnPlayerEntity>,
+    clothings: Query<&ssr_core::clothing::Clothing>,
+    hands: Query<&Hands>,
+    mut senders: Query<&mut MessageSender<ClientMessage>, With<Connected>>,
+) {
+    for (interaction, button) in buttons.iter() {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        let clothing = own.0.and_then(|entity| clothings.get(entity).ok());
+        if let Some(item) = clothing.and_then(|clothing| clothing.get(button.0)) {
+            for mut sender in senders.iter_mut() {
+                sender.send::<GameChannel>(ClientMessage::Unequip {
+                    slot: button.0.id().to_string(),
+                });
+            }
+            tracing::info!(slot = button.0.id(), item, "unequip sent");
+            continue;
+        }
+        // Пустой слот: надеваем предмет из активной руки.
+        let item = own
+            .0
+            .and_then(|entity| hands.get(entity).ok())
+            .and_then(|hands| hands.active_item());
+        if let Some(item) = item {
+            for mut sender in senders.iter_mut() {
+                sender.send::<GameChannel>(ClientMessage::Equip { item });
+            }
+            tracing::info!(slot = button.0.id(), item, "equip sent");
+        }
+    }
+}
+
+/// Кнопка слота экипировки.
+#[derive(Component)]
+pub struct EquipSlotButton(pub ssr_core::clothing::ClothingSlot);

@@ -127,6 +127,7 @@ fn main() {
     app.init_resource::<lobby::LobbyState>();
     app.init_resource::<inventory_ui::OwnPlayerEntity>();
     app.init_resource::<inventory_ui::ActionMenu>();
+    app.init_resource::<inventory_ui::DragItem>();
     app.init_resource::<console::Console>();
     app.init_resource::<chat::ChatState>();
     app.init_resource::<windows::WindowPositions>();
@@ -216,10 +217,6 @@ fn main() {
             inventory_ui::spawn_remote_players,
             inventory_ui::sync_remote_players,
             inventory_ui::sync_inhand_items,
-            humanoid::sync_bodies,
-            humanoid::update_facing,
-            humanoid::update_knocked,
-            humanoid::debug_body,
             inventory_ui::render_inventory_panel,
             inventory_ui::render_hands_panel,
             inventory_ui::spawn_health_hud,
@@ -232,6 +229,31 @@ fn main() {
             inventory_ui::world_click,
             inventory_ui::action_menu_click,
             inventory_ui::panel_buttons_click,
+            inventory_ui::equip_slot_click,
+        )
+            .run_if(in_game),
+    );
+    // Перетаскивание предметов и его тест-режим — отдельной группой
+    // (у кортежей add_systems есть предел числа систем).
+    app.add_systems(
+        Update,
+        (
+            inventory_ui::drag_start,
+            inventory_ui::drag_ghost,
+            inventory_ui::drag_release,
+            inventory_ui::drag_test_mode,
+        )
+            .run_if(in_game),
+    );
+    // Тело и одежда игроков — отдельной группой (у кортежей есть предел).
+    app.add_systems(
+        Update,
+        (
+            humanoid::sync_bodies,
+            humanoid::sync_worn_clothes,
+            humanoid::update_facing,
+            humanoid::update_knocked,
+            humanoid::debug_body,
         )
             .run_if(in_game),
     );
@@ -254,6 +276,7 @@ fn main() {
             hud::render_spawn_menu,
             hud::render_admin_menu,
             hud::render_warp_menu,
+            hud::menu_scroll,
             hud::spawn_menu_input,
             hud::update_placement_ghost,
             hud::placement_click,
@@ -836,6 +859,9 @@ pub fn register_replication(app: &mut App) {
         .replicate();
     app.component::<ssr_core::inventory::ItemPosition>()
         .replicate();
+    // Одежда: порядок регистрации обязан совпадать с сервером (иначе репликация
+    // разъезжается и клиент ловит «Hit the end of buffer»).
+    app.component::<ssr_core::clothing::Clothing>().replicate();
     app.component::<ssr_core::roles::PlayerRole>().replicate();
     app.component::<ssr_core::Species>().replicate();
     app.component::<ssr_core::atmosphere::ChunkAtmosphere>()

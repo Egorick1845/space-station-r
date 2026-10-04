@@ -40,8 +40,10 @@ pub struct ContainerPanel;
 /// Слот в панели ящика.
 #[derive(Component, Clone, Copy)]
 pub struct ContainerSlot {
-    container: Entity,
-    slot: u8,
+    /// Сущность контейнера (клиентская, мапится в bits при отправке).
+    pub container: Entity,
+    /// Индекс клетки в сетке контейнера.
+    pub slot: u8,
 }
 
 /// Состояние панели ящика для сравнения при перерисовке.
