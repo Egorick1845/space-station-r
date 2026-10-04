@@ -787,6 +787,9 @@ fn count_replicated(
 }
 
 fn setup_camera(mut commands: Commands) {
+    // Поля кадра мира (letterbox) — тот же тёмный цвет, что и у камеры:
+    // дефолтный clear-color Bevy (#2B2C2F) давал серую рамку по краям экрана.
+    commands.insert_resource(ClearColor(Color::srgb_u8(16, 18, 24)));
     commands.spawn((
         Camera2d,
         Camera {
