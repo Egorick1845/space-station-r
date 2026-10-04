@@ -127,6 +127,7 @@ pub fn update_lighting(
     positions: Query<&PlayerPosition>,
     chunks: Query<&TileChunkData>,
     lamps: Query<(&Light, &ItemPosition, Option<&Powered>)>,
+    doors: Query<&ssr_core::Door>,
     light_map: Option<Res<LightMap>>,
     mut images: ResMut<Assets<Image>>,
     mut transforms: Query<&mut Transform>,
@@ -153,12 +154,23 @@ pub fn update_lighting(
         player_tile.1 - LIGHT_RADIUS_TILES,
     );
 
-    // 1) локальная карта тайлов: стены блокируют свет.
+    // 1) локальная карта тайлов: стены блокируют свет. Закрытая дверь — тоже
+    // окклюдер (в SS14 `Door.Occludes` + `Occluder`, при открытии выключается).
     let mut grid = vec![TileType::Wall; (side * side) as usize];
     for ly in 0..side {
         for lx in 0..side {
             grid[(ly * side + lx) as usize] =
                 tile_at(&chunks, origin.0 + lx as i32, origin.1 + ly as i32);
+        }
+    }
+    for door in doors.iter() {
+        if door.open {
+            continue;
+        }
+        let tx = (door.position[0] / TILE_UNITS).floor() as i32 - origin.0;
+        let ty = (door.position[1] / TILE_UNITS).floor() as i32 - origin.1;
+        if tx >= 0 && ty >= 0 && tx < side as i32 && ty < side as i32 {
+            grid[(ty as u32 * side + tx as u32) as usize] = TileType::Wall;
         }
     }
 
