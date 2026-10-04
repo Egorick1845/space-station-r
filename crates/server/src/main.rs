@@ -278,6 +278,20 @@ struct SpawnCursor(usize);
 #[derive(Resource, Default)]
 struct GameRoles(RoleSet);
 
+/// Админы сервера (T5.5): имена через запятую в `SSR_ADMINS`
+/// (пусто — админ-команд нет; `SSR_OPEN_ADMIN=1` — все админы, для тестов).
+fn is_admin(name: &str) -> bool {
+    if std::env::var_os("SSR_OPEN_ADMIN").is_some() {
+        return true;
+    }
+    let Ok(list) = std::env::var("SSR_ADMINS") else {
+        return false;
+    };
+    list.split(',')
+        .map(|entry| entry.trim())
+        .any(|entry| !entry.is_empty() && entry == name)
+}
+
 /// Каталоги контента (T5.2): предметы и рецепты из assets/prototypes.
 #[derive(Resource, Default)]
 struct ContentCatalog {
@@ -1195,8 +1209,110 @@ fn on_link_disconnected(
 /// Приём сообщений клиента (единственная точка чтения) + операции над руками
 /// (SS14-модель): переключить руку, взять из рюкзака, убрать в рюкзак. Всё
 /// исполняемое (атака, двери, применение предметов, verbs) уходит в очередь
-/// [`ActionQueue`] и обрабатывается одной системой [`process_actions`].
+/// Выполняет админ-команду (T5.5) и возвращает текст ответа.
+/// Команды: `tp <x> <y>`, `spawn <предмет> [кол-во]`, `kick <имя> [причина]`,
+/// `heal`.
 #[allow(clippy::too_many_arguments)]
+fn run_admin_command(
+    command: &str,
+    player: Entity,
+    link: Entity,
+    players: &Players,
+    commands: &mut Commands,
+    inventories: &mut Query<&mut Inventory>,
+    catalogs: &ContentCatalog,
+) -> String {
+    let mut parts = command.split_whitespace();
+    let name = parts.next().unwrap_or_default();
+    match name {
+        "tp" => {
+            let (Some(x), Some(y)) = (
+                parts.next().and_then(|v| v.parse::<f32>().ok()),
+                parts.next().and_then(|v| v.parse::<f32>().ok()),
+            ) else {
+                return "использование: tp <x> <y>".to_string();
+            };
+            // Позиция тела: PlayerPosition едет следом (sync_replicated_position).
+            commands.entity(player).insert((
+                Position(Vector::new(x, y)),
+                LinearVelocity(Vector::ZERO),
+                PlayerPosition([x, y]),
+            ));
+            format!("телепорт в {x:.0}, {y:.0}")
+        }
+        "spawn" => {
+            let Some(item_id) = parts.next() else {
+                return "использование: spawn <предмет> [кол-во]".to_string();
+            };
+            if catalogs.items.by_id(item_id).is_none() {
+                return format!("неизвестный предмет: {item_id}");
+            }
+            let count: u32 = parts
+                .next()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1)
+                .min(20);
+            let (w, h) = catalogs.items.size_of(item_id);
+            let Ok(mut inventory) = inventories.get_mut(player) else {
+                return "нет рюкзака".to_string();
+            };
+            let mut produced = 0;
+            for _ in 0..count {
+                let entity = commands
+                    .spawn((
+                        Item {
+                            name: item_id.to_string(),
+                        },
+                        HeldBy {
+                            player: player.to_bits(),
+                        },
+                        Replicate::to_clients(NetworkTarget::All),
+                        Rooms::default(),
+                    ))
+                    .id();
+                if inventory.put_first_fit(entity.to_bits(), w, h).is_none() {
+                    commands.entity(entity).despawn();
+                    break;
+                }
+                produced += 1;
+            }
+            format!("выдано {produced}× {item_id}")
+        }
+        "kick" => {
+            let Some(target_name) = parts.next() else {
+                return "использование: kick <имя> [причина]".to_string();
+            };
+            let reason: String = parts.collect::<Vec<_>>().join(" ");
+            let Some(target) = players
+                .entries
+                .iter()
+                .find(|entry| entry.name == target_name)
+            else {
+                return format!("игрок не найден: {target_name}");
+            };
+            if target.link == link {
+                return "нельзя кикнуть себя".to_string();
+            }
+            // Отключение: компонент Disconnecting → сервер закроет линк,
+            // наблюдатель разошлёт Disconnected и уберёт игрока (T5.5).
+            commands
+                .entity(target.link)
+                .insert(lightyear::connection::client::Disconnecting);
+            tracing::info!(target = %target_name, reason = %reason, "admin kick");
+            format!("кикнут {target_name} ({reason})")
+        }
+        "heal" => {
+            commands.entity(player).insert(Health::default());
+            "здоровье восстановлено".to_string()
+        }
+        other => format!("неизвестная команда: {other} (tp/spawn/kick/heal)"),
+    }
+    .to_string()
+}
+
+/// Единая точка приёма сообщений клиента: рукопожатие (Connect/Welcome, T1.2),
+/// операции над руками и админ-команды; исполняемое уходит в [`ActionQueue`].
+/// [`ActionQueue`] и обрабатывается одной системой [`process_actions`].
 /// Размер предмета по bits сущности (из имени, `item_size`): (ширина, высота).
 fn item_size_of(catalogs: &ContentCatalog, items: &Query<&Item>, bits: u64) -> (u8, u8) {
     Entity::try_from_bits(bits)
@@ -1464,6 +1580,32 @@ fn handle_client_messages(
                         output = %output_id,
                         "crafted"
                     );
+                }
+                ClientMessage::Admin { command } => {
+                    let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {
+                        continue;
+                    };
+                    let player = entry.player;
+                    let name = entry.name.clone();
+                    if !is_admin(&name) {
+                        tracing::warn!(%name, command = %command, "admin: отказ в правах");
+                        continue;
+                    }
+                    let reply = run_admin_command(
+                        &command,
+                        player,
+                        link_entity,
+                        &players,
+                        &mut commands,
+                        &mut inventories,
+                        &catalogs,
+                    );
+                    tracing::info!(%name, command = %command, reply = %reply, "admin command");
+                    if let Ok((_, mut sender)) = senders.get_mut(link_entity) {
+                        sender.send::<GameChannel>(ServerMessage::Event {
+                            kind: format!("admin:{reply}"),
+                        });
+                    }
                 }
                 ClientMessage::SwitchHand => {
                     let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {

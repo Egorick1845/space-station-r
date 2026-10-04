@@ -230,6 +230,7 @@ fn main() {
             inventory_ui::build_test_mode,
             inventory_ui::attack_test_mode,
             crafting::craft_test_mode,
+            console::admin_test_mode,
         )
             .run_if(in_game),
     );
@@ -388,12 +389,18 @@ fn send_connect(
         return;
     }
     for mut sender in senders.iter_mut() {
-        // Имя из настроек (T5.4); пустое — техническое.
-        let name = if settings.player_name.trim().is_empty() {
-            DEV_PLAYER_NAME.to_string()
-        } else {
-            settings.player_name.trim().to_string()
-        };
+        // Имя из настроек (T5.4); SSR_NAME перекрывает (тесты);
+        // пустое — техническое.
+        let name = std::env::var("SSR_NAME")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| {
+                if settings.player_name.trim().is_empty() {
+                    DEV_PLAYER_NAME.to_string()
+                } else {
+                    settings.player_name.trim().to_string()
+                }
+            });
         sender.send::<GameChannel>(ClientMessage::Connect {
             protocol_version: PROTOCOL_VERSION,
             name: name.clone(),
@@ -512,6 +519,7 @@ fn receive_server(
     mut menu: ResMut<inventory_ui::ActionMenu>,
     mut denied: ResMut<doors::DeniedDoors>,
     mut sounds: ResMut<audio::SoundRequests>,
+    mut console: ResMut<console::Console>,
 ) {
     for mut receiver in receivers.iter_mut() {
         for message in receiver.receive() {
@@ -527,6 +535,11 @@ fn receive_server(
                             tracing::info!(bits, "door denied event");
                         }
                         None if kind == "hit" => sounds.punch += 1,
+                        None if let Some(text) = kind.strip_prefix("admin:") => {
+                            // Ответ админ-команды (T5.5) — в консоль.
+                            console.push_line(format!("[сервер] {text}"));
+                            tracing::info!(reply = %text, "admin reply");
+                        }
                         None => tracing::info!(kind, "server event"),
                     }
                 }

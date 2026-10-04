@@ -6,7 +6,11 @@ use bevy::ecs::system::SystemParam;
 use bevy::input::ButtonState;
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::prelude::*;
+use lightyear::prelude::client::*;
+use lightyear::prelude::*;
 use ssr_core::PlayerPosition;
+use ssr_protocol::ClientMessage;
+use ssr_protocol::net::GameChannel;
 
 use crate::inventory_ui::{OwnPlayerEntity, RemotePlayerVisual};
 use crate::settings::Settings;
@@ -23,6 +27,11 @@ pub struct Console {
 const MAX_LINES: usize = 64;
 
 impl Console {
+    /// Добавляет строку в историю (для ответов сервера, T5.5).
+    pub fn push_line(&mut self, line: impl Into<String>) {
+        self.push(line);
+    }
+
     fn push(&mut self, line: impl Into<String>) {
         self.lines.push(line.into());
         if self.lines.len() > MAX_LINES {
@@ -111,6 +120,7 @@ pub struct ConsoleCommands<'w, 's> {
     own: Res<'w, OwnPlayerEntity>,
     positions: Query<'w, 's, &'static PlayerPosition>,
     remotes: Query<'w, 's, (), With<RemotePlayerVisual>>,
+    senders: Query<'w, 's, &'static mut MessageSender<ClientMessage>, With<Connected>>,
     exit: MessageWriter<'w, AppExit>,
 }
 
@@ -164,10 +174,21 @@ fn run_command(command: &str, console: &mut Console, cmd: &mut ConsoleCommands) 
     let mut parts = command.split_whitespace();
     let name = parts.next().unwrap_or_default();
     let argument = parts.next().unwrap_or_default();
+    // Админ-команды (T5.5): исполняет сервер, ответ придёт событием.
+    if matches!(name, "tp" | "spawn" | "kick" | "heal") {
+        for mut sender in cmd.senders.iter_mut() {
+            sender.send::<GameChannel>(ClientMessage::Admin {
+                command: command.to_string(),
+            });
+        }
+        console.push_line("отправлено на сервер…");
+        return;
+    }
     match name {
         "help" => {
             console.push("Команды: help, clear, volume <0..1>, fps <on|off>,");
             console.push("  fullscreen <on|off>, pos, players, quit");
+            console.push("Админ (сервер): tp <x> <y>, spawn <предмет> [n], kick <имя>, heal");
         }
         "clear" => console.lines.clear(),
         "volume" => match argument.parse::<f32>() {
@@ -243,5 +264,41 @@ pub fn update_console_text(
             text.0 = input_text.clone();
         }
         last.1 = input_text;
+    }
+}
+
+/// Тест T5.5: SSR_ADMIN_TEST=1 — через 4 с `tp`, через 6 с `spawn`, через 8 с `heal`.
+pub fn admin_test_mode(
+    time: Res<Time>,
+    mut senders: Query<&mut MessageSender<ClientMessage>, With<Connected>>,
+    mut state: Local<(f32, u8)>,
+) {
+    if std::env::var_os("SSR_ADMIN_TEST").is_none() {
+        return;
+    }
+    state.0 += time.delta_secs();
+    let mut send = |command: &str| {
+        for mut sender in senders.iter_mut() {
+            sender.send::<GameChannel>(ClientMessage::Admin {
+                command: command.to_string(),
+            });
+        }
+        tracing::info!(command, "admin-test: sent");
+    };
+    if state.1 == 0 && state.0 >= 4.0 {
+        state.1 = 1;
+        send("tp 1500 1080");
+    } else if state.1 == 1 && state.0 >= 6.0 {
+        state.1 = 2;
+        send("spawn Medkit 2");
+    } else if state.1 == 2 && state.0 >= 8.0 {
+        state.1 = 3;
+        send("heal");
+    } else if state.1 == 3
+        && state.0 >= 10.0
+        && let Ok(target) = std::env::var("SSR_KICK_TEST")
+    {
+        state.1 = 4;
+        send(&format!("kick {target}"));
     }
 }
