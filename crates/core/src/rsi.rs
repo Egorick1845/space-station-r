@@ -242,6 +242,42 @@ fn read_zip_rsi(path: &Path) -> Result<(serde_json::Value, HashMap<String, Vec<u
     Ok((meta_json, pngs))
 }
 
+/// Имена состояний RSI без чтения PNG (только meta.json) — источник списков
+/// причёсок и бород. В SS14 списки дают прототипы маркингов, у нас — сам RSI,
+/// поэтому новый стиль в ассетах сразу виден и клиенту, и серверу.
+pub fn state_names(path: &Path) -> Result<Vec<String>, RsiError> {
+    let meta_json = if path.is_dir() {
+        serde_json::from_slice(&std::fs::read(path.join("meta.json"))?)?
+    } else {
+        read_zip_meta(path)?
+    };
+    Ok(meta_json["states"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|state| state["name"].as_str().map(str::to_string))
+        .collect())
+}
+
+/// meta.json из zip-архива RSI (для [`state_names`]).
+fn read_zip_meta(path: &Path) -> Result<serde_json::Value, RsiError> {
+    let file = std::fs::File::open(path)?;
+    let mut archive = zip::ZipArchive::new(file)?;
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i)?;
+        if entry.is_dir() {
+            continue;
+        }
+        if entry.name().rsplit('/').next() == Some("meta.json") {
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(&mut entry, &mut bytes)?;
+            return Ok(serde_json::from_slice(&bytes)?);
+        }
+    }
+    Ok(serde_json::from_str("{}").expect("empty json"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

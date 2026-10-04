@@ -149,8 +149,12 @@ fn main() {
         Update,
         (
             appearance::appearance_hotkey,
-            appearance::render_appearance_menu,
+            appearance::appearance_sync,
+            appearance::appearance_search_click,
+            appearance::appearance_search_input,
+            appearance::appearance_scroll,
             appearance::appearance_click,
+            appearance::render_appearance_menu,
         )
             .chain(),
     );

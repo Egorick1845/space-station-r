@@ -1,6 +1,8 @@
 //! Компоненты игровых механик (запросы владельца): призрак админа, лежачий
 //! после смерти, бег и боевой режим — состояния, которые видят обе стороны.
 
+use std::sync::OnceLock;
+
 use bevy::prelude::Component;
 use serde::{Deserialize, Serialize};
 
@@ -72,6 +74,43 @@ pub struct Hair {
 pub const HAIR_STYLES: [&str; 8] = [
     "80s", "afro", "antenna", "b", "baby", "bedhead", "baldfade", "a",
 ];
+
+/// Полный список стилей причёсок из `human_hair.rsi` (в сборке 203 состояния).
+/// В SS14 его отдают прототипы маркингов (`HairStyles.cs` перечисляет лишь
+/// дефолты); у нас источник — сам RSI, поэтому добавление стиля в ассеты сразу
+/// доступно и клиенту (окно внешности), и серверу (проверка и спавн).
+/// Если RSI не прочитался — откат на короткий список [`HAIR_STYLES`].
+pub fn hair_style_names() -> &'static [String] {
+    static NAMES: OnceLock<Vec<String>> = OnceLock::new();
+    NAMES.get_or_init(|| style_names_from_rsi("Mobs/Customization/human_hair.rsi", &HAIR_STYLES))
+}
+
+/// Полный список стилей бороды из `human_facial_hair.rsi` (38 состояний).
+pub fn facial_hair_style_names() -> &'static [String] {
+    static NAMES: OnceLock<Vec<String>> = OnceLock::new();
+    NAMES.get_or_init(|| {
+        style_names_from_rsi(
+            "Mobs/Customization/human_facial_hair.rsi",
+            &FACIAL_HAIR_STYLES,
+        )
+    })
+}
+
+/// Имена состояний RSI отсортированными по алфавиту (как список ItemList в
+/// SS14, который сортирует маркинги по локализованному имени).
+fn style_names_from_rsi(rel: &str, fallback: &[&str]) -> Vec<String> {
+    let path = crate::assets_root().join("sprites/ss14").join(rel);
+    let from_rsi = crate::rsi::state_names(&path)
+        .ok()
+        .filter(|names| !names.is_empty());
+    match from_rsi {
+        Some(mut names) => {
+            names.sort();
+            names
+        }
+        None => fallback.iter().map(|name| name.to_string()).collect(),
+    }
+}
 
 /// Растительность на лице (борода/усы): отдельный маркинг слоя `FacialHair`
 /// в SS14 (`human_facial_hair.rsi`, 38 стилей).

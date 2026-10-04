@@ -24,7 +24,7 @@ use ssr_core::clothing::{Clothing, ClothingSlot};
 use ssr_core::inventory::{
     Container, Hands, Health, HeldBy, Inventory, Item, ItemPosition, SLOT_ANY,
 };
-use ssr_core::mechanics::{FACIAL_HAIR_STYLES, FacialHair, HAIR_STYLES, Hair, Sex};
+use ssr_core::mechanics::{FacialHair, Hair, Sex, facial_hair_style_names, hair_style_names};
 use ssr_core::mechanics::{Ghost, KNOCKDOWN_SECS, KnockedDown};
 use ssr_core::power::{Cable, Consumer, Generator, Light, Powered};
 use ssr_core::roles::{Access, PlayerRole, RoleSet};
@@ -2162,7 +2162,7 @@ fn handle_client_messages(
                         commands.entity(player).insert(sex);
                     }
                     if let Some(hair) = hair {
-                        if HAIR_STYLES.contains(&hair.as_str()) {
+                        if hair_style_names().iter().any(|name| name == &hair) {
                             let color = hair_color.unwrap_or([0x6b, 0x4a, 0x2f]);
                             commands.entity(player).insert(Hair {
                                 style: hair.clone(),
@@ -2176,7 +2176,7 @@ fn handle_client_messages(
                     if let Some(beard) = beard {
                         if beard.is_empty() {
                             commands.entity(player).remove::<FacialHair>();
-                        } else if FACIAL_HAIR_STYLES.contains(&beard.as_str()) {
+                        } else if facial_hair_style_names().iter().any(|name| name == &beard) {
                             let color = hair_color.unwrap_or([0x6b, 0x4a, 0x2f]);
                             commands.entity(player).insert(FacialHair {
                                 style: beard,
@@ -2492,8 +2492,9 @@ fn handle_client_messages(
             .unwrap_or_else(|| if rand_bool() { Sex::Female } else { Sex::Male });
         commands.entity(player).insert(sex);
         // Причёска: случайный стиль и цвет, как выбор внешности в лобби SS14.
+        let hair_options = hair_style_names();
         let hair = Hair {
-            style: HAIR_STYLES[rand_index(HAIR_STYLES.len())].to_string(),
+            style: hair_options[rand_index(hair_options.len())].to_string(),
             color: [
                 80 + rand_index(176) as u8,
                 50 + rand_index(120) as u8,
@@ -2502,8 +2503,9 @@ fn handle_client_messages(
         };
         // Борода: в SS14 это отдельный маркинг; выпадает не всем (примерно половине).
         if rand_index(2) == 0 {
+            let beard_options = facial_hair_style_names();
             commands.entity(player).insert(FacialHair {
-                style: FACIAL_HAIR_STYLES[rand_index(FACIAL_HAIR_STYLES.len())].to_string(),
+                style: beard_options[rand_index(beard_options.len())].to_string(),
                 color: hair.color,
             });
         }
