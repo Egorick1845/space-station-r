@@ -619,14 +619,18 @@ pub fn render_inventory_panel(
                             BackgroundColor(ui::GLASS_BUTTON),
                         ))
                         .with_children(|piece| {
+                            // Иконка ×2 (64 px) по центру формы — как `ItemGridPiece.cs`
+                            // в сборке: спрайт рисуется с `TextureScale = 2` и выходит
+                            // за клетку, поэтому предметы выглядят крупными.
+                            let icon_size = ui::STORAGE_CELL * 2.0;
                             piece.spawn((
                                 icon_node(sprite),
                                 Node {
                                     position_type: PositionType::Absolute,
-                                    left: px((w as f32 - 1.0) * ui::STORAGE_CELL * 0.5),
-                                    top: px((h as f32 - 1.0) * ui::STORAGE_CELL * 0.5),
-                                    width: px(ui::STORAGE_CELL),
-                                    height: px(ui::STORAGE_CELL),
+                                    left: px((w as f32 * ui::STORAGE_CELL - icon_size) * 0.5),
+                                    top: px((h as f32 * ui::STORAGE_CELL - icon_size) * 0.5),
+                                    width: px(icon_size),
+                                    height: px(icon_size),
                                     ..default()
                                 },
                             ));
