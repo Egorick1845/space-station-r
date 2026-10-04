@@ -399,6 +399,7 @@ fn main() {
             // P — копирование сущности под курсором, ЛКМ — размещение копии.
             world_items::copy_entity_key,
             world_items::pickup_test_mode,
+            world_items::spawn_test_mode,
             world_items::copy_test_mode,
             world_items::pull_test_mode,
         )

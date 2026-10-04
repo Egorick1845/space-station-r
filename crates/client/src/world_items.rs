@@ -261,6 +261,33 @@ pub fn floor_item_click(
     tracing::info!(item = bits, "pickup clicked");
 }
 
+/// Тест-режим `SSR_SPAWN_TEST=<id> [<count>]`: спавнит сущность из
+/// ИМПОРТИРОВАННЫХ прототипов сборки (`prototypes_ss14.ron`) на пол — проверка,
+/// что команда `spawn` принимает любой прототип, а клиент находит его спрайт.
+pub fn spawn_test_mode(
+    time: Res<Time>,
+    mut state: Local<(f32, bool)>,
+    mut senders: Query<&mut MessageSender<ClientMessage>, With<Connected>>,
+) {
+    let Ok(id) = std::env::var("SSR_SPAWN_TEST") else {
+        return;
+    };
+    if state.1 {
+        return;
+    }
+    state.0 += time.delta_secs();
+    if state.0 < 2.0 {
+        return;
+    }
+    state.1 = true;
+    for mut sender in senders.iter_mut() {
+        sender.send::<GameChannel>(ClientMessage::Admin {
+            command: format!("spawn {id} 1 floor"),
+        });
+    }
+    tracing::info!(id, "spawn-test: спавн прототипа сборки отправлен");
+}
+
 /// Тест-режим SSR_PICKUP_TEST=1: клиент кладёт предмет на пол админ-командой
 /// (как спавн-меню), открывает спавн-меню для скриншота и поднимает предмет
 /// тем же кодом, что и клик мышью. Критерий: выброс/подбор в логах сервера.
