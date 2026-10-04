@@ -605,7 +605,15 @@ pub fn render_inventory_panel(
                         // Текстура светлая: затемняем её модуляцией #222222,
                         // как таблицу сетки в StorageWindow.cs.
                         tile.color = ui::GRID_BACKGROUND;
-                        grid.spawn((InvSlot(index), Button, storage_cell_node(x, y), tile));
+                        grid.spawn((
+                            InvSlot(index),
+                            Button,
+                            storage_cell_node(x, y),
+                            tile,
+                            // Фон нужен подсветке переноса (`drag_highlight`):
+                            // по умолчанию прозрачный.
+                            BackgroundColor(Color::NONE),
+                        ));
                     }
                     // Предметы: рамка по футпринту (`Storage/piece_*`) и спрайт ×2
                     // по центру занятой площади (ItemGridPiece.cs).
@@ -1652,6 +1660,76 @@ type BackpackSlots<'w, 's> =
 /// Клетки открытого ящика, доступные мышью.
 type CrateSlots<'w, 's> =
     Query<'w, 's, (&'static Interaction, &'static ContainerSlot), (With<Button>, Without<InvSlot>)>;
+
+/// Подсветка клеток под переносимым предметом (PORT_PLAN 1.6): считаем форму
+/// предмета от клетки под курсором и красим её зелёным `#1E8000`, если все
+/// клетки свободны, иначе красным `#B40046` — цвета из `StorageWindow.FrameUpdate`
+/// сборки. Клетки без подсветки — прозрачные.
+#[allow(clippy::too_many_arguments)]
+pub fn drag_highlight(
+    drag: Res<DragItem>,
+    own: Res<OwnPlayerEntity>,
+    inventories: Query<&Inventory>,
+    content: Res<crate::content::ClientContent>,
+    items: Query<&ssr_core::inventory::Item>,
+    mut cells: Query<(&Interaction, &InvSlot, &mut BackgroundColor)>,
+) {
+    // Форма переносимого предмета: (w, h) из каталога, как в сборке (`ItemSize`).
+    let shape = (drag.item != 0).then(|| {
+        items
+            .get(Entity::try_from_bits(drag.item).unwrap_or(Entity::PLACEHOLDER))
+            .ok()
+            .map(|item| content.items.size_of(&item.name))
+    });
+    // Клетка под курсором — через `Interaction` (та же механика, что у переноса).
+    let hovered = cells
+        .iter()
+        .find(|(interaction, _, _)| **interaction == Interaction::Hovered)
+        .map(|(_, slot, _)| slot.0);
+    let shape = shape.flatten();
+    let fits = match (shape, hovered) {
+        (Some((w, h)), Some(index)) => {
+            let (x, y) = (index % INVENTORY_COLS, index / INVENTORY_COLS);
+            if x + w > INVENTORY_COLS || y + h > INVENTORY_ROWS {
+                Some(false)
+            } else {
+                let inventory = own_inventory(&own, &inventories);
+                let free = (0..h).all(|dy| {
+                    (0..w).all(|dx| {
+                        let cell = ((y + dy) * INVENTORY_COLS + (x + dx)) as usize;
+                        inventory
+                            .and_then(|inv| inv.cells.get(cell).copied().flatten())
+                            .is_none()
+                    })
+                });
+                Some(free)
+            }
+        }
+        _ => None,
+    };
+    for (_, slot, mut color) in cells.iter_mut() {
+        let target = match (fits, hovered, shape) {
+            (Some(free), Some(index), Some((w, h))) => {
+                let (x, y) = (index % INVENTORY_COLS, index / INVENTORY_COLS);
+                let (cx, cy) = (slot.0 % INVENTORY_COLS, slot.0 / INVENTORY_COLS);
+                let inside = cx >= x && cx < x + w && cy >= y && cy < y + h;
+                if inside {
+                    if free {
+                        Color::srgb_u8(0x1e, 0x80, 0x00)
+                    } else {
+                        Color::srgb_u8(0xb4, 0x00, 0x46)
+                    }
+                } else {
+                    Color::NONE
+                }
+            }
+            _ => Color::NONE,
+        };
+        if color.0 != target {
+            color.0 = target;
+        }
+    }
+}
 
 /// Начало перетаскивания: ЛКМ по занятой клетке рюкзака, ящика или по руке.
 #[allow(clippy::too_many_arguments)]

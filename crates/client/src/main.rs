@@ -176,6 +176,8 @@ fn main() {
     app.add_systems(Update, hud::sprint_hotkey);
     // Алерт выносливости (PORT_PLAN 1.5): 7 уровней, иконки из сборки.
     app.add_systems(Update, hud::render_stamina_alert);
+    // Подсветка клеток при переносе предмета (PORT_PLAN 1.6).
+    app.add_systems(Update, inventory_ui::drag_highlight);
     // Текстуры интерфейса SS14 (слоты, Storage, Nano-кнопки) — сразу на старте.
     app.add_systems(Startup, ui_theme::load_ui_theme);
     // Текстуры GPU-конвейера света (карты теней/FOV/света) — один раз на старте.
