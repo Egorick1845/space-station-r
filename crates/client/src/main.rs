@@ -174,6 +174,8 @@ fn main() {
     app.add_systems(Update, humanoid::foot_walk_animation);
     // Space — спринт-тоггл (PORT_PLAN 2.2).
     app.add_systems(Update, hud::sprint_hotkey);
+    // Алерт выносливости (PORT_PLAN 1.5): 7 уровней, иконки из сборки.
+    app.add_systems(Update, hud::render_stamina_alert);
     // Текстуры интерфейса SS14 (слоты, Storage, Nano-кнопки) — сразу на старте.
     app.add_systems(Startup, ui_theme::load_ui_theme);
     // Текстуры GPU-конвейера света (карты теней/FOV/света) — один раз на старте.

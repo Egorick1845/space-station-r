@@ -610,6 +610,64 @@ fn send_interact(
     }
 }
 
+/// Корень алертов (правая сторона, `AlertsUI.xaml`: Right + Center, столбец).
+#[derive(Component)]
+pub struct AlertRoot;
+
+/// Алерт выносливости (`Resources/Prototypes/Alerts/alerts.yml`: прототип
+/// `Stamina`, иконки `Interface/Alerts/stamina.rsi#stamina0..stamina6`, 7 уровней
+/// от `RoundToLevels`). Показывается, когда урон выносливости больше нуля.
+pub fn render_stamina_alert(
+    mut commands: Commands,
+    own: Res<OwnPlayerEntity>,
+    staminas: Query<&ssr_core::stamina::Stamina>,
+    registry: Res<crate::rsi::RsiRegistry>,
+    root: Query<Entity, With<AlertRoot>>,
+    mut last: Local<Option<u8>>,
+) {
+    let level = own
+        .0
+        .and_then(|entity| staminas.get(entity).ok())
+        .map(|stamina| stamina.alert_level())
+        .unwrap_or_default();
+    if last.as_ref() == Some(&level) {
+        return;
+    }
+    *last = Some(level);
+    for entity in root.iter() {
+        commands.entity(entity).despawn();
+    }
+    if level == 0 {
+        return; // полная выносливость — алерта нет (severity 0 в SS14 скрыт)
+    }
+    let key = format!("sprites/ss14/Interface/Alerts/stamina.rsi#stamina{level}");
+    let Some(sprite) = registry.get(&key) else {
+        return; // RSI подгрузится следующим кадром (реестр ленивый)
+    };
+    let icon = crate::inventory_ui::icon_node(sprite);
+    commands
+        .spawn((
+            AlertRoot,
+            Node {
+                position_type: PositionType::Absolute,
+                right: px(10),
+                top: Val::Percent(50.0),
+                width: px(32),
+                height: px(32),
+                ..default()
+            },
+            UiTransform::from_translation(Val2::new(Val::Px(0.0), Val::Percent(-50.0))),
+        ))
+        .with_child((
+            icon,
+            Node {
+                width: px(32),
+                height: px(32),
+                ..default()
+            },
+        ));
+}
+
 /// Space — спринт-тоггл (`Sprint` в `keybinds.yml` сборки): отправляем намерение,
 /// сервер проверит запреты (лежание, призрак) и паузу 3 с между спринтами.
 pub fn sprint_hotkey(
