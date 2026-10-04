@@ -33,7 +33,9 @@ mod power_view;
 mod rsi;
 mod settings;
 mod tiles;
+mod ui_theme;
 mod windows;
+mod world_items;
 use ssr_protocol::net::GameChannel;
 use ssr_protocol::{
     ClientMessage, DEFAULT_SERVER_PORT, PROTOCOL_VERSION, ProtocolPlugin, ServerMessage,
@@ -130,9 +132,13 @@ fn main() {
     app.init_resource::<doors::DeniedDoors>();
     app.init_resource::<crafting::CraftingState>();
     app.init_resource::<hud::HudState>();
+    app.init_resource::<hud::Placement>();
+    app.init_resource::<inventory_ui::InventoryUi>();
     app.init_resource::<audio::SoundRequests>();
     // Ленивая подгрузка RSI (T5.3): обрабатываем заявки из реестра каждый кадр.
     app.add_systems(Update, rsi::load_requested_rsi);
+    // Текстуры интерфейса SS14 (слоты, Storage, Nano-кнопки) — сразу на старте.
+    app.add_systems(Startup, ui_theme::load_ui_theme);
     // FPS-диагностика нужна строке FPS в углу (включается в настройках).
     app.add_plugins(bevy::diagnostic::FrameTimeDiagnosticsPlugin::default());
     // RsiRegistry строится сразу после DefaultPlugins: нужен и игроку (обезьяна),
@@ -223,6 +229,7 @@ fn main() {
             inventory_ui::hands_ui_click,
             inventory_ui::world_click,
             inventory_ui::action_menu_click,
+            inventory_ui::panel_buttons_click,
         )
             .run_if(in_game),
     );
@@ -233,10 +240,15 @@ fn main() {
             hud::spawn_hud,
             hud::hud_hotkeys,
             hud::hud_click,
+            hud::hud_button_tint,
+            hud::update_ghost_bar,
             hud::admin_player_click,
+            hud::menu_buttons_click,
             hud::render_spawn_menu,
             hud::render_admin_menu,
             hud::spawn_menu_input,
+            hud::update_placement_ghost,
+            hud::placement_click,
             hud::mech_test_mode,
         )
             .run_if(in_game),
@@ -275,7 +287,11 @@ fn main() {
             containers::update_crate_visuals,
             containers::render_container_panel,
             containers::container_slot_click,
+            containers::container_close_click,
             containers::container_test_mode,
+            world_items::sync_floor_item_icons,
+            world_items::floor_item_click,
+            world_items::pickup_test_mode,
         )
             .run_if(in_game),
     );

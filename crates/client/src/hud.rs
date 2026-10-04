@@ -23,6 +23,17 @@ use crate::content::ClientContent;
 use crate::inventory_ui::OwnPlayerEntity;
 use crate::settings::Settings;
 
+/// Режим размещения (как в SS14 `EntitySpawningUIController`): после выбора
+/// предмета в спавн-меню он «висит» на курсоре, ЛКМ ставит его в мир.
+#[derive(Resource, Default)]
+pub struct Placement {
+    pub item: Option<String>,
+}
+
+/// Полупрозрачный спрайт предмета, следующий за курсором в режиме размещения.
+#[derive(Component)]
+pub struct PlacementGhost;
+
 /// Состояние HUD: открытые меню, боевой режим, поиск в спавн-меню.
 #[derive(Resource, Default)]
 pub struct HudState {
@@ -51,7 +62,7 @@ pub enum HudAction {
     Drop,
     /// Админ-команда серверу.
     Admin(String),
-    /// Спавн предмета из каталога.
+    /// Спавн предмета из каталога (клик — в мир, Ctrl+клик — в рюкзак).
     SpawnItem(String),
 }
 
@@ -104,105 +115,265 @@ fn button_bg(hovered: bool, pressed: bool) -> BackgroundColor {
     }
 }
 
-/// Спавнит HUD при входе в игру: верхняя панель + боковые действия.
+/// Тонируемая картинка кнопки: цвета состояний (аналог `ModulateSelfOverride`
+/// у `MenuButton` в SS14).
+#[derive(Component)]
+pub struct HudTint {
+    pub normal: Color,
+    pub hovered: Color,
+    pub pressed: Color,
+}
+
+impl HudTint {
+    /// Тонирование обычной кнопки SS14 (`ButtonColor*` из StyleNano).
+    pub fn button() -> Self {
+        Self {
+            normal: crate::ui_theme::BUTTON_DEFAULT,
+            hovered: crate::ui_theme::BUTTON_HOVERED,
+            pressed: crate::ui_theme::BUTTON_PRESSED,
+        }
+    }
+
+    /// Тонирование иконки верхней панели (`MenuButton.Color*`).
+    pub fn icon() -> Self {
+        Self {
+            normal: crate::ui_theme::TOP_ICON,
+            hovered: crate::ui_theme::TOP_ICON_HOVERED,
+            pressed: crate::ui_theme::TOP_ICON_PRESSED,
+        }
+    }
+
+    fn color(&self, state: crate::ui_theme::UiButtonState) -> Color {
+        match state {
+            crate::ui_theme::UiButtonState::Normal => self.normal,
+            crate::ui_theme::UiButtonState::Hovered => self.hovered,
+            crate::ui_theme::UiButtonState::Pressed => self.pressed,
+        }
+    }
+}
+
+/// Кнопки HUD с тонировкой — запрос вынесен в алиас ради лимита clippy.
+type TintedButtons<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static Interaction,
+        &'static HudTint,
+        &'static mut ImageNode,
+        Option<&'static Children>,
+    ),
+    (Changed<Interaction>, With<Button>),
+>;
+
+/// Перекрашивает текстурные кнопки HUD при наведении/нажатии.
+pub fn hud_button_tint(
+    mut buttons: TintedButtons,
+    mut icons: Query<(&HudTint, &mut ImageNode), Without<Button>>,
+) {
+    for (interaction, tint, mut image, children) in buttons.iter_mut() {
+        let state = crate::ui_theme::UiButtonState::from_interaction(interaction);
+        image.color = tint.color(state);
+        let Some(children) = children else {
+            continue;
+        };
+        for child in children.iter() {
+            if let Ok((child_tint, mut child_image)) = icons.get_mut(child) {
+                child_image.color = child_tint.color(state);
+            }
+        }
+    }
+}
+
+/// Спавнит HUD при входе в игру — по образцу SS14 (`DefaultGameScreen.xaml`):
+/// верхняя панель иконок слева вверху (`GameTopMenuBar`, кнопки 42×64 с
+/// подписью горячей клавиши), под ней колонка действий (`ActionsBar`, слоты
+/// 64×64 с подписью клавиши в углу), снизу — панель призрака (`GhostGui`,
+/// кнопки по центру, отступ 80).
 pub fn spawn_hud(
     mut commands: Commands,
     own: Res<OwnPlayerEntity>,
+    theme: Res<crate::ui_theme::UiTheme>,
     roots: Query<(), With<HudRoot>>,
 ) {
+    use crate::ui_theme as ui;
     if own.0.is_none() || !roots.is_empty() {
         return;
     }
-    let top: [(&str, HudAction); 5] = [
-        ("Крафт (C)", HudAction::ToggleCraft),
-        ("Спавн (F5)", HudAction::ToggleSpawn),
-        ("Админ (F7)", HudAction::ToggleAdmin),
-        ("Настройки (Esc)", HudAction::OpenSettings),
-        ("Бой (F)", HudAction::ToggleCombat),
+    // Верхняя панель: иконка + подпись горячей клавиши (порядок — TOP_ICONS).
+    let top: [(&str, HudAction, usize); 5] = [
+        ("Esc", HudAction::OpenSettings, 0),
+        ("F5", HudAction::ToggleSpawn, 7),
+        ("F7", HudAction::ToggleAdmin, 6),
+        ("C", HudAction::ToggleCraft, 4),
+        ("F", HudAction::ToggleCombat, 5),
     ];
     commands
         .spawn((
             HudRoot,
             Node {
                 position_type: PositionType::Absolute,
-                left: px(0),
-                right: px(0),
-                top: px(0),
-                height: px(34),
+                left: px(10),
+                top: px(10),
                 flex_direction: FlexDirection::Row,
-                justify_content: JustifyContent::Center,
-                column_gap: px(4),
-                padding: UiRect::vertical(px(3)),
+                column_gap: px(5),
                 ..default()
             },
         ))
         .with_children(|bar| {
-            for (label, action) in top {
+            for (key, action, icon_index) in top {
+                let icon = theme.icons.get(icon_index).cloned().unwrap_or_default();
                 bar.spawn((
                     action,
                     Button,
+                    HudTint::button(),
+                    ui::nine_slice(&theme.button, 10.0),
                     Node {
-                        height: px(26),
-                        padding: UiRect::horizontal(px(10)),
+                        width: px(42),
+                        height: px(64),
+                        flex_direction: FlexDirection::Column,
                         align_items: AlignItems::Center,
                         justify_content: JustifyContent::Center,
-                        border: UiRect::all(px(2)),
                         ..default()
                     },
-                    button_bg(false, false),
-                    BorderColor::from(Color::srgb(0.30, 0.30, 0.36)),
                 ))
-                .with_child((
-                    Text::new(label),
-                    TextFont::from_font_size(12.0),
-                    TextColor(Color::srgb(0.85, 0.85, 0.88)),
-                ));
+                .with_children(|button| {
+                    button.spawn((
+                        HudTint::icon(),
+                        ImageNode::new(icon),
+                        Node {
+                            width: px(24),
+                            height: px(24),
+                            ..default()
+                        },
+                    ));
+                    button.spawn((
+                        Text::new(key),
+                        TextFont::from_font_size(13.0),
+                        TextColor(ui::TEXT),
+                    ));
+                });
             }
         });
-    let side: [(&str, HudAction); 2] = [
-        ("Осмотреть (E)", HudAction::Examine),
-        ("Бросить (Q)", HudAction::Drop),
+    // Колонка действий (ActionsBar): слоты 64×64, подпись клавиши в углу.
+    let actions: [(&str, &str, HudAction); 4] = [
+        ("E", "Осмотр", HudAction::Examine),
+        ("Q", "Бросить", HudAction::Drop),
+        ("C", "Крафт", HudAction::ToggleCraft),
+        ("F", "Бой", HudAction::ToggleCombat),
     ];
     commands
         .spawn((
             HudRoot,
             Node {
                 position_type: PositionType::Absolute,
-                right: px(10),
-                top: px(90),
+                left: px(10),
+                top: px(84),
                 flex_direction: FlexDirection::Column,
-                row_gap: px(4),
+                row_gap: px(5),
                 ..default()
             },
         ))
         .with_children(|column| {
-            for (label, action) in side {
+            for (key, label, action) in actions {
                 column
                     .spawn((
                         action,
                         Button,
+                        HudTint::button(),
+                        ui::nine_slice(&theme.button, 10.0),
                         Node {
-                            width: px(118),
-                            height: px(28),
+                            width: px(64),
+                            height: px(64),
+                            flex_direction: FlexDirection::Column,
                             align_items: AlignItems::Center,
                             justify_content: JustifyContent::Center,
-                            border: UiRect::all(px(2)),
                             ..default()
                         },
-                        button_bg(false, false),
-                        BorderColor::from(Color::srgb(0.30, 0.30, 0.36)),
                     ))
-                    .with_child((
-                        Text::new(label),
-                        TextFont::from_font_size(12.0),
-                        TextColor(Color::srgb(0.85, 0.85, 0.88)),
-                    ));
+                    .with_children(|slot| {
+                        // Подпись клавиши — слева вверху, как ActionButton.
+                        slot.spawn((
+                            Text::new(key),
+                            TextFont::from_font_size(13.0),
+                            TextColor(ui::NANO_GOLD),
+                        ));
+                        slot.spawn((
+                            Text::new(label),
+                            TextFont::from_font_size(ui::FONT_SMALL),
+                            TextColor(ui::TEXT),
+                        ));
+                    });
+            }
+        });
+    // Панель призрака: в SS14 стоит снизу по центру с отступом 80.
+    commands
+        .spawn((
+            GhostBarRoot,
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(0),
+                right: px(0),
+                bottom: px(80),
+                flex_direction: FlexDirection::Row,
+                justify_content: JustifyContent::Center,
+                column_gap: px(5),
+                ..default()
+            },
+        ))
+        .with_children(|bar| {
+            for (label, action) in [
+                ("Вернуться в тело", HudAction::Admin("unghost".to_string())),
+                ("Телепорт призрака", HudAction::Admin("tpto".to_string())),
+                ("Настройки", HudAction::OpenSettings),
+            ] {
+                bar.spawn((
+                    GhostBarButton,
+                    action,
+                    Button,
+                    HudTint::button(),
+                    ui::nine_slice(&theme.button, 10.0),
+                    Node {
+                        height: px(34),
+                        padding: UiRect::axes(px(14), px(2)),
+                        align_items: AlignItems::Center,
+                        justify_content: JustifyContent::Center,
+                        ..default()
+                    },
+                ))
+                .with_child((
+                    Text::new(label),
+                    TextFont::from_font_size(ui::FONT_BASE),
+                    TextColor(ui::TEXT),
+                ));
             }
         });
 }
 
-/// Позиция курсора в мировых координатах (для осмотра по E).
-fn cursor_world(
+/// Корень панели призрака (показывается только призраку, как в SS14).
+#[derive(Component)]
+pub struct GhostBarRoot;
+
+/// Кнопка панели призрака.
+#[derive(Component)]
+pub struct GhostBarButton;
+
+/// Показывает панель призрака только когда свой игрок — призрак (`Ghost`).
+pub fn update_ghost_bar(
+    own: Res<OwnPlayerEntity>,
+    ghosts: Query<(), With<ssr_core::mechanics::Ghost>>,
+    mut bars: Query<&mut Node, With<GhostBarRoot>>,
+) {
+    let ghost = own.0.is_some_and(|entity| ghosts.contains(entity));
+    for mut node in bars.iter_mut() {
+        let display = if ghost { Display::Flex } else { Display::None };
+        if node.display != display {
+            node.display = display;
+        }
+    }
+}
+
+/// Позиция курсора в мировых координатах (для осмотра по E, подбора кликом).
+pub(crate) fn cursor_world(
     windows: &Query<&Window>,
     camera: &Single<(&Camera, &GlobalTransform), With<Camera2d>>,
 ) -> Option<Vec2> {
@@ -214,6 +385,7 @@ fn cursor_world(
 
 /// Действие по E: открыть ближайшую дверь или ящик под курсором; если рядом
 /// ничего нет — применить предмет из активной руки к тайлу (как в SS14).
+/// Подбор предметов с пола — кликом мыши (SS14), не на E.
 fn send_interact(
     senders: &mut Query<&mut MessageSender<ClientMessage>, With<Connected>>,
     world: Vec2,
@@ -276,6 +448,7 @@ fn send_examine(
 }
 
 /// Горячие клавиши: F5 спавн, F7 админ, F бой, E действие, Q бросить, C крафт.
+/// Предмет с пола поднимается кликом мыши (как в SS14).
 #[allow(clippy::too_many_arguments)]
 pub fn hud_hotkeys(
     keys: Res<ButtonInput<KeyCode>>,
@@ -355,11 +528,14 @@ pub fn hud_hotkeys(
 }
 
 /// Клики по кнопкам HUD.
+#[allow(clippy::too_many_arguments)]
 pub fn hud_click(
     mut state: ResMut<HudState>,
     mut crafting: ResMut<crate::crafting::CraftingState>,
+    mut placement: ResMut<Placement>,
     mut commands: Commands,
     settings: Res<Settings>,
+    keys: Res<ButtonInput<KeyCode>>,
     menus: Query<Entity, With<crate::settings::SettingsMenu>>,
     mut senders: Query<&mut MessageSender<ClientMessage>, With<Connected>>,
     mut clicks: HudClicks,
@@ -407,10 +583,17 @@ pub fn hud_click(
                 }
             }
             HudAction::SpawnItem(id) => {
-                for mut sender in senders.iter_mut() {
-                    sender.send::<GameChannel>(ClientMessage::Admin {
-                        command: format!("spawn {id} 1"),
-                    });
+                // Как в SS14: обычный клик — режим размещения (предмет «висит» на
+                // курсоре, ЛКМ ставит), Ctrl+клик — сразу в рюкзак.
+                if keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]) {
+                    for mut sender in senders.iter_mut() {
+                        sender.send::<GameChannel>(ClientMessage::Admin {
+                            command: format!("spawn {id} 1"),
+                        });
+                    }
+                } else {
+                    placement.item = Some(id.clone());
+                    tracing::info!(item = %id, "placement mode started");
                 }
             }
         }
@@ -481,15 +664,34 @@ fn menu_panel(
         });
 }
 
-/// Перерисовывает спавн-меню (F5): поиск и список предметов каталога.
+/// Сколько строк помещается в спавн-меню (SS14 прокручивает список, у нас
+/// список ограничен — остальное уточняется поиском).
+const SPAWN_MENU_ROWS: usize = 11;
+
+/// Отпечаток состояния спавн-меню (открыто, поиск, спрайты, режим размещения).
+type SpawnMenuSignature = (bool, String, u32, Option<String>);
+
+/// Перерисовывает спавн-меню (F5) по образцу `EntitySpawnWindow.xaml`:
+/// окно 350×400 у левого края, поле поиска с кнопкой «Очистить», список
+/// строк «иконка 32×32 + имя», снизу — подсказка режима размещения.
+#[allow(clippy::too_many_arguments)]
 pub fn render_spawn_menu(
     mut commands: Commands,
     state: Res<HudState>,
+    placement: Res<Placement>,
     content: Res<ClientContent>,
+    registry: Res<crate::rsi::RsiRegistry>,
+    theme: Res<crate::ui_theme::UiTheme>,
     root: Query<Entity, With<HudMenuRoot>>,
-    mut last: Local<Option<(bool, String)>>,
+    mut last: Local<Option<SpawnMenuSignature>>,
 ) {
-    let signature = (state.spawn_open, state.search.clone());
+    use crate::ui_theme as ui;
+    let signature = (
+        state.spawn_open,
+        state.search.clone(),
+        registry.generation(),
+        placement.item.clone(),
+    );
     if last.as_ref() == Some(&signature) {
         return;
     }
@@ -501,7 +703,7 @@ pub fn render_spawn_menu(
         return;
     }
     let query = state.search.to_lowercase();
-    let items: Vec<(String, String)> = content
+    let mut matched: Vec<(String, String)> = content
         .items
         .items
         .iter()
@@ -512,37 +714,337 @@ pub fn render_spawn_menu(
         })
         .map(|item| (item.id.clone(), item.name.clone()))
         .collect();
-    menu_panel(
-        &mut commands,
-        &format!(
-            "Спавн — поиск: {}_  (F5 — закрыть, предметы идут в рюкзак)",
-            state.search
-        ),
-        280.0,
-        420.0,
-        Color::srgb(1.0, 0.75, 0.25),
-        |panel| {
-            for (id, name) in items {
-                panel
-                    .spawn((
-                        HudAction::SpawnItem(id.clone()),
+    matched.sort_by(|a, b| a.1.cmp(&b.1));
+    let total = matched.len();
+    matched.truncate(SPAWN_MENU_ROWS);
+    let icons: Vec<Option<ImageNode>> = matched
+        .iter()
+        .map(|(id, _)| {
+            crate::inventory_ui::item_icon(&registry, &content.items, id)
+                .map(crate::inventory_ui::icon_node)
+        })
+        .collect();
+
+    // Окно: 350 px шириной у левого края, как CenterLeft в SS14.
+    commands
+        .spawn((
+            HudMenuRoot,
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(280),
+                top: px(70),
+                width: px(350),
+                max_height: px(430),
+                flex_direction: FlexDirection::Column,
+                ..default()
+            },
+        ))
+        .with_children(|window| {
+            // Шапка окна: заголовок золотом + крестик (`windowTitle` в SS14).
+            window
+                .spawn((
+                    Node {
+                        width: Val::Percent(100.0),
+                        height: px(25.0),
+                        align_items: AlignItems::Center,
+                        padding: UiRect::horizontal(px(5)),
+                        column_gap: px(6),
+                        ..default()
+                    },
+                    BackgroundColor(ui::PANEL_DARK),
+                ))
+                .with_children(|header| {
+                    header.spawn((
+                        Text::new("Панель спавна сущностей"),
+                        TextFont::from_font_size(ui::FONT_LABEL),
+                        TextColor(ui::NANO_GOLD),
+                    ));
+                    header.spawn((
+                        MenuCloseButton,
                         Button,
+                        ImageNode::new(theme.cross.clone()),
                         Node {
-                            height: px(22),
-                            align_items: AlignItems::Center,
-                            padding: UiRect::horizontal(px(6)),
+                            width: px(18),
+                            height: px(18),
+                            margin: UiRect::left(Val::Auto),
                             ..default()
                         },
-                        button_bg(false, false),
-                    ))
-                    .with_child((
-                        Text::new(format!("{name} ({id})")),
-                        TextFont::from_font_size(12.0),
-                        TextColor(Color::srgb(0.85, 0.85, 0.88)),
                     ));
-            }
-        },
-    );
+                });
+            window
+                .spawn((
+                    Node {
+                        width: Val::Percent(100.0),
+                        max_height: px(360),
+                        flex_direction: FlexDirection::Column,
+                        padding: UiRect::all(px(6)),
+                        row_gap: px(5),
+                        overflow: Overflow::clip(),
+                        ..default()
+                    },
+                    ui::nine_slice(&theme.window_background, 2.0),
+                ))
+                .with_children(|body| {
+                    // Строка поиска: поле ввода + «Очистить» (как в SS14).
+                    body.spawn(Node {
+                        width: Val::Percent(100.0),
+                        height: px(24),
+                        column_gap: px(4),
+                        ..default()
+                    })
+                    .with_children(|row| {
+                        row.spawn((
+                            ui::nine_slice(&theme.lineedit, 3.0),
+                            Node {
+                                flex_grow: 1.0,
+                                height: px(24),
+                                align_items: AlignItems::Center,
+                                padding: UiRect::horizontal(px(5)),
+                                ..default()
+                            },
+                        ))
+                        .with_child((
+                            Text::new(if state.search.is_empty() {
+                                "поиск".to_string()
+                            } else {
+                                format!("{}_", state.search)
+                            }),
+                            TextFont::from_font_size(ui::FONT_BASE),
+                            TextColor(if state.search.is_empty() {
+                                ui::TEXT_MUTED
+                            } else {
+                                ui::TEXT
+                            }),
+                        ));
+                        row.spawn((
+                            MenuClearButton,
+                            Button,
+                            HudTint::button(),
+                            ui::nine_slice(&theme.button, 10.0),
+                            Node {
+                                height: px(24),
+                                padding: UiRect::horizontal(px(10)),
+                                align_items: AlignItems::Center,
+                                ..default()
+                            },
+                        ))
+                        .with_child((
+                            Text::new("Очистить"),
+                            TextFont::from_font_size(ui::FONT_BASE),
+                            TextColor(ui::TEXT),
+                        ));
+                    });
+                    // Список: строка = иконка 32×32 + имя, зазор 2 px.
+                    body.spawn(Node {
+                        width: Val::Percent(100.0),
+                        flex_direction: FlexDirection::Column,
+                        row_gap: px(2),
+                        ..default()
+                    })
+                    .with_children(|list| {
+                        for ((id, name), icon) in matched.into_iter().zip(icons) {
+                            let selected = placement.item.as_deref() == Some(id.as_str());
+                            let tint = if selected {
+                                HudTint {
+                                    normal: ui::BUTTON_PRESSED,
+                                    hovered: ui::BUTTON_PRESSED,
+                                    pressed: ui::BUTTON_PRESSED,
+                                }
+                            } else {
+                                HudTint::button()
+                            };
+                            let mut image = ui::nine_slice(&theme.button, 10.0);
+                            image.color = if selected {
+                                ui::BUTTON_PRESSED
+                            } else {
+                                ui::BUTTON_DEFAULT
+                            };
+                            list.spawn((
+                                HudAction::SpawnItem(id.clone()),
+                                Button,
+                                tint,
+                                image,
+                                Node {
+                                    width: Val::Percent(100.0),
+                                    height: px(32),
+                                    align_items: AlignItems::Center,
+                                    column_gap: px(6),
+                                    padding: UiRect::horizontal(px(6)),
+                                    ..default()
+                                },
+                            ))
+                            .with_children(|row| {
+                                // Иконка 32×32, как EntityPrototypeView в SS14.
+                                row.spawn(Node {
+                                    width: px(32),
+                                    height: px(32),
+                                    align_items: AlignItems::Center,
+                                    justify_content: JustifyContent::Center,
+                                    ..default()
+                                })
+                                .with_children(|cell| {
+                                    if let Some(icon) = icon {
+                                        cell.spawn((
+                                            icon,
+                                            Node {
+                                                width: px(28),
+                                                height: px(28),
+                                                ..default()
+                                            },
+                                        ));
+                                    }
+                                });
+                                row.spawn((
+                                    Text::new(name),
+                                    TextFont::from_font_size(ui::FONT_BASE),
+                                    TextColor(ui::TEXT),
+                                ));
+                                row.spawn((
+                                    Text::new(id),
+                                    TextFont::from_font_size(ui::FONT_SMALL),
+                                    TextColor(ui::TEXT_MUTED),
+                                ));
+                            });
+                        }
+                    });
+                    // Подсказка снизу: счётчик и режим размещения.
+                    let hint = match &placement.item {
+                        Some(item) => format!("Размещение: {item} — ЛКМ поставить, ПКМ отменить"),
+                        None => format!(
+                            "{}/{} · клик — размещать, Ctrl+клик — в рюкзак",
+                            total, total
+                        ),
+                    };
+                    body.spawn((
+                        Text::new(hint),
+                        TextFont::from_font_size(ui::FONT_SMALL),
+                        TextColor(ui::NANO_GOLD),
+                    ));
+                });
+        });
+}
+
+/// Кнопка «Очистить» в спавн-меню.
+#[derive(Component)]
+pub struct MenuClearButton;
+
+/// Крестик закрытия окна меню.
+#[derive(Component)]
+pub struct MenuCloseButton;
+
+/// Обрабатывает «Очистить» и крестик в окнах меню.
+pub fn menu_buttons_click(
+    mut state: ResMut<HudState>,
+    mut placement: ResMut<Placement>,
+    clear: Query<&Interaction, (Changed<Interaction>, With<MenuClearButton>)>,
+    close: Query<&Interaction, (Changed<Interaction>, With<MenuCloseButton>)>,
+) {
+    for interaction in clear.iter() {
+        if *interaction == Interaction::Pressed {
+            state.search.clear();
+        }
+    }
+    for interaction in close.iter() {
+        if *interaction == Interaction::Pressed {
+            state.spawn_open = false;
+            state.admin_open = false;
+            placement.item = None;
+        }
+    }
+}
+
+/// Двигает полупрозрачный спрайт предмета за курсором в режиме размещения.
+pub fn update_placement_ghost(
+    mut commands: Commands,
+    placement: Res<Placement>,
+    sprites: crate::inventory_ui::ItemSprites,
+    windows: Query<&Window>,
+    camera: Single<(&Camera, &GlobalTransform), With<Camera2d>>,
+    ghosts: Query<Entity, With<PlacementGhost>>,
+) {
+    let cursor = cursor_world(&windows, &camera);
+    let active = placement.item.as_deref().and_then(|item| {
+        cursor.map(|world| sprites.icon_by_name(item).map(|sprite| (sprite, world)))
+    });
+    match (active.flatten(), ghosts.iter().next()) {
+        (Some((sprite, world)), Some(entity)) => {
+            commands.entity(entity).insert((
+                Sprite {
+                    image: sprite.image.clone(),
+                    texture_atlas: Some(TextureAtlas {
+                        layout: sprite.layout.clone(),
+                        index: sprite.index(0, 0),
+                    }),
+                    color: Color::srgba(1.0, 1.0, 1.0, 0.55),
+                    ..default()
+                },
+                Transform::from_xyz(world.x, world.y, PLACEMENT_Z),
+            ));
+        }
+        (Some((sprite, world)), None) => {
+            commands.spawn((
+                PlacementGhost,
+                Sprite {
+                    image: sprite.image.clone(),
+                    texture_atlas: Some(TextureAtlas {
+                        layout: sprite.layout.clone(),
+                        index: sprite.index(0, 0),
+                    }),
+                    color: Color::srgba(1.0, 1.0, 1.0, 0.55),
+                    ..default()
+                },
+                Transform::from_xyz(world.x, world.y, PLACEMENT_Z),
+            ));
+        }
+        (None, Some(entity)) => {
+            commands.entity(entity).despawn();
+        }
+        (None, None) => {}
+    }
+}
+
+/// Слой спрайта-призрака размещения: выше предметов на полу, ниже игрока.
+const PLACEMENT_Z: f32 = 0.8;
+
+/// Клик в мире в режиме размещения: ЛКМ — поставить предмет (админ-команда
+/// с координатами), ПКМ — отменить (как выход из режима в SS14).
+#[allow(clippy::too_many_arguments)]
+pub fn placement_click(
+    mouse: Res<ButtonInput<MouseButton>>,
+    mut placement: ResMut<Placement>,
+    mut senders: Query<&mut MessageSender<ClientMessage>, With<Connected>>,
+    windows: Query<&Window>,
+    camera: Single<(&Camera, &GlobalTransform), With<Camera2d>>,
+    ui: Query<&Interaction, With<Button>>,
+) {
+    let Some(item) = placement.item.clone() else {
+        return;
+    };
+    if mouse.just_pressed(MouseButton::Right) {
+        placement.item = None;
+        tracing::info!("placement cancelled");
+        return;
+    }
+    if !mouse.just_pressed(MouseButton::Left) {
+        return;
+    }
+    // Клик по интерфейсу принадлежит UI (строки списка, кнопки).
+    if ui
+        .iter()
+        .any(|interaction| *interaction != Interaction::None)
+    {
+        return;
+    }
+    let Some(world) = cursor_world(&windows, &camera) else {
+        return;
+    };
+    let command = format!("spawn {item} 1 floor {:.1} {:.1}", world.x, world.y);
+    for mut sender in senders.iter_mut() {
+        sender.send::<GameChannel>(ClientMessage::Admin {
+            command: command.clone(),
+        });
+    }
+    tracing::info!(command, "placement spawn sent");
 }
 
 /// Перерисовывает админ-меню (F7): действия и список игроков в интересе.

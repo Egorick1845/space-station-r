@@ -135,6 +135,7 @@ fn main() {
             movement,
             sync_replicated_position,
             update_client_rooms,
+            sync_item_rooms,
             log_player_position,
             // Атмосфера (T4.3): диффузия, урон от разгерметизации.
             simulate_atmosphere,
@@ -258,6 +259,7 @@ fn spawn_containers(
             inventory,
             ItemPosition([*x, *y]),
             Replicate::to_clients(NetworkTarget::All),
+            ItemRoom(room),
             Rooms::single(room),
         ));
     }
@@ -1328,6 +1330,11 @@ struct DeathEvent {
     killer: Option<Entity>,
 }
 
+/// Комната, назначенная сущности для репликации предметов: предмет виден
+/// клиенту, когда наборы комнат пересекаются (`Rooms` пустой = невидим всем).
+#[derive(Component, Clone, Copy, PartialEq, Debug)]
+struct ItemRoom(RoomId);
+
 /// Чанк → комната (T1.4). Комнаты выделяются лениво из RoomAllocator.
 #[derive(Resource, Default)]
 struct ChunkRooms {
@@ -1480,6 +1487,7 @@ fn run_admin_command(
     players: &Players,
     commands: &mut Commands,
     inventories: &mut Query<&mut Inventory>,
+    positions: &Query<&PlayerPosition>,
     catalogs: &ContentCatalog,
 ) -> String {
     let mut parts = command.split_whitespace();
@@ -1502,7 +1510,7 @@ fn run_admin_command(
         }
         "spawn" => {
             let Some(item_id) = parts.next() else {
-                return "использование: spawn <предмет> [кол-во]".to_string();
+                return "использование: spawn <предмет> [кол-во] [floor]".to_string();
             };
             if catalogs.items.by_id(item_id).is_none() {
                 return format!("неизвестный предмет: {item_id}");
@@ -1512,7 +1520,39 @@ fn run_admin_command(
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(1)
                 .min(20);
+            // Второй режим: положить предмет на пол у ног (спавн-меню, «разместить»).
+            let on_floor = parts.next() == Some("floor");
             let (w, h) = catalogs.items.size_of(item_id);
+            let Some(base) = positions.get(player).ok().map(|p| p.0) else {
+                return "нет позиции игрока".to_string();
+            };
+            // Координаты размещения (режим размещения спавн-меню): spawn <id> 1 floor x y
+            let explicit = match (parts.next(), parts.next()) {
+                (Some(x), Some(y)) => match (x.parse::<f32>(), y.parse::<f32>()) {
+                    (Ok(x), Ok(y)) => Some((x, y)),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if on_floor {
+                let mut produced = 0;
+                for index in 0..count {
+                    let spread = (index as f32) * TILE_SIZE * 0.6;
+                    let x = explicit.map_or(base[0] + spread, |(x, _)| x + spread);
+                    let y = explicit.map_or(base[1] - TILE_SIZE * 0.8, |(_, y)| y);
+                    commands.spawn((
+                        Item {
+                            name: item_id.to_string(),
+                        },
+                        HeldBy { player: 0 },
+                        ItemPosition([x, y]),
+                        Replicate::to_clients(NetworkTarget::All),
+                        Rooms::default(),
+                    ));
+                    produced += 1;
+                }
+                return format!("размещено на полу {produced}× {item_id}");
+            }
             let Ok(mut inventory) = inventories.get_mut(player) else {
                 return "нет рюкзака".to_string();
             };
@@ -1631,6 +1671,7 @@ fn handle_client_messages(
     mut inventories: Query<&mut Inventory>,
     mut hands: Query<&mut Hands>,
     containers: Query<(Entity, &Container, &ItemPosition)>,
+    item_positions: Query<&ItemPosition>,
     items: Query<&Item>,
     mut actions: ResMut<ActionQueue>,
     mut players: ResMut<Players>,
@@ -1916,6 +1957,7 @@ fn handle_client_messages(
                         &players,
                         &mut commands,
                         &mut inventories,
+                        &positions,
                         &content.catalogs,
                     );
                     tracing::info!(%name, command = %command, reply = %reply, "admin command");
@@ -1993,18 +2035,68 @@ fn handle_client_messages(
                         continue;
                     };
                     hand.take(item);
-                    let Ok(mut inventory) = inventories.get_mut(player) else {
-                        hand.take_in_active(item);
+                    // Выброс на пол (механики владельца): предмет остаётся сущностью,
+                    // но теряет владельца и получает мировую позицию.
+                    let Ok(position) = positions.get(player) else {
                         continue;
                     };
-                    let (w, h) = item_size_of(&content.catalogs, &items, item);
-                    match inventory.put_first_fit(item, w, h) {
-                        Some(slot) => tracing::info!(item, slot, "item stowed from hand"),
-                        None => {
-                            hand.take_in_active(item);
-                            tracing::warn!(item, "stow: inventory full");
+                    if let Some(entity) = Entity::try_from_bits(item) {
+                        commands
+                            .entity(entity)
+                            .insert((HeldBy { player: 0 }, ItemPosition(position.0)));
+                        tracing::info!(item, position = ?position.0, "item dropped on floor");
+                    }
+                }
+                ClientMessage::Pickup { item } => {
+                    let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {
+                        continue;
+                    };
+                    let player = entry.player;
+                    let Ok(player_position) = positions.get(player) else {
+                        continue;
+                    };
+                    let Some(entity) = Entity::try_from_bits(item) else {
+                        continue;
+                    };
+                    // Поднять можно только предмет с пола (ItemPosition) и без владельца.
+                    let Ok(item_position) = item_positions.get(entity) else {
+                        tracing::warn!(item, "pickup: item is not on the floor");
+                        continue;
+                    };
+                    let dx = item_position.0[0] - player_position.0[0];
+                    let dy = item_position.0[1] - player_position.0[1];
+                    if (dx * dx + dy * dy).sqrt() > INTERACT_RANGE + TILE_SIZE {
+                        tracing::warn!(item, "pickup: too far");
+                        continue;
+                    }
+                    let name = items
+                        .get(entity)
+                        .map(|item| item.name.clone())
+                        .unwrap_or_default();
+                    let (w, h) = content.catalogs.items.size_of(&name);
+                    // Свободная активная рука — приоритет (как в SS14), иначе рюкзак.
+                    let mut taken = false;
+                    if let Ok(mut hand) = hands.get_mut(player)
+                        && hand.active_item().is_none()
+                    {
+                        taken = hand.take_in_active(item);
+                    }
+                    if !taken {
+                        let Ok(mut inventory) = inventories.get_mut(player) else {
+                            continue;
+                        };
+                        if inventory.put_first_fit(item, w, h).is_none() {
+                            tracing::warn!(name, "pickup: no room");
+                            continue;
                         }
                     }
+                    commands
+                        .entity(entity)
+                        .remove::<ItemPosition>()
+                        .insert(HeldBy {
+                            player: player.to_bits(),
+                        });
+                    tracing::info!(item, name, "item picked up");
                 }
                 ClientMessage::Attack { target } => {
                     let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {
@@ -2231,12 +2323,60 @@ fn update_client_rooms(
             link_entity.try_insert(Rooms::from(desired.iter().copied()));
         }
         if let Ok(mut player_entity) = commands.get_entity(entry.player) {
-            player_entity.try_insert(Rooms::from(desired.iter().copied()));
+            // Комната чанка под игроком — якорь для его предметов (руки/рюкзак).
+            let own_room = chunk_rooms.room_for(chunk, &mut allocator);
+            player_entity.try_insert((Rooms::from(desired.iter().copied()), ItemRoom(own_room)));
         }
 
         tracing::debug!(chunk = ?chunk, rooms = desired.len(), "interest updated");
         entry.chunk = chunk;
         entry.rooms = desired;
+    }
+}
+
+/// Выдаёт предметам комнату якоря: держателя (руки/рюкзак), ящика или чанка
+/// под лежащим предметом. Иначе `Rooms::default()` (пустой набор) делает предмет
+/// невидимым всем клиентам — иконки в UI и модель в руке не приходят (T-мех).
+fn sync_item_rooms(
+    mut commands: Commands,
+    items: Query<(Entity, &HeldBy, Option<&ItemPosition>, Option<&ItemRoom>)>,
+    holders: Query<&ItemRoom, With<PlayerPosition>>,
+    containers: Query<(&Inventory, &ItemRoom), With<Container>>,
+    mut chunk_rooms: ResMut<ChunkRooms>,
+    mut allocator: ResMut<RoomAllocator>,
+) {
+    for (entity, held, position, current) in items.iter() {
+        let room = if held.player != 0 {
+            Entity::try_from_bits(held.player)
+                .and_then(|holder| holders.get(holder).ok())
+                .copied()
+        } else if let Some(position) = position {
+            Some(ItemRoom(chunk_rooms.room_for(
+                chunk_coords(position.0[0], position.0[1]),
+                &mut allocator,
+            )))
+        } else {
+            containers
+                .iter()
+                .find(|(inventory, _)| {
+                    inventory
+                        .cells
+                        .iter()
+                        .flatten()
+                        .any(|bits| *bits == entity.to_bits())
+                })
+                .map(|(_, room)| *room)
+        };
+        let Some(room) = room else {
+            continue;
+        };
+        if current == Some(&room) {
+            continue;
+        }
+        commands
+            .entity(entity)
+            .insert((room, Rooms::single(room.0)));
+        tracing::info!(item = ?entity, room = ?room.0, "item room assigned");
     }
 }
 

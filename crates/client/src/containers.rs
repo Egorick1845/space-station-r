@@ -152,6 +152,7 @@ fn open_container_in_reach<'a>(
 pub fn render_container_panel(
     mut commands: Commands,
     sprites: crate::inventory_ui::ItemSprites,
+    theme: Res<crate::ui_theme::UiTheme>,
     own: Res<crate::inventory_ui::OwnPlayerEntity>,
     positions: Query<&PlayerPosition>,
     window_positions: Res<crate::windows::WindowPositions>,
@@ -187,19 +188,18 @@ pub fn render_container_panel(
     let Some(container_entity) = container_entity else {
         return;
     };
-    let title = containers
-        .get(container_entity)
-        .map(|(_, container, _)| container.name.clone())
-        .unwrap_or_else(|_| "Ящик".to_string());
     tracing::info!(?container_entity, "container panel opened");
 
+    // Окно как StorageWindow в SS14: сайдбар с крестиком + сетка ячеек 32×32.
+    let cell = crate::ui_theme::STORAGE_CELL;
+    let grid_width = ssr_core::inventory::INVENTORY_COLS as f32 * cell;
+    let grid_height = ssr_core::inventory::INVENTORY_ROWS as f32 * cell;
     let mut node = Node {
         position_type: PositionType::Absolute,
         left: px(1030),
         bottom: px(120),
-        flex_direction: FlexDirection::Column,
-        padding: UiRect::all(px(8)),
-        row_gap: px(6),
+        flex_direction: FlexDirection::Row,
+        align_items: AlignItems::Start,
         ..default()
     };
     crate::windows::apply_saved_position(
@@ -215,16 +215,41 @@ pub fn render_container_panel(
             crate::windows::WindowDrag::default(),
             Interaction::default(),
             node,
-            BackgroundColor(Color::srgba(0.06, 0.06, 0.08, 0.78)),
         ))
-        .with_children(|panel| {
-            panel.spawn((
-                Text::new(title),
-                TextFont::from_font_size(14.0),
-                TextColor(Color::srgb(1.0, 0.62, 0.15)),
-            ));
-            panel
-                .spawn(crate::inventory_ui::grid_node())
+        .with_children(|window| {
+            // Сайдбар: красный крестик закрывает ящик (Interact по контейнеру).
+            window
+                .spawn((
+                    crate::ui_theme::stretched(&theme.storage_sidebar),
+                    Node {
+                        width: px(cell),
+                        height: px(grid_height),
+                        flex_direction: FlexDirection::Column,
+                        align_items: AlignItems::Center,
+                        ..default()
+                    },
+                ))
+                .with_children(|sidebar| {
+                    sidebar.spawn((
+                        ContainerCloseButton(container_entity),
+                        Button,
+                        crate::ui_theme::stretched(&theme.storage_exit),
+                        Node {
+                            width: px(cell),
+                            height: px(cell),
+                            ..default()
+                        },
+                    ));
+                });
+            window
+                .spawn((
+                    Node {
+                        width: px(grid_width),
+                        height: px(grid_height),
+                        ..default()
+                    },
+                    BackgroundColor(crate::ui_theme::GRID_BACKGROUND),
+                ))
                 .with_children(|grid| {
                     // Пустые клетки (клик — положить из руки в эту позицию).
                     for index in 0..(ssr_core::inventory::INVENTORY_COLS
@@ -232,15 +257,16 @@ pub fn render_container_panel(
                     {
                         let x = index % ssr_core::inventory::INVENTORY_COLS;
                         let y = index / ssr_core::inventory::INVENTORY_COLS;
+                        let mut tile = crate::ui_theme::stretched(&theme.storage_tile);
+                        tile.color = crate::ui_theme::GRID_BACKGROUND;
                         grid.spawn((
                             ContainerSlot {
                                 container: container_entity,
                                 slot: index,
                             },
                             Button,
-                            crate::inventory_ui::cell_node(x, y),
-                            BackgroundColor(Color::srgb(0.12, 0.12, 0.15)),
-                            BorderColor::from(Color::srgb(0.28, 0.28, 0.33)),
+                            storage_cell(x, y),
+                            tile,
                         ));
                     }
                     // Предметы поверх — во всю занятую площадь (тетрис).
@@ -248,30 +274,73 @@ pub fn render_container_panel(
                         let Some(sprite) = sprites.icon(bits) else {
                             continue;
                         };
-                        let mut image = ImageNode::new(sprite.image.clone());
-                        image.texture_atlas = Some(TextureAtlas {
-                            layout: sprite.layout.clone(),
-                            index: sprite.index(0, 0),
-                        });
                         grid.spawn((
                             ContainerSlot {
                                 container: container_entity,
                                 slot: y * ssr_core::inventory::INVENTORY_COLS + x,
                             },
                             Button,
-                            crate::inventory_ui::item_node(x, y, w, h),
-                            BackgroundColor(Color::srgba(0.16, 0.16, 0.21, 0.9)),
-                            BorderColor::from(Color::srgb(0.38, 0.38, 0.45)),
+                            storage_cell_span(x, y, w, h),
                         ))
-                        .with_child((image, crate::inventory_ui::fill_node()));
+                        .with_child((
+                            crate::inventory_ui::icon_node(sprite),
+                            crate::inventory_ui::fill_node(),
+                        ));
                     }
                 });
-            panel.spawn((
-                Text::new("Клик по предмету — взять; ПКМ — действия"),
-                TextFont::from_font_size(11.0),
-                TextColor(Color::srgb(0.62, 0.62, 0.66)),
-            ));
         });
+}
+
+/// Ячейка сетки хранилища (клетка 32×32, без зазоров).
+fn storage_cell(x: u8, y: u8) -> Node {
+    let cell = crate::ui_theme::STORAGE_CELL;
+    Node {
+        position_type: PositionType::Absolute,
+        left: px(x as f32 * cell),
+        top: px(y as f32 * cell),
+        width: px(cell),
+        height: px(cell),
+        align_items: AlignItems::Center,
+        justify_content: JustifyContent::Center,
+        ..default()
+    }
+}
+
+/// Предмет в сетке: w×h ячеек.
+fn storage_cell_span(x: u8, y: u8, w: u8, h: u8) -> Node {
+    let cell = crate::ui_theme::STORAGE_CELL;
+    let mut node = storage_cell(x, y);
+    node.width = px(w as f32 * cell);
+    node.height = px(h as f32 * cell);
+    node
+}
+
+/// Крестик закрытия окна ящика.
+#[derive(Component)]
+pub struct ContainerCloseButton(pub Entity);
+
+/// Клик по крестику — закрыть ящик (Interact по контейнеру).
+pub fn container_close_click(
+    buttons: Query<(&Interaction, &ContainerCloseButton), Changed<Interaction>>,
+    entity_map: Option<Res<ServerEntityMap>>,
+    mut senders: Query<&mut MessageSender<ClientMessage>, With<Connected>>,
+) {
+    for (interaction, close) in buttons.iter() {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        let Some(map) = entity_map.as_deref() else {
+            continue;
+        };
+        let Some(server_entity) = map.to_server().get(&close.0) else {
+            continue;
+        };
+        let bits = server_entity.to_bits();
+        for mut sender in senders.iter_mut() {
+            sender.send::<GameChannel>(ClientMessage::Interact { entity: bits });
+        }
+        tracing::info!(container = close.0.to_bits(), "container closed by cross");
+    }
 }
 
 /// Клик по слоту ящика: взять предмет себе или положить из руки.

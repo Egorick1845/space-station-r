@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Версия протокола. Несовпадение при рукопожатии = отказ соединения (проверка в T1.2).
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// Порт игрового сервера по умолчанию (T1.2).
 pub const DEFAULT_SERVER_PORT: u16 = 7777;
@@ -61,6 +61,8 @@ pub enum ClientMessage {
     Admin { command: String },
     /// Осмотр объекта или тайла (T-мех): клиент получает описание в ответе.
     Examine { entity: u64, tx: i32, ty: i32 },
+    /// Поднять предмет с пола (лежит с ItemPosition, T-мех).
+    Pickup { item: u64 },
     /// Переключить боевой режим: обычные клики начинают бить, а не использовать.
     SetCombat { combat: bool },
     /// Взять предмет из рюкзака в активную руку.
