@@ -388,6 +388,9 @@ pub struct DragItem {
     /// Взято из руки (тогда отпускание вне окон роняет предмет на пол, а не
     /// пытается убрать его в рюкзак) — SS14 позволяет тащить из рук.
     pub from_hand: bool,
+    /// Взято из слота экипировки: снимаем вещь перетаскиванием (в SS14 снятие —
+    /// клик по слоту, но перетаскивание тоже ожидаемо; сервер принимает Unequip).
+    pub from_equip: Option<ssr_core::clothing::ClothingSlot>,
     /// Смещение курсора для спрайта-призрака.
     pub grabbed: bool,
 }
@@ -1649,6 +1652,8 @@ pub fn drag_start(
     mut drag: ResMut<DragItem>,
     slots: BackpackSlots,
     hand_slots: Query<(&'static HandSlot, &'static Interaction), With<Button>>,
+    equip_slots: Query<(&'static Interaction, &'static EquipSlotButton), With<Button>>,
+    clothings: Query<&ssr_core::clothing::Clothing>,
     container_slots: CrateSlots,
     own: Res<OwnPlayerEntity>,
     inventories: Query<&Inventory>,
@@ -1661,6 +1666,26 @@ pub fn drag_start(
     drag.from_hand = false;
     // Руки: в SS14 предмет тащат и из руки (без этого вернуть вещь из руки в
     // рюкзак было нечем — владелец: «нельзя положить предмет обратно»).
+    drag.from_equip = None;
+    // Слот экипировки: в SS14 снятие — клик, но перетаскивание вещи из слота
+    // (например, в рюкзак) ожидаемо и поддержано сервером (Unequip).
+    if let Some(player) = own.0
+        && let Ok(clothing) = clothings.get(player)
+    {
+        for (interaction, button) in equip_slots.iter() {
+            if *interaction != Interaction::Pressed {
+                continue;
+            }
+            if let Some(item) = clothing.get(button.0) {
+                drag.item = item;
+                drag.from_backpack = false;
+                drag.from_hand = false;
+                drag.from_equip = Some(button.0);
+                drag.grabbed = false;
+                tracing::info!(item, slot = button.0.id(), "drag started (equipped)");
+            }
+        }
+    }
     if let Some(player) = own.0
         && let Ok(hands) = hands.get(player)
     {
@@ -1774,7 +1799,18 @@ pub fn drag_release(
     let from_slot = drag.from_slot;
     let from_backpack = drag.from_backpack;
     let drag_hand = drag.from_hand;
+    let from_equip = drag.from_equip.take();
     drag.item = 0;
+    // Вещь со слота экипировки: любое отпускание — снять (сервер положит в рюкзак).
+    if let Some(slot) = from_equip {
+        for mut sender in senders.iter_mut() {
+            sender.send::<GameChannel>(ClientMessage::Unequip {
+                slot: slot.id().to_string(),
+            });
+        }
+        tracing::info!(slot = slot.id(), "drag: unequipped");
+        return;
+    }
     // Клетка рюкзака под курсором.
     for (interaction, slot) in slots.iter() {
         if *interaction != Interaction::Hovered {
