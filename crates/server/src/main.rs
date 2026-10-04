@@ -24,8 +24,8 @@ use ssr_core::clothing::{Clothing, ClothingSlot};
 use ssr_core::inventory::{
     Container, Hands, Health, HeldBy, Inventory, Item, ItemPosition, SLOT_ANY,
 };
+use ssr_core::mechanics::{FACIAL_HAIR_STYLES, FacialHair, HAIR_STYLES, Hair, Sex};
 use ssr_core::mechanics::{Ghost, KNOCKDOWN_SECS, KnockedDown, RUN_SPEED_MULT};
-use ssr_core::mechanics::{HAIR_STYLES, Hair, Sex};
 use ssr_core::power::{Cable, Consumer, Generator, Light, Powered};
 use ssr_core::roles::{Access, PlayerRole, RoleSet};
 use ssr_core::tiles::{MapFile, TileChunkData, TileType};
@@ -2458,6 +2458,13 @@ fn handle_client_messages(
                 30 + rand_index(100) as u8,
             ],
         };
+        // Борода: в SS14 это отдельный маркинг; выпадает не всем (примерно половине).
+        if rand_index(2) == 0 {
+            commands.entity(player).insert(FacialHair {
+                style: FACIAL_HAIR_STYLES[rand_index(FACIAL_HAIR_STYLES.len())].to_string(),
+                color: hair.color,
+            });
+        }
         commands.entity(player).insert(hair);
         if let Some(role) = role {
             commands.entity(player).insert((

@@ -72,3 +72,23 @@ pub struct Hair {
 pub const HAIR_STYLES: [&str; 8] = [
     "80s", "afro", "antenna", "b", "baby", "bedhead", "baldfade", "a",
 ];
+
+/// Растительность на лице (борода/усы): отдельный маркинг слоя `FacialHair`
+/// в SS14 (`human_facial_hair.rsi`, 38 стилей).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, bevy::prelude::Component)]
+pub struct FacialHair {
+    /// Имя состояния RSI (например "3oclock", "brokenman", "chaplin").
+    pub style: String,
+    /// Цвет (обычно совпадает с цветом волос).
+    pub color: [u8; 3],
+}
+
+/// Стили бороды, которые могут выпасть на спавне (проверены по meta.json).
+pub const FACIAL_HAIR_STYLES: [&str; 6] = [
+    "3oclock",
+    "5oclockmoustache",
+    "brokenman",
+    "chaplin",
+    "chin",
+    "abe",
+];

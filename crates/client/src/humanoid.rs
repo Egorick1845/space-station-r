@@ -341,6 +341,7 @@ pub fn update_facing(
 type WornSignature = (
     Vec<(ssr_core::clothing::ClothingSlot, u64)>,
     Option<(String, [u8; 3])>,
+    Option<(String, [u8; 3])>,
 );
 
 /// Слой надетой одежды (для пересборки при смене одежды).
@@ -385,6 +386,7 @@ pub fn sync_worn_clothes(
         Entity,
         &ssr_core::clothing::Clothing,
         Option<&ssr_core::mechanics::Hair>,
+        Option<&ssr_core::mechanics::FacialHair>,
     )>,
     visuals: Query<(Entity, &crate::inventory_ui::RemotePlayerVisual)>,
     own_visual: Res<crate::inventory_ui::OwnPlayerEntity>,
@@ -394,10 +396,11 @@ pub fn sync_worn_clothes(
     worn: Query<(Entity, &WornLayer)>,
     mut last: Local<std::collections::HashMap<Entity, WornSignature>>,
 ) {
-    for (entity, clothing, hair) in clothings.iter() {
+    for (entity, clothing, hair, beard) in clothings.iter() {
         let signature = (
             clothing.slots.clone(),
             hair.map(|hair| (hair.style.clone(), hair.color)),
+            beard.map(|beard| (beard.style.clone(), beard.color)),
         );
         if last.get(&entity) == Some(&signature) {
             continue;
