@@ -180,3 +180,32 @@ sum += zTexture(blurPos2.zw) * 0.0625;
 (общие рёбра, выпуклые вершины), геометрия квада источника (какие вершины, как считается
 `lightRange`/`lightPower` у прототипов), как именно спрайты умножаются на свет
 (шейдерный инстанс с `lighting = true`), параметры `FovSetTransformAndBlit`/стенсила.
+
+## 7. Перенос в Bevy: план реализации (Rust-сторона)
+
+Шейдеры уже в репозитории: `assets/shaders/light.wgsl` (порты §2–§5 дословно,
+точки входа `shadow_map_cs`, `fov_map_cs`, `light_map_cs`, `blur_cs`,
+`light_apply_fov_cs`). Осталось собрать проводку в `crates/client/src/light_gpu.rs`:
+
+1. **Текстуры** (все — `Image` с `usage = TEXTURE_BINDING | STORAGE_BINDING | COPY_DST`,
+   чтобы их можно было и писать compute-шейдером, и семплить спрайтом-оверлеем):
+   карта теней `512 × N` (`Rg32Float`, N = число видимых источников, у нас 16–32),
+   карта FOV `2048 × 1` (`R32Float`), карта света `viewport/2` (`Rgba8Unorm`, пинг-понг
+   две штуки: `src`/`dst`). `Rgba8UnormSrgb` для storage НЕЛЬЗЯ — только `Rgba8Unorm`.
+2. **Буферы**: `walls: array<Wall>` (отрезки из `ssr_core::occluders::build_occluders`,
+   пересобирать при изменении чанков/дверей), `lights: array<Light>` (позиция, radius,
+   energy, falloff 6.8, curve 0, цвет; в нашем коде источник — `Light`/`Powered` из
+   `ssr_core::power`), `Params` (камера, размеры, глаз, ambient 0.082, направление блюра).
+3. **Пайплайны**: `ComputePipelineDescriptor` (лежит в `bevy_material::descriptor`,
+   реэкспорт в `bevy_render::render_resource`), создавать в
+   `RenderSystems::Prepare` и кэшировать `CachedComputePipelineId`.
+4. **Системы-проходы**: `render_app.add_systems(Core2d, light_gpu_pass.before(Core2dSystems::MainPass))`;
+   в системе `mut ctx: RenderContext`, `ctx.command_encoder().begin_compute_pass(...)`,
+   `ctx.render_device()`. Порядок диспатчей: тени → FOV → карта света → блюр ×3 (H/V,
+   пинг-понг) → просачивание на стены (те же два блюра с `blur_boost = 1.1`) →
+   `light_apply_fov` → флип пинг-понга.
+5. **Оверлей**: существующий спрайт тьмы (`LightMap` в `client/lighting.rs`) начинает
+   семплить GPU-карту света вместо CPU-текстуры; CPU-путь (`update_lighting`) остаётся
+   фолбэком под флаг `SSR_LIGHT_CPU=1`, пока GPU-путь не сверен скриншотами.
+6. **Проверка**: скриншоты коридора/тёмной комнаты и сравнение зон яркости; отдельно —
+   «свет не проходит через угол» (лампа за углом стены не подсвечивает игрока).
