@@ -69,27 +69,24 @@ impl Stamina {
     }
 
     /// Наносит урон выносливости (удар, срыв спринта) и отодвигает реген.
-    /// Возвращает `true`, если наступил крит (в сборке — `EnterStamCrit`).
+    /// Возвращает `true`, если **достигнут порог крита** — решение о крите
+    /// принимает вызывающий ([`Self::enter_crit`]), как `EnterStamCrit` в
+    /// сборке (крит — отдельное событие, а не свойство накопления).
     pub fn add_damage(&mut self, amount: f32, now: f32) -> bool {
         self.damage = (self.damage + amount).min(CRIT_THRESHOLD);
         self.regen_at = now + REGEN_COOLDOWN;
-        if self.damage >= CRIT_THRESHOLD && !self.critical {
-            self.critical = true;
-            return true;
-        }
-        false
+        self.damage >= CRIT_THRESHOLD && !self.critical
     }
 
     /// Один шаг по времени: трата при беге либо восстановление по правилам
     /// движка. `moving` — игрок реально двигается (в сборке дренаж идёт, пока
     /// спринт активен; стоя на месте спринт не тратит).
-    pub fn tick(&mut self, dt: f32, now: f32, sprinting: bool, moving: bool) {
+    pub fn tick(&mut self, dt: f32, now: f32, sprinting: bool, moving: bool) -> bool {
         if sprinting && moving {
-            self.add_damage(DRAIN_PER_SECOND * dt, now);
-            return;
+            return self.add_damage(DRAIN_PER_SECOND * dt, now);
         }
         if now < self.regen_at {
-            return; // ещё пауза после последней траты
+            return false; // ещё пауза после последней траты
         }
         // После крита восстанавливаемся быстрее, пока не вышли из крита.
         let decay = if self.critical {
@@ -101,6 +98,7 @@ impl Stamina {
         if self.critical && self.damage <= 0.0 {
             self.critical = false;
         }
+        false
     }
 
     /// Полный станкрит: падение на [`CRIT_STUN`] и буфер до восстановления.

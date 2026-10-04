@@ -104,6 +104,7 @@ fn main() {
     app.init_resource::<SpawnCursor>();
     app.init_resource::<MapIndex>();
     app.init_resource::<ActionQueue>();
+    app.init_resource::<StaminaClock>();
     app.init_resource::<GameRoles>();
     app.init_resource::<RoleCursor>();
     app.init_resource::<Atmospheres>();
@@ -2400,6 +2401,7 @@ fn handle_client_messages(
                 PlayerPosition([spawn.0, spawn.1]),
                 PlayerInput::default(),
                 MoveVel::default(),
+                ssr_core::stamina::Stamina::default(),
                 Replicate::to_clients(NetworkTarget::All),
                 Rooms::default(),
                 RigidBody::Dynamic,
@@ -2568,15 +2570,22 @@ struct MoveVel(Vec2);
 /// клиентская интерполяция сглаживает оставшееся.
 fn movement(
     time: Res<Time>,
+    mut clock: ResMut<StaminaClock>,
     mut players: Query<(
+        Entity,
         &PlayerInput,
         &mut LinearVelocity,
         &mut MoveVel,
         Option<&KnockedDown>,
+        Option<&mut ssr_core::stamina::Stamina>,
     )>,
+    mut commands: Commands,
+    mut damage_events: MessageWriter<DamageEvent>,
 ) {
     let dt = time.delta_secs().min(0.1);
-    for (input, mut velocity, mut move_vel, knocked) in players.iter_mut() {
+    clock.seconds += dt;
+    let now = clock.seconds;
+    for (player, input, mut velocity, mut move_vel, knocked, stamina) in players.iter_mut() {
         // Лежачего не двигаем (падение/стан, T-мех).
         if knocked.is_some() {
             move_vel.0 = Vector::ZERO;
@@ -2584,6 +2593,27 @@ fn movement(
             continue;
         }
         let wish = Vec2::from_array(input.direction).normalize_or_zero();
+        // Выносливость (PORT_PLAN 2.3, числа из StaminaComponent/SharedStaminaSystem):
+        // бег тратит 8/с, восстановление 5/с и только через 5 с после траты,
+        // крит — падение на 6 с и Blunt 10.
+        if let Some(mut stamina) = stamina {
+            let sprinting = !input.running && wish != Vec2::ZERO;
+            let crit = stamina.tick(dt, now, sprinting, wish != Vec2::ZERO);
+            if crit {
+                let stun = stamina.enter_crit(now);
+                tracing::info!(player = ?player, "stamina crit: knockdown");
+                commands.entity(player).insert(KnockedDown {
+                    seconds: stun.as_secs_f32(),
+                });
+                damage_events.write(DamageEvent {
+                    target: player,
+                    amount: ssr_core::stamina::SPRINT_BREAK_DAMAGE as i32,
+                    source: DamageSource::Environment {
+                        cause: "sprint break",
+                    },
+                });
+            }
+        }
         // В SS14 спринт по умолчанию: Shift включает ХОДЬБУ, а не бег.
         let wish_speed = if input.running {
             PLAYER_WALK_SPEED
@@ -2792,6 +2822,13 @@ fn has_door_access(access: &Query<&Access>, player: Entity, door: &Door) -> bool
         .get(player)
         .map(|access| access.list.iter().any(|key| key == required))
         .unwrap_or(false)
+}
+
+/// Часы выносливости: единая шкала времени для трат, пауз и буферов
+/// (`SharedStaminaSystem` работает по `Timing.CurTime`).
+#[derive(Resource, Default)]
+struct StaminaClock {
+    seconds: f32,
 }
 
 /// Обрабатывает очередь действий (T3.3+): атака, двери, применение предметов
