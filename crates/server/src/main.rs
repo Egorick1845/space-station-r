@@ -2611,7 +2611,7 @@ fn movement(
     let dt = time.delta_secs().min(0.1);
     clock.seconds += dt;
     let now = clock.seconds;
-    for (player, input, mut velocity, mut move_vel, knocked, stamina, sprinting_flag) in
+    for (player, input, mut velocity, mut move_vel, knocked, stamina, sprinting_flag, health) in
         players.iter_mut()
     {
         // Лежачего не двигаем (падение/стан, T-мех).
@@ -2652,12 +2652,25 @@ fn movement(
         } else {
             PLAYER_MOVE_SPEED
         };
+        // Замедление от урона (`SlowOnDamage` в `Species/base.yml`):
+        // урон ≥60 → ×0.7, ≥80 → ×0.5 (числа из сборки).
+        let damage = health
+            .map(|health| (health.max - health.current).max(0) as f32)
+            .unwrap_or(0.0);
+        let damage_mult = if damage >= SLOW_ON_DAMAGE_HIGH {
+            SLOW_ON_DAMAGE_HIGH_MULT
+        } else if damage >= SLOW_ON_DAMAGE_LOW {
+            SLOW_ON_DAMAGE_LOW_MULT
+        } else {
+            1.0
+        };
         let wish_speed = base_speed
             * if sprinting {
                 ssr_core::stamina::SPRINT_SPEED_MULT
             } else {
                 1.0
-            };
+            }
+            * damage_mult;
         // Quake: friction (при движении клампится до accel = 20/с), затем accelerate.
         let friction = if wish != Vec2::ZERO {
             PLAYER_ACCEL / 32.0 // 20/с, как min(friction, accel) в SS14
@@ -2874,6 +2887,7 @@ type MovingPlayers<'w, 's> = Query<
         Option<&'static KnockedDown>,
         Option<&'static mut ssr_core::stamina::Stamina>,
         Option<&'static Sprinting>,
+        Option<&'static Health>,
     ),
 >;
 
@@ -2892,6 +2906,12 @@ struct SprintState<'w, 's> {
 /// когда игроку снова можно включить спринт.
 #[derive(Resource, Default)]
 struct SprintCooldowns(std::collections::HashMap<Entity, f32>);
+
+// Замедление от урона — пороги и множители из `Species/base.yml` (`SlowOnDamage`).
+const SLOW_ON_DAMAGE_LOW: f32 = 60.0;
+const SLOW_ON_DAMAGE_HIGH: f32 = 80.0;
+const SLOW_ON_DAMAGE_LOW_MULT: f32 = 0.7;
+const SLOW_ON_DAMAGE_HIGH_MULT: f32 = 0.5;
 
 /// Часы выносливости: единая шкала времени для трат, пауз и буферов
 /// (`SharedStaminaSystem` работает по `Timing.CurTime`).
