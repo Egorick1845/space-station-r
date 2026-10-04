@@ -175,7 +175,7 @@ fn main() {
     // Space — спринт-тоггл (PORT_PLAN 2.2).
     app.add_systems(Update, hud::sprint_hotkey);
     // Алерт выносливости (PORT_PLAN 1.5): 7 уровней, иконки из сборки.
-    app.add_systems(Update, hud::render_stamina_alert);
+    app.add_systems(Update, hud::render_alerts_column);
     // Подсветка клеток при переносе предмета (PORT_PLAN 1.6).
     app.add_systems(Update, inventory_ui::drag_highlight);
     // Текстуры интерфейса SS14 (слоты, Storage, Nano-кнопки) — сразу на старте.

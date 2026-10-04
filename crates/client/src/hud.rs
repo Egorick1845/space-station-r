@@ -610,43 +610,53 @@ fn send_interact(
     }
 }
 
-/// Корень алертов (правая сторона, `AlertsUI.xaml`: Right + Center, столбец).
+/// Корень колонки алертов (правый верхний угол, `AlertsUI.xaml`: Right + Top,
+/// столбец 64×64 с отступом 10). Внутри: Health, Stamina — порядок алертов.
 #[derive(Component)]
 pub struct AlertRoot;
 
-/// Алерт выносливости (`Resources/Prototypes/Alerts/alerts.yml`: прототип
-/// `Stamina`, иконки `Interface/Alerts/stamina.rsi#stamina0..stamina6`, 7 уровней
-/// от `RoundToLevels`). Показывается, когда урон выносливости больше нуля.
-pub fn render_stamina_alert(
+/// Алерт здоровья (`HumanHealth` в alerts.yml): 5 иконок `human_alive.rsi`
+/// health0..health4. Уровень — как `MobThresholdSystem`: лерп от 0 (максимальная
+/// тяжесть) до 4 (здоров) по проценту до следующего порога состояния.
+pub fn health_alert_level(health: &ssr_core::inventory::Health) -> u8 {
+    let damage = (health.max - health.current).max(0) as f32;
+    let percentage = (damage / health.max.max(1) as f32).clamp(0.0, 1.0);
+    // 0 урона → severity 4 (здоров), у смерти → 0.
+    (4.0 * (1.0 - percentage)).round().clamp(0.0, 4.0) as u8
+}
+
+/// Рисует колонку алертов: Health (5 иконок human_alive) и Stamina
+/// (7 иконок stamina) — правый верхний угол, столбец 64×64 (AlertsUI).
+pub fn render_alerts_column(
     mut commands: Commands,
     own: Res<OwnPlayerEntity>,
     staminas: Query<&ssr_core::stamina::Stamina>,
+    healths: Query<&ssr_core::inventory::Health>,
     registry: Res<crate::rsi::RsiRegistry>,
     root: Query<Entity, With<AlertRoot>>,
-    mut last: Local<Option<u8>>,
+    mut last: Local<Option<(u8, u8)>>,
 ) {
-    let level = own
+    let level_health = own
+        .0
+        .and_then(|entity| healths.get(entity).ok())
+        .map(health_alert_level)
+        .unwrap_or(4);
+    let level_stamina = own
         .0
         .and_then(|entity| staminas.get(entity).ok())
         .map(|stamina| stamina.alert_level())
-        .unwrap_or_default();
-    if last.as_ref() == Some(&level) {
+        .unwrap_or(6);
+    if last.as_ref() == Some(&(level_health, level_stamina)) {
         return;
     }
-    *last = Some(level);
+    *last = Some((level_health, level_stamina));
     for entity in root.iter() {
         commands.entity(entity).despawn();
     }
-    // Алерт стамины виден ВСЕГДА (в сборке он показывается и при полной
-    // выносливости — иконка stamina6, а при близком к нулю stamina0 мерцает).
-    let key = format!("sprites/ss14/Interface/Alerts/stamina.rsi#stamina{level}");
-    let Some(sprite) = registry.get(&key) else {
-        return; // RSI подгрузится следующим кадром (реестр ленивый)
-    };
-    let icon = crate::inventory_ui::icon_node(sprite);
-    // Размер и позиция как в сборке: иконка 32×32 рисуется в масштабе ×2
-    // (`AlertControl`: Scale = (2,2), MaxSize = 64×64), алерты — правый
-    // верхний угол, столбцом (`AlertsUI.xaml`: Right + Top, Columns = 1).
+    let icons = [
+        format!("sprites/ss14/Interface/Alerts/human_alive.rsi#health{level_health}"),
+        format!("sprites/ss14/Interface/Alerts/stamina.rsi#stamina{level_stamina}"),
+    ];
     commands
         .spawn((
             AlertRoot,
@@ -654,19 +664,28 @@ pub fn render_stamina_alert(
                 position_type: PositionType::Absolute,
                 right: px(10),
                 top: px(10),
-                width: px(64),
-                height: px(64),
+                flex_direction: FlexDirection::Column,
+                row_gap: px(4),
                 ..default()
             },
         ))
-        .with_child((
-            icon,
-            Node {
-                width: px(64),
-                height: px(64),
-                ..default()
-            },
-        ));
+        .with_children(|column| {
+            for key in icons {
+                let Some(sprite) = registry.get(&key) else {
+                    continue; // RSI подгрузится следующим кадром (реестр ленивый)
+                };
+                let icon = crate::inventory_ui::icon_node(sprite);
+                // Иконка 32×32 в масштабе ×2 (AlertControl: Scale=(2,2)).
+                column.spawn((
+                    icon,
+                    Node {
+                        width: px(64),
+                        height: px(64),
+                        ..default()
+                    },
+                ));
+            }
+        });
 }
 
 /// Space — спринт-тоггл (`Sprint` в `keybinds.yml` сборки): отправляем намерение,
