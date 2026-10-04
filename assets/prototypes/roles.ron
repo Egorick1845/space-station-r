@@ -1,0 +1,30 @@
+// Роли (T4.2): название, стартовый инвентарь, доступы, антагонист с целью.
+// Первая роль в списке — стартовая при раздаче по кругу (round-robin).
+(
+    roles: [
+        (
+            id: "engineer",
+            name: "Инженер",
+            items: ["Crowbar", "SteelSheet", "SteelSheet"],
+            access: ["general", "engineering"],
+            antagonist: false,
+            goal: "",
+        ),
+        (
+            id: "assistant",
+            name: "Ассистент",
+            items: ["SteelSheet"],
+            access: ["general"],
+            antagonist: false,
+            goal: "",
+        ),
+        (
+            id: "traitor",
+            name: "Предатель",
+            items: ["Crowbar", "SteelSheet"],
+            access: ["general", "engineering"],
+            antagonist: true,
+            goal: "Устранить цель и не попасться",
+        ),
+    ],
+)

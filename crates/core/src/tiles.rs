@@ -171,7 +171,17 @@ pub struct MapFile {
     /// Центры дверей в юнитах мира (T3.1).
     #[serde(default)]
     pub doors: Vec<(f32, f32)>,
+    /// Доступы дверей (T4.2): какие двери требуют ключ роли.
+    #[serde(default)]
+    pub door_access: Vec<DoorAccess>,
     pub chunks: Vec<MapChunkFile>,
+}
+
+/// Доступ двери на карте (T4.2): позиция (центр, юниты) → ключ доступа.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct DoorAccess {
+    pub position: (f32, f32),
+    pub access: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -194,12 +204,14 @@ impl MapFile {
         name: &str,
         spawn_points: Vec<(f32, f32)>,
         doors: Vec<(f32, f32)>,
+        door_access: Vec<DoorAccess>,
         chunks: &[TileChunk],
     ) -> Result<(), String> {
         let file = Self {
             name: name.to_string(),
             spawn_points,
             doors,
+            door_access,
             chunks: chunks
                 .iter()
                 .map(|c| MapChunkFile {
@@ -290,6 +302,10 @@ mod tests {
             "test",
             vec![(16.0, 16.0)],
             vec![(144.0, 16.0)],
+            vec![DoorAccess {
+                position: (144.0, 16.0),
+                access: "engineering".into(),
+            }],
             &chunks,
         )
         .expect("save");
@@ -297,6 +313,8 @@ mod tests {
         assert_eq!(file.name, "test");
         assert_eq!(file.spawn_points, vec![(16.0, 16.0)]);
         assert_eq!(file.doors, vec![(144.0, 16.0)]);
+        assert_eq!(file.door_access.len(), 1);
+        assert_eq!(file.door_access[0].access, "engineering");
         let restored = file.to_chunks().expect("to_chunks");
         assert_eq!(restored.len(), chunks.len());
         for (original, restored) in chunks.iter().zip(restored.iter()) {
@@ -311,6 +329,7 @@ mod tests {
             name: "bad".into(),
             spawn_points: vec![],
             doors: vec![],
+            door_access: vec![],
             chunks: vec![MapChunkFile {
                 coords: (0, 0),
                 rows: vec![".".to_string()],

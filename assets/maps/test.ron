@@ -11,6 +11,12 @@
         (144.0, 48.0),
         (144.0, 80.0),
     ],
+    door_access: [
+        (
+            position: (144.0, 16.0),
+            access: "engineering",
+        ),
+    ],
     chunks: [
         (
             coords: (-2, -2),

@@ -155,6 +155,7 @@ fn main() {
         &name,
         spawn_points.clone(),
         doors.clone(),
+        Vec::new(),
         &chunk_list,
     )
     .expect("save map");

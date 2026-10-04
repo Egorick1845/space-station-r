@@ -116,6 +116,7 @@ fn main() {
             inventory_ui::render_hands_panel,
             inventory_ui::spawn_health_hud,
             inventory_ui::update_health_hud,
+            inventory_ui::update_role_hud,
             inventory_ui::render_action_menu,
             inventory_ui::inventory_slot_click,
             inventory_ui::hands_ui_click,
@@ -179,6 +180,8 @@ fn main() {
         .replicate();
     app.component::<ssr_core::inventory::ItemPosition>()
         .replicate();
+    // Роли (T4.2). Тот же порядок, что у сервера!
+    app.component::<ssr_core::roles::PlayerRole>().replicate();
     app.run();
 }
 

@@ -11,6 +11,7 @@ pub const GAME_NAME: &str = "Space Station R";
 
 pub mod inventory;
 pub mod prototypes;
+pub mod roles;
 pub mod rsi;
 pub mod tiles;
 
@@ -70,10 +71,13 @@ pub struct PlayerPosition(pub [f32; 2]);
 
 /// Дверь (T3.1): состояние меняется только сервером по Interact,
 /// реплицируется клиентам (ADR-4); позиция статична, едет вместе с ней.
-#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+/// `access` (T4.2) — ключ доступа из карты: без него дверь открыта всем.
+#[derive(Component, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct Door {
     pub open: bool,
     pub position: [f32; 2],
+    #[serde(default)]
+    pub access: Option<String>,
 }
 
 /// Радиус взаимодействия, юниты (PLAN.md T3.1: 1.5 тайла).

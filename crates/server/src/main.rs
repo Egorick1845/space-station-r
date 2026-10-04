@@ -22,6 +22,7 @@ use lightyear::prelude::*;
 use ssr_core::inventory::{
     Container, Hands, Health, HeldBy, Inventory, Item, ItemPosition, SLOT_ANY,
 };
+use ssr_core::roles::{Access, PlayerRole, RoleSet};
 use ssr_core::tiles::{MapFile, TileChunkData, TileType};
 use ssr_core::{
     CHUNK_UNITS, Door, INTERACT_RANGE, PLAYER_MOVE_SPEED, PlayerPosition, TILE_SIZE, chunk_coords,
@@ -87,11 +88,14 @@ fn main() {
     app.init_resource::<SpawnCursor>();
     app.init_resource::<MapIndex>();
     app.init_resource::<ActionQueue>();
+    app.init_resource::<GameRoles>();
+    app.init_resource::<RoleCursor>();
     app.add_systems(Startup, startup);
     app.add_systems(
         Startup,
         (
             check_prototypes,
+            load_roles,
             load_map,
             spawn_walls,
             spawn_containers,
@@ -134,6 +138,8 @@ fn main() {
     // Контейнеры (T3.4). Тот же порядок, что у клиента!
     app.component::<Container>().replicate();
     app.component::<ItemPosition>().replicate();
+    // Роли (T4.2). Тот же порядок, что у клиента!
+    app.component::<PlayerRole>().replicate();
     app.run();
 }
 
@@ -234,6 +240,27 @@ struct GameMap {
 #[derive(Resource, Default)]
 struct SpawnCursor(usize);
 
+/// Роли (T4.2): прототипы из `assets/prototypes/roles.ron`.
+#[derive(Resource, Default)]
+struct GameRoles(RoleSet);
+
+/// Курсор выдачи ролей (T4.2): round-robin, чтобы в раунде были разные роли.
+#[derive(Resource, Default)]
+struct RoleCursor(usize);
+
+/// Загружает роли (T4.2). Ошибка — пустой набор: сервер не падает, игроки
+/// получают стандартный набор предметов без роли (в логе — error).
+fn load_roles(mut commands: Commands) {
+    let path = ssr_core::assets_root().join("prototypes/roles.ron");
+    match RoleSet::load(&path) {
+        Ok(set) => {
+            tracing::info!(roles = set.roles.len(), "roles loaded");
+            commands.insert_resource(GameRoles(set));
+        }
+        Err(e) => tracing::error!(error = %e, "roles not loaded"),
+    }
+}
+
 /// Загрузка карты из `assets/maps/test.ron` (T2.3): правка файла + рестарт
 /// сервера меняют мир без перекомпиляции. Чанки спавнятся сущностями
 /// и реплицируются с учётом интереса (комната = чанк).
@@ -266,12 +293,19 @@ fn load_map(
         map_index.chunks.insert(data.coords, entity);
     }
     // Двери (T3.1): статичные тела, закрытые; состояние реплицируется клиентам.
+    // Доступ (T4.2): ключ берётся из door_access карты, иначе дверь открыта всем.
     for &(x, y) in &file.doors {
+        let access = file
+            .door_access
+            .iter()
+            .find(|entry| entry.position == (x, y))
+            .map(|entry| entry.access.clone());
         let room = chunk_rooms.room_for(chunk_coords(x, y), &mut allocator);
         commands.spawn((
             Door {
                 open: false,
                 position: [x, y],
+                access,
             },
             Replicate::to_clients(NetworkTarget::All),
             Rooms::single(room),
@@ -424,6 +458,8 @@ fn on_link_disconnected(
 fn handle_client_messages(
     mut commands: Commands,
     map: Res<GameMap>,
+    roles: Res<GameRoles>,
+    mut role_cursor: ResMut<RoleCursor>,
     mut spawn_cursor: ResMut<SpawnCursor>,
     mut receivers: Query<(Entity, &RemoteId, &mut MessageReceiver<ClientMessage>), With<Connected>>,
     mut senders: Query<(Entity, &mut MessageSender<ServerMessage>), With<Connected>>,
@@ -749,13 +785,37 @@ fn handle_client_messages(
         let player_bits = player.to_bits();
         tracing::info!(name, spawn = ?spawn, "player spawned");
 
-        // Демо-предметы: лом + два стальных листа; HeldBy — на игрока (SS14-модель).
+        // Роль (T4.2): SSR_ROLE=<id> — фиксированная (тесты/отладка), иначе
+        // выдача по кругу, чтобы в раунде были разные роли.
+        let role = std::env::var("SSR_ROLE")
+            .ok()
+            .and_then(|id| roles.0.by_id(&id).cloned())
+            .or_else(|| {
+                let list = &roles.0.roles;
+                if list.is_empty() {
+                    return None;
+                }
+                let role = list[role_cursor.0 % list.len()].clone();
+                role_cursor.0 += 1;
+                Some(role)
+            });
+
+        // Стартовый инвентарь — из роли (T4.2); без ролей — прежний демо-набор.
+        let item_names: Vec<String> =
+            role.as_ref()
+                .map(|role| role.items.clone())
+                .unwrap_or_else(|| {
+                    ["Crowbar", "SteelSheet", "SteelSheet"]
+                        .iter()
+                        .map(|name| (*name).to_string())
+                        .collect()
+                });
         let mut inventory = Inventory::default();
-        for item_name in ["Crowbar", "SteelSheet", "SteelSheet"] {
+        for item_name in &item_names {
             let item = commands
                 .spawn((
                     Item {
-                        name: item_name.to_string(),
+                        name: item_name.clone(),
                     },
                     HeldBy {
                         player: player_bits,
@@ -767,6 +827,27 @@ fn handle_client_messages(
             inventory.put_first_empty(item.to_bits());
         }
         commands.entity(player).insert(inventory);
+        if let Some(role) = role {
+            commands.entity(player).insert((
+                PlayerRole {
+                    id: role.id.clone(),
+                    name: role.name.clone(),
+                    antagonist: role.antagonist,
+                    goal: role.goal.clone(),
+                },
+                Access {
+                    list: role.access.clone(),
+                },
+            ));
+            tracing::info!(
+                name,
+                role = %role.id,
+                role_name = %role.name,
+                antagonist = role.antagonist,
+                items = item_names.len(),
+                "role assigned"
+            );
+        }
         players.entries.push(PlayerEntry {
             link: link_entity,
             name,
@@ -908,6 +989,18 @@ fn spawn_walls(mut commands: Commands, map: Res<GameMap>, mut index: ResMut<MapI
     tracing::info!(walls = total, "map wall colliders spawned");
 }
 
+/// Доступ к двери (T4.2): дверь без ключа открыта всем, с ключом — только
+/// ролям, у которых этот ключ есть; игрок без роли получает отказ.
+fn has_door_access(access: &Query<&Access>, player: Entity, door: &Door) -> bool {
+    let Some(required) = door.access.as_deref() else {
+        return true;
+    };
+    access
+        .get(player)
+        .map(|access| access.list.iter().any(|key| key == required))
+        .unwrap_or(false)
+}
+
 /// Обрабатывает очередь действий (T3.3+): атака, двери, применение предметов
 /// из активной руки и выдача списка контекстных действий (verbs).
 #[allow(clippy::too_many_arguments)]
@@ -924,6 +1017,7 @@ fn process_actions(
     mut containers: Query<&mut Container>,
     container_positions: Query<&ItemPosition>,
     items: Query<&Item>,
+    access: Query<&Access>,
     mut senders: Query<&mut MessageSender<ServerMessage>, With<Connected>>,
     players: Res<Players>,
     mut damage_events: MessageWriter<DamageEvent>,
@@ -945,7 +1039,9 @@ fn process_actions(
                                 action: ActionKind::Attack { target: entity },
                             });
                         }
-                        if let Ok(door) = doors.get_mut(target) {
+                        if let Ok(door) = doors.get(target)
+                            && has_door_access(&access, player, door)
+                        {
                             options.push(ActionOption {
                                 label: if door.open {
                                     "Закрыть"
@@ -1083,6 +1179,16 @@ fn process_actions(
                 let dy = door.position[1] - player_position.0[1];
                 if (dx * dx + dy * dy).sqrt() > INTERACT_RANGE {
                     tracing::warn!(?player, "interact: too far");
+                    continue;
+                }
+                // Доступ (T4.2): дверь с ключом открывают только роли с этим ключом.
+                if !has_door_access(&access, player, &door) {
+                    tracing::warn!(
+                        ?player,
+                        door = ?target,
+                        required = door.access.as_deref().unwrap_or(""),
+                        "door access denied"
+                    );
                     continue;
                 }
                 door.open = !door.open;

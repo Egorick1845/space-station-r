@@ -10,6 +10,7 @@ use ssr_core::PlayerPosition;
 use ssr_core::inventory::{
     HAND_SLOTS, Hands, Health, HeldBy, INVENTORY_COLS, INVENTORY_ROWS, Inventory, SLOT_ANY,
 };
+use ssr_core::roles::PlayerRole;
 use ssr_protocol::net::GameChannel;
 use ssr_protocol::{ActionOption, ClientMessage};
 
@@ -459,7 +460,11 @@ pub struct HealthHudRoot;
 #[derive(Component)]
 pub struct HealthHudText;
 
-/// Создаёт HUD здоровья один раз, когда свой игрок появился.
+/// Строка роли в HUD (T4.2).
+#[derive(Component)]
+pub struct RoleHudText;
+
+/// Создаёт HUD (здоровье + роль) один раз, когда свой игрок появился.
 pub fn spawn_health_hud(
     mut commands: Commands,
     own: Res<OwnPlayerEntity>,
@@ -475,6 +480,8 @@ pub fn spawn_health_hud(
                 position_type: PositionType::Absolute,
                 left: px(12),
                 bottom: px(295),
+                flex_direction: FlexDirection::Column,
+                row_gap: px(4),
                 padding: UiRect::new(px(10), px(10), px(6), px(6)),
                 border: UiRect::all(px(2)),
                 ..default()
@@ -482,12 +489,45 @@ pub fn spawn_health_hud(
             BackgroundColor(Color::srgba(0.06, 0.06, 0.08, 0.72)),
             BorderColor::from(Color::srgb(0.28, 0.28, 0.33)),
         ))
-        .with_child((
-            HealthHudText,
-            Text::new("HP 100/100"),
-            TextFont::from_font_size(14.0),
-            TextColor(Color::srgb(0.55, 0.85, 0.55)),
-        ));
+        .with_children(|panel| {
+            panel.spawn((
+                HealthHudText,
+                Text::new("HP 100/100"),
+                TextFont::from_font_size(14.0),
+                TextColor(Color::srgb(0.55, 0.85, 0.55)),
+            ));
+            panel.spawn((
+                RoleHudText,
+                Text::new("Роль: —"),
+                TextFont::from_font_size(13.0),
+                TextColor(Color::srgb(0.80, 0.80, 0.84)),
+            ));
+        });
+}
+
+/// Показывает роль своего игрока (T4.2): у антагониста — ещё и цель.
+pub fn update_role_hud(
+    own: Res<OwnPlayerEntity>,
+    roles: Query<&PlayerRole>,
+    mut texts: Query<&mut Text, With<RoleHudText>>,
+) {
+    let Some(entity) = own.0 else {
+        return;
+    };
+    let Ok(role) = roles.get(entity) else {
+        return;
+    };
+    let value = if role.antagonist && !role.goal.is_empty() {
+        format!("Роль: {} — цель: {}", role.name, role.goal)
+    } else {
+        format!("Роль: {}", role.name)
+    };
+    for mut text in &mut texts {
+        if text.0 != value {
+            text.0 = value.clone();
+            tracing::info!(role = %role.id, antagonist = role.antagonist, "own role received");
+        }
+    }
 }
 
 /// Обновляет HUD здоровья из реплицированного Health (T4.1).
