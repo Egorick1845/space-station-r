@@ -629,16 +629,23 @@ pub fn health_alert_level(health: &ssr_core::inventory::Health) -> u8 {
     (4.0 * fraction).round().clamp(0.0, 4.0) as u8
 }
 
-/// Рисует колонку алертов: Health (5 иконок human_alive) и Stamina
-/// (7 иконок stamina) — правый верхний угол, столбец 64×64 (AlertsUI).
+/// Подпись колонки алертов: уровни Health/Stamina и алерт давления (если есть).
+type AlertsSignature = (u8, u8, Option<(bool, u8)>);
+
+/// Рисует колонку алертов: Health (5 иконок human_alive), Stamina
+/// (7 иконок stamina) и, в опасной зоне, давление (pressure.rsi) — правый
+/// верхний угол под чатом, столбец 64×64 (AlertsUI в сборке).
+#[allow(clippy::too_many_arguments)]
 pub fn render_alerts_column(
     mut commands: Commands,
     own: Res<OwnPlayerEntity>,
     staminas: Query<&ssr_core::stamina::Stamina>,
     healths: Query<&ssr_core::inventory::Health>,
+    positions: Query<&ssr_core::PlayerPosition>,
+    atmospheres: Query<(&ssr_core::atmosphere::ChunkAtmosphere, &ssr_core::tiles::TileChunkData)>,
     registry: Res<crate::rsi::RsiRegistry>,
     root: Query<Entity, With<AlertRoot>>,
-    mut last: Local<Option<(u8, u8)>>,
+    mut last: Local<Option<AlertsSignature>>,
 ) {
     let level_health = own
         .0
@@ -650,20 +657,49 @@ pub fn render_alerts_column(
         .and_then(|entity| staminas.get(entity).ok())
         .map(|stamina| stamina.alert_level())
         .unwrap_or(6);
-    if last.as_ref() == Some(&(level_health, level_stamina)) {
+    // Давление: в сборке (`BarotraumaSystem`) алерт показывается ТОЛЬКО в
+    // опасной зоне — предупреждение (уровень 1) и урон (2), иначе категория
+    // «Pressure» снимается целиком.
+    let pressure_alert = own
+        .0
+        .and_then(|entity| positions.get(entity).ok())
+        .and_then(|position| {
+            let tile_units = ssr_core::tiles::TILE_PX as f32;
+            let tx = (position.0[0] / tile_units).floor() as i32;
+            let ty = (position.0[1] / tile_units).floor() as i32;
+            let size = ssr_core::tiles::CHUNK_TILES as i32;
+            let coords = (tx.div_euclid(size), ty.div_euclid(size));
+            let (atmosphere, _) = atmospheres
+                .iter()
+                .find(|(_, chunk)| chunk.coords == coords)?;
+            atmosphere
+                .at(
+                    (tx - coords.0 * size) as u32,
+                    (ty - coords.1 * size) as u32,
+                )
+                .and_then(|gas| ssr_core::atmosphere::pressure_alerts::alert_for(gas.pressure))
+        });
+    let signature = (level_health, level_stamina, pressure_alert);
+    if last.as_ref() == Some(&signature) {
         return;
     }
-    let icons = [
+    let mut icons = vec![
         format!("sprites/ss14/Interface/Alerts/human_alive.rsi#health{level_health}"),
         format!("sprites/ss14/Interface/Alerts/stamina.rsi#stamina{level_stamina}"),
     ];
+    if let Some((high, level)) = pressure_alert {
+        let side = if high { "high" } else { "low" };
+        icons.push(format!(
+            "sprites/ss14/Interface/Alerts/pressure.rsi#{side}pressure{level}"
+        ));
+    }
     // Реестр RSI ленивый: в первый кадр спрайтов ещё нет. Без этой проверки
     // колонка один раз собиралась пустой, а `last` уже запрещал повтор — алерты
     // не появлялись вообще (владелец: «индикатор стамины работает неправильно»).
     if icons.iter().any(|key| registry.get(key).is_none()) {
         return;
     }
-    *last = Some((level_health, level_stamina));
+    *last = Some(signature);
     for entity in root.iter() {
         commands.entity(entity).despawn();
     }

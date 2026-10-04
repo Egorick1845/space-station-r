@@ -8,6 +8,37 @@
 use bevy::prelude::Component;
 use serde::{Deserialize, Serialize};
 
+/// Пороги алертов давления (`Content.Shared/Atmos/Atmospherics.cs`).
+/// В сборке алерт показывается только в опасной зоне: `BarotraumaSystem`
+/// ставит severity 1 при предупреждении и 2 при уроне, иначе снимает категорию
+/// «Pressure» целиком — постоянного индикатора давления в HUD нет.
+pub mod pressure_alerts {
+    /// Предупреждение о низком давлении: 2.5 × опасного порога.
+    pub const WARNING_LOW_KPA: f32 = 2.5 * HAZARD_LOW_KPA;
+    /// Опасное низкое давление (`HazardLowPressure`).
+    pub const HAZARD_LOW_KPA: f32 = 20.0;
+    /// Предупреждение о высоком давлении: 0.7 × опасного порога.
+    pub const WARNING_HIGH_KPA: f32 = 0.7 * HAZARD_HIGH_KPA;
+    /// Опасное высокое давление (`HazardHighPressure`).
+    pub const HAZARD_HIGH_KPA: f32 = 550.0;
+
+    /// Алерт давления для значения: `None` — безопасно (иконка не показывается),
+    /// иначе `(высокое?, уровень 1..2)` — состояние иконки low/high pressure1|2.
+    pub fn alert_for(pressure: f32) -> Option<(bool, u8)> {
+        if pressure <= HAZARD_LOW_KPA {
+            Some((false, 2))
+        } else if pressure >= HAZARD_HIGH_KPA {
+            Some((true, 2))
+        } else if pressure <= WARNING_LOW_KPA {
+            Some((false, 1))
+        } else if pressure >= WARNING_HIGH_KPA {
+            Some((true, 1))
+        } else {
+            None
+        }
+    }
+}
+
 /// Давление, ниже которого начинается урон (кПа).
 pub const LOW_PRESSURE_KPA: f32 = 20.0;
 /// Доля кислорода, ниже которой начинается урон.
@@ -112,5 +143,26 @@ mod tests {
             }
             .is_breathable()
         );
+    }
+
+    #[test]
+    fn pressure_alerts_follow_barotrauma_thresholds() {
+        use pressure_alerts::{
+            HAZARD_HIGH_KPA, HAZARD_LOW_KPA, WARNING_HIGH_KPA, WARNING_LOW_KPA, alert_for,
+        };
+        // Норма станции (101.3 кПа) — иконки нет; сразу за предупреждающей
+        // полосой (50+) и до высокой (385) — тоже безопасно.
+        assert_eq!(alert_for(101.3), None);
+        assert_eq!(alert_for(WARNING_LOW_KPA + 1.0), None);
+        assert_eq!(alert_for(WARNING_HIGH_KPA - 1.0), None);
+        // За опасным низким порогом (20+), но ниже предупреждения — уровень 1.
+        assert_eq!(alert_for(HAZARD_LOW_KPA + 1.0), Some((false, 1)));
+        // Предупреждения (уровень 1) и урон (уровень 2).
+        assert_eq!(alert_for(WARNING_LOW_KPA), Some((false, 1)));
+        assert_eq!(alert_for(HAZARD_LOW_KPA), Some((false, 2)));
+        assert_eq!(alert_for(WARNING_HIGH_KPA), Some((true, 1)));
+        assert_eq!(alert_for(HAZARD_HIGH_KPA), Some((true, 2)));
+        // Космос.
+        assert_eq!(alert_for(0.0), Some((false, 2)));
     }
 }
