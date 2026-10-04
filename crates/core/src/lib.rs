@@ -13,6 +13,7 @@ pub mod atmosphere;
 pub mod clothing;
 pub mod inventory;
 pub mod items;
+pub mod light;
 pub mod mechanics;
 pub mod occluders;
 pub mod power;
