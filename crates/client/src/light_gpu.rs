@@ -171,6 +171,7 @@ pub struct GpuWallUniform {
 /// источников плюс униформа кадра (источник — `crate::lighting::LightScene`,
 /// которая заполняется при пересчёте карты света).
 #[derive(Default)]
+#[allow(dead_code)]
 pub struct PackedScene {
     pub walls: Vec<u8>,
     pub lights: Vec<u8>,
@@ -179,6 +180,7 @@ pub struct PackedScene {
 
 /// Упаковывает сцену света в байты сторадж-буферов (раскладка — как в
 /// `assets/shaders/light.wgsl`, за ней следит тест раскладки выше).
+#[allow(dead_code)]
 pub fn pack_scene(scene: &crate::lighting::LightScene, tile: f32) -> PackedScene {
     let walls: Vec<GpuWallUniform> = scene
         .walls
