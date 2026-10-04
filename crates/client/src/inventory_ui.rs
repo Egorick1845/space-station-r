@@ -1003,14 +1003,6 @@ fn ui_open(ui: &InventoryUi) -> bool {
     ui.open
 }
 
-/// HUD здоровья своего игрока (T4.1): «HP 100/100» над панелью рук.
-#[derive(Component)]
-pub struct HealthHudRoot;
-
-/// Текст HUD здоровья.
-#[derive(Component)]
-pub struct HealthHudText;
-
 /// Строка роли в HUD (T4.2).
 #[derive(Component)]
 pub struct RoleHudText;
