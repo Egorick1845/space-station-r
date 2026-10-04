@@ -327,9 +327,16 @@ struct NetStats {
 }
 
 /// Админы сервера (T5.5): имена через запятую в `SSR_ADMINS`
-/// (пусто — админ-команд нет; `SSR_OPEN_ADMIN=1` — все админы, для тестов).
+/// (`SSR_OPEN_ADMIN=0` — админ-команд нет, по умолчанию админ есть у всех;
+/// `SSR_ADMINS` — список имён, если нужно ограничить).
 fn is_admin(name: &str) -> bool {
-    if std::env::var_os("SSR_OPEN_ADMIN").is_some() {
+    // На дев-сборке админ есть по умолчанию: владелец запускает игру без флагов
+    // и не должен оставаться без спавн-меню и админ-команд. Выключается
+    // `SSR_OPEN_ADMIN=0` (прежнее `=1` — тоже «включено»).
+    if std::env::var("SSR_OPEN_ADMIN")
+        .map(|value| value != "0")
+        .unwrap_or(true)
+    {
         return true;
     }
     let Ok(list) = std::env::var("SSR_ADMINS") else {

@@ -120,7 +120,11 @@ pub fn setup_lighting(mut commands: Commands, mut images: ResMut<Assets<Image>>)
     );
     // Карта растягивается на тайлы — линейная фильтрация даёт мягкие края
     // (в SS14 карта света семплируется билинейно).
-    dark.sampler = bevy::image::ImageSampler::linear();
+    // Ближайший сосед, а не линейная фильтрация: при одном текселе на тайл
+    // линейная интерполяция размазывала свет через границу стены — за стеной
+    // было видно полосу освещённого пространства. Мягкость даёт размытие самой
+    // карты (3×3), а не апскейл.
+    dark.sampler = bevy::image::ImageSampler::nearest();
     let glow = Image::new(
         Extent3d {
             width: WINDOW_SIDE,
@@ -367,6 +371,25 @@ pub fn update_lighting(
             for lx in 0..side as i32 {
                 if line_of_sight(center, (lx, ly), &solid) {
                     fov[(ly as u32 * side + lx as u32) as usize] = 1.0;
+                }
+            }
+        }
+        // Лицевые грани стен: стена видна, если виден хотя бы один её сосед
+        // (в движке FOV строится по ГРАНЯМ окклюдеров — ближняя грань стены
+        // освещена, а всё за ней в тени). Без этого дальние стены коридора
+        // оставались чёрными: линия к центру такого тайла задевает угол.
+        for ly in 1..side as i32 - 1 {
+            for lx in 1..side as i32 - 1 {
+                let index = (ly as u32 * side + lx as u32) as usize;
+                if !grid[index] {
+                    continue;
+                }
+                let neighbours = [(lx + 1, ly), (lx - 1, ly), (lx, ly + 1), (lx, ly - 1)];
+                if neighbours
+                    .iter()
+                    .any(|&(nx, ny)| fov[(ny as u32 * side + nx as u32) as usize] > 0.0)
+                {
+                    fov[index] = 1.0;
                 }
             }
         }
