@@ -22,6 +22,7 @@ pub mod recipes;
 pub mod roles;
 pub mod rsi;
 pub mod ss14_proto;
+pub mod stamina;
 pub mod tiles;
 
 /// Корень workspace (для доступа к assets/ из инструментов и headless-сервера).
