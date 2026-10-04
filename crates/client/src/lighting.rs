@@ -46,8 +46,11 @@ const WINDOW_SIDE: u32 = (WINDOW_RADIUS * 2 + 1) as u32;
 const LIGHT_SUBTEXELS: u32 = 8;
 /// Сторона карты света в текселях.
 const LIGHT_DIM: u32 = WINDOW_SIDE * LIGHT_SUBTEXELS;
-/// Ширина полярной карты теней — `ShadowMapSize` в движке (512 px по кругу).
-const SHADOW_BINS: usize = 512;
+/// Бинов в полярной карте тени лампы. В движке `ShadowMapSize = 512`, но там
+/// карту считает GPU. У нас световое поле — 8 мировых юнитов на тексель, и
+/// 256 бинов дают ту же угловую точность (10 тайлов → 8 юнитов), а пересчёт
+/// карты (в том числе когда рядом открылась дверь) вдвое дешевле.
+const LAMP_BINS: usize = 256;
 const PI: f32 = std::f32::consts::PI;
 /// Слой тьмы — выше ВСЕХ мировых спрайтов (двери 1.5, тела до 1.23), ниже UI:
 /// в SS14 свет умножается на спрайты, а у нас оверлей обязан их накрыть.
@@ -66,6 +69,13 @@ const VIEWPORT_TILES: (f32, f32) = (21.0, 15.0);
 /// карты тьмы: пересчёт поля (в том числе при открытии/закрытии двери, которая
 /// меняет окклюдеры) дешевле вчетверо — 234 мс → ~40 мс.
 const FIELD_SUBTEXELS: u32 = 4;
+/// Бинов в полярной карте глаза: у движка `FovMapSize = 2048`, но там карту
+/// считает GPU. 256 бинов при 10 тайлах дают угловую ошибку в 8 юнитов — ровно
+/// размер текселя маски, а пересчёт идёт на каждый шаг игрока.
+const FOV_BINS: usize = 256;
+/// Досягаемость окклюдеров для карты глаза в тайлах: диагональ видимой области
+/// (13.4, 7.5) ≈ 15.4, берём с запасом. Меньше отрезков — быстрее пересчёт.
+const FOV_REACH_TILES: f32 = 16.0;
 /// Ограничение стороны светового поля в тайлах: у импортированных карт
 /// (aspid и т.п.) карта огромная, а поле света полуэкранное и меньше.
 const FIELD_MAX_TILES: i32 = 128;
@@ -82,10 +92,18 @@ pub struct LightMap {
     /// Световое поле (мир, `LIGHT_SUBTEXELS` текселей на тайл): свет ламп не
     /// зависит от игрока, поэтому считается один раз на изменения мира.
     field: Vec<f32>,
+    /// Сумма вкладов ДО просачивания на стены: в неё применяются дельты ламп.
+    sum_field: Vec<f32>,
     tint_field: Vec<[f32; 3]>,
+    /// Вклады ламп по отдельности — чтобы дверь пересчитывала только соседние.
+    contrib: HashMap<LampKey, LampContribution>,
+    /// Подпись стен поля (`chunk_hash`): смена карты пересобирает вклады всех ламп.
+    field_chunks: u64,
     field_origin: (i32, i32),
     field_dim: (u32, u32),
     field_valid: bool,
+    /// Размер текселей слоёв тьмы/оттенка (по вьюпорту, меняется с окном).
+    overlay_dim: (u32, u32),
 }
 
 /// Отпечаток мира: при изменении карта пересобирается.
@@ -97,14 +115,49 @@ pub(crate) struct WorldState {
     chunks: u64, // хеш набора чанков (репликация карты могла подгрузить новый)
 }
 
-/// Кэш полярных карт теней ламп: карта лампы зависит только от стен в её
-/// радиусе (отрезки строятся по всем чанкам), поэтому при неизменном мире
-/// пересчитывается лишь световая сумма, а не 512 бинов на каждую лампу.
-#[derive(Default)]
-pub struct LampMapCache {
-    /// Подпись геометрии мира (чанки + закрытые двери).
-    geometry: u64,
-    maps: HashMap<(i32, i32, u8), Vec<f32>>,
+/// Ключ лампы: тайл, радиус, яркость×100 и цвет — вклад лампы зависит только
+/// от этих параметров и её окружения.
+pub type LampKey = (i32, i32, u8, u8, [u8; 3]);
+
+/// Вклад одной лампы в световое поле: прямоугольник текселей и значения.
+/// Хранится, чтобы при изменении окружения (дверь рядом) пересчитывать только
+/// эту лампу, а не всё поле.
+struct LampContribution {
+    /// Прямоугольник в текселях поля: x0, y0, ширина, высота.
+    rect: (u32, u32, u32, u32),
+    light: Vec<f32>,
+    tint: Vec<[f32; 3]>,
+    /// Подпись закрытых дверей в радиусе влияния лампы.
+    doors: u64,
+}
+
+/// Прибавляет (`sign = 1`) или вычитает (`-1`) световой вклад лампы.
+/// Отдельно от оттенка: поле и оттенок — разные поля `ResMut`-ресурса, и два
+/// изменяемых заимствования сразу Rust не пропускает.
+fn apply_light(field: &mut [f32], dim_x: usize, contribution: &LampContribution, sign: f32) {
+    let (x0, y0, width, height) = contribution.rect;
+    for row in 0..height as usize {
+        let dst_row = (y0 as usize + row) * dim_x;
+        let src_row = row * width as usize;
+        for col in 0..width as usize {
+            field[dst_row + x0 as usize + col] += sign * contribution.light[src_row + col];
+        }
+    }
+}
+
+/// То же для оттенка лампы (используется слоем свечения).
+fn apply_tint(tint: &mut [[f32; 3]], dim_x: usize, contribution: &LampContribution, sign: f32) {
+    let (x0, y0, width, height) = contribution.rect;
+    for row in 0..height as usize {
+        let dst_row = (y0 as usize + row) * dim_x;
+        let src_row = row * width as usize;
+        for col in 0..width as usize {
+            let dst = dst_row + x0 as usize + col;
+            for (channel, slot) in tint[dst].iter_mut().enumerate() {
+                *slot += sign * contribution.tint[src_row + col][channel];
+            }
+        }
+    }
 }
 
 /// Источник света для GPU-конвейера (SS14_LIGHTING.md §7): мировые единицы,
@@ -137,40 +190,30 @@ pub struct LightScene {
 }
 
 /// Создаёт картинки карты света и спрайты.
+/// Пустая текстура слоя карты света (тьма или оттенок ламп): RGBA8, линейный
+/// сэмплер — край тени интерполируется, а не квантуется текселями.
+fn layer_image(dim: (u32, u32)) -> Image {
+    let mut image = Image::new(
+        Extent3d {
+            width: dim.0,
+            height: dim.1,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        vec![0; (dim.0 * dim.1 * 4) as usize],
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    );
+    image.sampler = bevy::image::ImageSampler::linear();
+    image
+}
+
 pub fn setup_lighting(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
-    let size = (LIGHT_DIM * LIGHT_DIM * 4) as usize;
-    let mut dark = Image::new(
-        Extent3d {
-            width: LIGHT_DIM,
-            height: LIGHT_DIM,
-            depth_or_array_layers: 1,
-        },
-        TextureDimension::D2,
-        vec![0; size],
-        TextureFormat::Rgba8UnormSrgb,
-        RenderAssetUsages::default(),
-    );
-    // Карта растягивается на тайлы — линейная фильтрация даёт мягкие края
-    // (в SS14 карта света семплируется билинейно).
-    // Линейная фильтрация: карта света — 8 текселей на тайл, поэтому край тени
-    // интерполируется на 4 мировых юнита (в движке карта тоже семплируется
-    // линейно), и ступеньки «кубиками» исчезают. Ближайший сосед стоял здесь с
-    // тех пор, когда тексель равнялся тайлу: тогда интерполяция размазывала
-    // свет сквозь стену.
-    dark.sampler = bevy::image::ImageSampler::linear();
-    let glow = Image::new(
-        Extent3d {
-            width: LIGHT_DIM,
-            height: LIGHT_DIM,
-            depth_or_array_layers: 1,
-        },
-        TextureDimension::D2,
-        vec![0; size],
-        TextureFormat::Rgba8UnormSrgb,
-        RenderAssetUsages::default(),
-    );
-    let image = images.add(dark);
-    let glow_image = images.add(glow);
+    // Стартовый размер — квадрат окна по умолчанию; по первому кадру система
+    // света пересоздаст текстуры под реальный вьюпорт (`overlay_dim`).
+    let dim = (LIGHT_DIM, LIGHT_DIM);
+    let image = images.add(layer_image(dim));
+    let glow_image = images.add(layer_image(dim));
     let sprite = commands
         .spawn((
             Sprite::from_image(image.clone()),
@@ -192,10 +235,14 @@ pub fn setup_lighting(mut commands: Commands, mut images: ResMut<Assets<Image>>)
         glow_sprite,
         ready: false,
         field: Vec::new(),
+        sum_field: Vec::new(),
         tint_field: Vec::new(),
+        contrib: HashMap::new(),
+        field_chunks: 0,
         field_origin: (0, 0),
         field_dim: (0, 0),
         field_valid: false,
+        overlay_dim: dim,
     });
 }
 
@@ -203,9 +250,10 @@ pub fn setup_lighting(mut commands: Commands, mut images: ResMut<Assets<Image>>)
 /// `val = (1-s²)² / (1 + falloff·s)`.
 #[allow(clippy::too_many_arguments)]
 pub fn update_lighting(
+    mut commands: Commands,
     mut state: Local<WorldState>,
-    mut lamp_cache: Local<LampMapCache>,
     own: Res<OwnPlayerEntity>,
+    windows: Query<&Window>,
     positions: Query<&PlayerPosition>,
     chunks: Query<&TileChunkData>,
     lamps: Query<(&Light, &ItemPosition, Option<&Powered>)>,
@@ -386,7 +434,7 @@ pub fn update_lighting(
     // Полярная карта: для точки — расстояние до стены по каждому углу.
     // Окклюдеры отсекаются по «досягаемости» вокруг точки: у лампы стены
     // дальше радиуса света луч не перекрывают, у глаза — весь вьюпорт.
-    let polar_map = |point: (f32, f32), reach: f32| -> Vec<f32> {
+    let polar_map = |point: (f32, f32), reach: f32, bins: usize| -> Vec<f32> {
         let near: Vec<((f32, f32), (f32, f32))> = segments
             .iter()
             .copied()
@@ -397,9 +445,9 @@ pub fn update_lighting(
                 dx * dx + dy * dy <= (reach + 1.0) * (reach + 1.0)
             })
             .collect();
-        let mut map = vec![NO_OCCLUDER; SHADOW_BINS];
+        let mut map = vec![NO_OCCLUDER; bins];
         for (bin, slot) in map.iter_mut().enumerate() {
-            let angle = (bin as f32 / SHADOW_BINS as f32) * 2.0 * PI - PI;
+            let angle = (bin as f32 / bins as f32) * 2.0 * PI - PI;
             let dir = (angle.cos(), angle.sin());
             let mut best = NO_OCCLUDER;
             for &(a, b) in &near {
@@ -411,33 +459,6 @@ pub fn update_lighting(
         }
         map
     };
-    let lamp_maps: Vec<Vec<f32>> = {
-        // Подпись геометрии: закрытые двери меняют окклюдеры.
-        let mut geometry = chunk_hash;
-        for (x, y) in &closed_doors {
-            geometry = geometry
-                .wrapping_mul(1099511628211)
-                .wrapping_add((*x as u64) << 32 | *y as u64);
-        }
-        if lamp_cache.geometry != geometry {
-            lamp_cache.maps.clear();
-            lamp_cache.geometry = geometry;
-        }
-        lamp_state
-            .iter()
-            .map(|(lx, ly, radius, _, _)| {
-                let key = (*lx, *ly, *radius);
-                match lamp_cache.maps.get(&key) {
-                    Some(cached) => cached.clone(),
-                    None => {
-                        let built = polar_map((*lx as f32 + 0.5, *ly as f32 + 0.5), *radius as f32);
-                        lamp_cache.maps.insert(key, built.clone());
-                        built
-                    }
-                }
-            })
-            .collect()
-    };
     let walls_ms = rebuild_started.elapsed().as_millis() as u64;
 
     // Чтение карты по направлению: линейная интерполяция бинов и заворот на шве
@@ -445,12 +466,12 @@ pub fn update_lighting(
     // `polar_bin` — инверсия генерации (тест в ядре); формула движкового
     // `polar_u` (без деления на 2) вырождала полкарты в один бин — это и были
     // чёрные клинья «тумана войны» при живом свете вокруг.
-    let sample_map = |map: &[f32], dx: f32, dy: f32| -> f32 {
-        let u = ssr_core::light::polar_bin(dx, dy, SHADOW_BINS);
+    let sample_map = |map: &[f32], dx: f32, dy: f32, bins: usize| -> f32 {
+        let u = ssr_core::light::polar_bin(dx, dy, bins);
         let base = u.floor();
         let t = u - base;
-        let i0 = (base as isize).rem_euclid(SHADOW_BINS as isize) as usize;
-        let i1 = (base as isize + 1).rem_euclid(SHADOW_BINS as isize) as usize;
+        let i0 = (base as isize).rem_euclid(bins as isize) as usize;
+        let i1 = (base as isize + 1).rem_euclid(bins as isize) as usize;
         map[i0] * (1.0 - t) + map[i1] * t
     };
     // Момент VSM по расстоянию (дисперсию добавляем, как `shadow-depth.frag`).
@@ -463,7 +484,7 @@ pub fn update_lighting(
     // смещения в движке крошечные (±0.14 юнита), результат там всё равно 1.
     let soft_shadow = |map: &[f32], diff: (f32, f32)| -> f32 {
         let len = (diff.0 * diff.0 + diff.1 * diff.1).sqrt();
-        if sample_map(map, diff.0, diff.1) >= len {
+        if sample_map(map, diff.0, diff.1, LAMP_BINS) >= len {
             return 1.0;
         }
         let norm = len.max(1e-6);
@@ -477,12 +498,13 @@ pub fn update_lighting(
                 perp.0 * offset_step * k as f32,
                 perp.1 * offset_step * k as f32,
             );
-            let plus = sample_map(map, diff.0 + offset.0, diff.1 + offset.1);
+            let plus = sample_map(map, diff.0 + offset.0, diff.1 + offset.1, LAMP_BINS);
             if k == 0 {
                 samples[0] = plus;
                 mindist = mindist.min(plus);
             } else {
-                let minus = sample_map(map, diff.0 - offset.0, diff.1 - offset.1);
+                let minus =
+                    sample_map(map, diff.0 - offset.0, diff.1 - offset.1, LAMP_BINS);
                 samples[k] = plus;
                 samples[k + 3] = minus;
                 mindist = mindist.min(plus).min(minus);
@@ -509,7 +531,6 @@ pub fn update_lighting(
         occlusion / total.max(1e-4)
     };
 
-    const SUB: f32 = LIGHT_SUBTEXELS as f32;
 
     // Окно поля: вокруг центра чанка игрока, но не больше карты и не шире
     // `FIELD_MAX_TILES` (импортированные карты бывают очень большими).
@@ -542,96 +563,175 @@ pub fn update_lighting(
     let field_dim_y = (field_tiles_y * FIELD_SUBTEXELS as i32) as u32;
     let field_sub = FIELD_SUBTEXELS as f32;
     let field_step = 1.0 / field_sub;
-    if geometry_changed
-        || !map.field_valid
-        || map.field_origin != field_origin
-        || map.field_dim != (field_dim_x, field_dim_y)
-    {
+    let fdim = field_dim_x as usize;
+    let field_span = (
+        field_origin.0 as f32,
+        field_origin.1 as f32,
+        (field_origin.0 + field_tiles_x) as f32,
+        (field_origin.1 + field_tiles_y) as f32,
+    );
+
+    // === Световое поле через кэш вкладов по лампам ===
+    // Раньше любое изменение геометрии (в том числе открытие двери, которое
+    // меняет окклюдеры) пересчитывало ВСЁ поле: 47 ламп × 6400 текселей = 60 мс.
+    // Теперь вклад каждой лампы хранится отдельно и пересчитывается, только
+    // если рядом с ней изменились двери (или сменились сами стены): правка
+    // поля — это вычесть старый вклад, прибавить новый и заново размыть стены.
+    let field_geometry_ok = map.field_valid
+        && map.field_origin == field_origin
+        && map.field_dim == (field_dim_x, field_dim_y)
+        && map.field_chunks == chunk_hash;
+    if !field_geometry_ok {
         map.field_origin = field_origin;
         map.field_dim = (field_dim_x, field_dim_y);
+        map.field_chunks = chunk_hash;
         map.field_valid = true;
+        map.contrib.clear();
         map.field.clear();
-        map.field
-            .resize((field_dim_x * field_dim_y) as usize, AMBIENT);
+        map.field.resize((field_dim_x * field_dim_y) as usize, AMBIENT);
         map.tint_field.clear();
         map.tint_field
             .resize((field_dim_x * field_dim_y) as usize, [0.0; 3]);
-        let fdim = field_dim_x as usize;
-        let field_span = (
-            field_origin.0 as f32,
-            field_origin.1 as f32,
-            (field_origin.0 + field_tiles_x) as f32,
-            (field_origin.1 + field_tiles_y) as f32,
-        );
-        for (lamp_index, (lamp_x, lamp_y, radius, energy, color)) in
-            lamp_state.iter().enumerate()
-        {
-            let polar = &lamp_maps[lamp_index];
-            let center = (*lamp_x as f32 + 0.5, *lamp_y as f32 + 0.5);
-            let radius = *radius as f32;
-            let energy = *energy as f32 / 100.0;
-            // Движок берёт цвет лампы из прототипа и использует hex как линейный
-            // множитель (без sRGB→линейного преобразования) — как `PointLight.color`.
-            let color = [
-                color[0] as f32 / 255.0,
-                color[1] as f32 / 255.0,
-                color[2] as f32 / 255.0,
-            ];
-            // Лампа, чей радиус не дотягивается до поля, не освещает ни один
-            // тексель — без этого пропуска цикл всё равно шёл по обрезанному окну.
-            if center.0 + radius < field_span.0
-                || center.0 - radius > field_span.2
-                || center.1 + radius < field_span.1
-                || center.1 - radius > field_span.3
-            {
-                continue;
+        map.sum_field.clear();
+        map.sum_field
+            .resize((field_dim_x * field_dim_y) as usize, AMBIENT);
+    }
+    // Подпись окружения лампы: только закрытые двери в радиусе её влияния
+    // меняют её карту теней (стены учтены `chunk_hash`).
+    let doors_signature = |lamp_x: i32, lamp_y: i32, radius: f32| -> u64 {
+        let mut hash = 0u64;
+        for (dx, dy) in &closed_doors {
+            let reach = (lamp_x - dx).abs().max((lamp_y - dy).abs()) as f32;
+            if reach <= radius + 2.0 {
+                hash = hash
+                    .wrapping_mul(1099511628211)
+                    .wrapping_add((*dx as u64) << 32 | *dy as u64);
             }
-            let min_x = (((center.0 - radius) - field_span.0) * field_sub)
-                .floor()
-                .max(0.0) as u32;
-            let max_x = ((((center.0 + radius) - field_span.0) * field_sub).ceil())
-                .min(field_dim_x as f32) as u32;
-            let min_y = (((center.1 - radius) - field_span.1) * field_sub)
-                .floor()
-                .max(0.0) as u32;
-            let max_y = ((((center.1 + radius) - field_span.1) * field_sub).ceil())
-                .min(field_dim_y as f32) as u32;
-            for ty in min_y..max_y {
-                for tx in min_x..max_x {
-                    let px = field_span.0 + (tx as f32 + 0.5) * field_step;
-                    let py = field_span.1 + (ty as f32 + 0.5) * field_step;
-                    let diff = (px - center.0, py - center.1);
-                    let dist2 = diff.0 * diff.0 + diff.1 * diff.1;
-                    if dist2 > radius * radius {
-                        continue;
-                    }
-                    let occlusion = soft_shadow(polar, diff);
-                    if occlusion <= 0.0 {
-                        continue;
-                    }
-                    // `sqr_dist` в шейдере считается с `LIGHTING_HEIGHT`: свет
-                    // висит на высоте 1 м над полом.
-                    let value = attenuation(
-                        dist2 + ssr_core::light::LIGHTING_HEIGHT,
-                        radius,
-                        energy,
-                        FALLOFF,
-                        0.0,
-                    ) * occlusion;
-                    if value <= 0.0 {
-                        continue;
-                    }
-                    let index = (ty as usize * fdim) + tx as usize;
-                    map.field[index] += value;
-                    for (channel, tint) in map.tint_field[index].iter_mut().enumerate() {
-                        *tint += color[channel] * value;
-                    }
+        }
+        hash
+    };
+    // Вклады ламп, которых больше нет на карте, вычитаем.
+    let live: std::collections::HashSet<LampKey> = lamp_state.iter().copied().collect();
+    let stale: Vec<LampKey> = map
+        .contrib
+        .keys()
+        .copied()
+        .filter(|key| !live.contains(key))
+        .collect();
+    for key in stale {
+        if let Some(gone) = map.contrib.remove(&key) {
+            apply_light(&mut map.sum_field, fdim, &gone, -1.0);
+            apply_tint(&mut map.tint_field, fdim, &gone, -1.0);
+        }
+    }
+    let mut recomputed_lamps = 0usize;
+    for (lamp_x, lamp_y, radius_u8, energy_u8, color_u8) in lamp_state.iter() {
+        let key: LampKey = (*lamp_x, *lamp_y, *radius_u8, *energy_u8, *color_u8);
+        let radius = *radius_u8 as f32;
+        let doors = doors_signature(*lamp_x, *lamp_y, radius);
+        let valid = map.contrib.get(&key).is_some_and(|c| c.doors == doors);
+        if valid {
+            continue;
+        }
+        recomputed_lamps += 1;
+        // Карта теней лампы строится только здесь и живёт в кэше вклада.
+        let polar = polar_map(
+            (*lamp_x as f32 + 0.5, *lamp_y as f32 + 0.5),
+            radius,
+            LAMP_BINS,
+        );
+        if let Some(old) = map.contrib.remove(&key) {
+            apply_light(&mut map.sum_field, fdim, &old, -1.0);
+            apply_tint(&mut map.tint_field, fdim, &old, -1.0);
+        }
+        let center = (*lamp_x as f32 + 0.5, *lamp_y as f32 + 0.5);
+        let energy = *energy_u8 as f32 / 100.0;
+        // Движок берёт цвет лампы из прототипа и использует hex как линейный
+        // множитель (без sRGB→линейного преобразования) — как `PointLight.color`.
+        let color = [
+            color_u8[0] as f32 / 255.0,
+            color_u8[1] as f32 / 255.0,
+            color_u8[2] as f32 / 255.0,
+        ];
+        // Прямоугольник вклада: радиус лампы, обрезанный полем. Лампа, чей
+        // радиус не дотягивается до поля, не освещает ни один тексель.
+        if center.0 + radius < field_span.0
+            || center.0 - radius > field_span.2
+            || center.1 + radius < field_span.1
+            || center.1 - radius > field_span.3
+        {
+            map.contrib.insert(
+                key,
+                LampContribution {
+                    rect: (0, 0, 0, 0),
+                    light: Vec::new(),
+                    tint: Vec::new(),
+                    doors,
+                },
+            );
+            continue;
+        }
+        let min_x = (((center.0 - radius) - field_span.0) * field_sub)
+            .floor()
+            .max(0.0) as u32;
+        let max_x = ((((center.0 + radius) - field_span.0) * field_sub).ceil())
+            .min(field_dim_x as f32) as u32;
+        let min_y = (((center.1 - radius) - field_span.1) * field_sub)
+            .floor()
+            .max(0.0) as u32;
+        let max_y = ((((center.1 + radius) - field_span.1) * field_sub).ceil())
+            .min(field_dim_y as f32) as u32;
+        let width = max_x.saturating_sub(min_x);
+        let height = max_y.saturating_sub(min_y);
+        let mut light = vec![0.0f32; (width * height) as usize];
+        let mut tint = vec![[0.0f32; 3]; (width * height) as usize];
+        for ty in min_y..max_y {
+            for tx in min_x..max_x {
+                let px = field_span.0 + (tx as f32 + 0.5) * field_step;
+                let py = field_span.1 + (ty as f32 + 0.5) * field_step;
+                let diff = (px - center.0, py - center.1);
+                let dist2 = diff.0 * diff.0 + diff.1 * diff.1;
+                if dist2 > radius * radius {
+                    continue;
+                }
+                let occlusion = soft_shadow(&polar, diff);
+                if occlusion <= 0.0 {
+                    continue;
+                }
+                // `sqr_dist` в шейдере считается с `LIGHTING_HEIGHT`: свет
+                // висит на высоте 1 м над полом.
+                let value = attenuation(
+                    dist2 + ssr_core::light::LIGHTING_HEIGHT,
+                    radius,
+                    energy,
+                    FALLOFF,
+                    0.0,
+                ) * occlusion;
+                if value <= 0.0 {
+                    continue;
+                }
+                let index = ((ty - min_y) as usize * width as usize) + (tx - min_x) as usize;
+                light[index] = value;
+                for (channel, tint) in tint[index].iter_mut().enumerate() {
+                    *tint = color[channel] * value;
                 }
             }
         }
-        // Просачивание света на стены (`wall-bleed` в движке): стена берёт
-        // максимум света соседей, иначе стены были бы чёрными.
-        let mut bleed = std::mem::take(&mut map.field);
+        let contribution = LampContribution {
+            rect: (min_x, min_y, width, height),
+            light,
+            tint,
+            doors,
+        };
+        apply_light(&mut map.sum_field, fdim, &contribution, 1.0);
+        apply_tint(&mut map.tint_field, fdim, &contribution, 1.0);
+        map.contrib.insert(key, contribution);
+    }
+    if !field_geometry_ok || recomputed_lamps > 0 {
+        // Сумма вкладов → в поле; просачивание на стены (`wall-bleed` в движке)
+        // считаем в копии: стена берёт максимум света соседей, иначе была бы чёрной.
+        let sum = std::mem::take(&mut map.sum_field);
+        let mut bleed = sum.clone();
         for ty in 1..field_dim_y - 1 {
             for tx in 1..field_dim_x - 1 {
                 let tile = (
@@ -650,27 +750,59 @@ pub fn update_lighting(
                 bleed[index] = best;
             }
         }
-        map.field = bleed;
+        map.field.copy_from_slice(&bleed);
+        map.sum_field = sum;
     }
     let maps_ms = rebuild_started.elapsed().as_millis() as u64;
 
     // === Оверлей окна игрока: маска видимости × готовое поле света ===
-    let origin = (player_tile.0 - WINDOW_RADIUS, player_tile.1 - WINDOW_RADIUS);
-    let side = WINDOW_SIDE;
-    let dim = LIGHT_DIM;
+    // Окно — прямоугольник по вьюпорту (в движке кадр 21×15 тайлов), а не
+    // квадрат 33×33: пересчёт идёт на КАЖДЫЙ шаг игрока, а квадрат считал
+    // втрое больше текселей, чем видно на экране. Размер берётся по вьюпорту
+    // (у широких мониторов он шире), с полями в пару тайлов.
+    let aspect = windows
+        .iter()
+        .next()
+        .map(|window| (window.width() / window.height().max(1.0)).clamp(1.0, 4.0))
+        .unwrap_or(16.0 / 9.0);
+    let overlay_tiles = (
+        // Чётные размеры: центр текстуры попадает ровно на тайл игрока.
+        (((VIEWPORT_TILES.1 * aspect).ceil() as i32 + 3) & !1).max(8),
+        ((VIEWPORT_TILES.1 as i32 + 3) & !1).max(8),
+    );
+    let overlay_dim = (
+        overlay_tiles.0 as u32 * LIGHT_SUBTEXELS,
+        overlay_tiles.1 as u32 * LIGHT_SUBTEXELS,
+    );
+    if map.overlay_dim != overlay_dim {
+        // Разрешение/аспект окна изменились — пересоздаём текстуры слоёв.
+        map.overlay_dim = overlay_dim;
+        map.image = images.add(layer_image(overlay_dim));
+        map.glow_image = images.add(layer_image(overlay_dim));
+        commands
+            .entity(map.sprite)
+            .insert(Sprite::from_image(map.image.clone()));
+        commands
+            .entity(map.glow_sprite)
+            .insert(Sprite::from_image(map.glow_image.clone()));
+    }
+    let (dim_x, dim_y) = overlay_dim;
+    let (side_x, side_y) = overlay_tiles;
+    let origin = (player_tile.0 - side_x / 2, player_tile.1 - side_y / 2);
+
     // Сетка стен окна — для просачивания видимости и диагностического дампа.
-    let mut grid = vec![false; (side * side) as usize];
-    for ly in 0..side {
-        for lx in 0..side {
-            let (tx, ty) = (origin.0 + lx as i32, origin.1 + ly as i32);
-            grid[(ly * side + lx) as usize] = solid_tile(tx, ty);
+    let mut grid = vec![false; (side_x * side_y) as usize];
+    for ly in 0..side_y {
+        for lx in 0..side_x {
+            let (tx, ty) = (origin.0 + lx, origin.1 + ly);
+            grid[(ly * side_x + lx) as usize] = solid_tile(tx, ty);
         }
     }
     let wall_at = |lx: i32, ly: i32| -> bool {
-        if lx < 0 || ly < 0 || lx >= side as i32 || ly >= side as i32 {
+        if lx < 0 || ly < 0 || lx >= side_x || ly >= side_y {
             return true;
         }
-        grid[(ly as u32 * side + lx as u32) as usize]
+        grid[(ly * side_x + lx) as usize]
     };
 
     // Видимость глаза — ровно как `fov-lighting.swsl`: ОДНА выборка полярной
@@ -678,19 +810,23 @@ pub fn update_lighting(
     // Мягкая 7-точечная тень применяется только к СВЕТУ источников: у маски
     // глаза она давала «слепые зоны» в глубине коридоров (боковые стены
     // затеняли точку, до которой луч доходит свободно).
+    // Бинов для глаза меньше, чем у карт теней (2048 в движке считает GPU):
+    // шаг 256 бинов при 10 тайлах даёт ошибку в 8 юнитов — ровно тексель маски.
     let eye_map = polar_map(
         (player_tile.0 as f32 + 0.5, player_tile.1 as f32 + 0.5),
-        WINDOW_RADIUS as f32 + 1.0,
+        FOV_REACH_TILES,
+        FOV_BINS,
     );
     // Маска считается вдвое грубее текселей оверлея (`MASK_SUBTEXELS`) и
     // потом интерполируется: маска глаза мягкая, а пересчёт идёт на КАЖДЫЙ шаг
     // игрока — на полном разрешении это 4 мс на шаг.
     const MASK_SUBTEXELS: u32 = LIGHT_SUBTEXELS / 2;
-    let mask_dim = WINDOW_SIDE * MASK_SUBTEXELS;
+    let mask_dim_x = side_x as u32 * MASK_SUBTEXELS;
+    let mask_dim_y = side_y as u32 * MASK_SUBTEXELS;
     let mask_step = 1.0 / MASK_SUBTEXELS as f32;
-    let mut visible = vec![0.0f32; (mask_dim * mask_dim) as usize];
-    for ty in 0..mask_dim {
-        for tx in 0..mask_dim {
+    let mut visible = vec![0.0f32; (mask_dim_x * mask_dim_y) as usize];
+    for ty in 0..mask_dim_y {
+        for tx in 0..mask_dim_x {
             let px = origin.0 as f32 + (tx as f32 + 0.5) * mask_step;
             let py = origin.1 as f32 + (ty as f32 + 0.5) * mask_step;
             let diff = (
@@ -698,15 +834,15 @@ pub fn update_lighting(
                 py - (player_tile.1 as f32 + 0.5),
             );
             let len = (diff.0 * diff.0 + diff.1 * diff.1).sqrt();
-            let wall = sample_map(&eye_map, diff.0, diff.1);
-            visible[(ty * mask_dim + tx) as usize] = chebyshev_upper_bound(moment(wall), len);
+            let wall = sample_map(&eye_map, diff.0, diff.1, FOV_BINS);
+            visible[(ty * mask_dim_x + tx) as usize] = chebyshev_upper_bound(moment(wall), len);
         }
     }
     // Стена берёт максимум видимости соседей: луч в центр тайла упирается в саму
     // стену, поэтому без просачивания её texel был бы чёрным (в движке стены
     // видно по `wall-bleed`).
-    for ty in 1..mask_dim - 1 {
-        for tx in 1..mask_dim - 1 {
+    for ty in 1..mask_dim_y - 1 {
+        for tx in 1..mask_dim_x - 1 {
             let tile = (
                 (tx / MASK_SUBTEXELS) as i32,
                 (ty / MASK_SUBTEXELS) as i32,
@@ -714,35 +850,33 @@ pub fn update_lighting(
             if !wall_at(tile.0, tile.1) {
                 continue;
             }
-            let index = (ty * mask_dim + tx) as usize;
+            let index = (ty * mask_dim_x + tx) as usize;
             let mut visible_best = visible[index];
             for (dx, dy) in [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
-                let neighbor = (((ty as i32 + dy) as u32) * mask_dim
+                let neighbor = (((ty as i32 + dy) as u32) * mask_dim_x
                     + ((tx as i32 + dx) as u32)) as usize;
                 visible_best = visible_best.max(visible[neighbor]);
             }
             visible[index] = visible_best;
         }
     }
-    // Апскейл маски в тексели оверлея (билинейно).
-    let mask_dim_i = mask_dim as i32;
-    let mask_scale = MASK_SUBTEXELS as f32 / SUB;
+    // Апскейл маски в тексели оверлея. Маска ровно вдвое грубее оверлея и
+    // начинается с того же тайла, поэтому центр текселя оверлея всегда лежит
+    // между четырьмя текселями маски со смещением 0.25: веса постоянны, и
+    // вместо floor/clamp на каждый тексель хватает сдвига индекса.
+    const _: () = assert!(LIGHT_SUBTEXELS == MASK_SUBTEXELS * 2);
+    let mask_dim_x_i = mask_dim_x as i32 - 1;
+    let mask_dim_y_i = mask_dim_y as i32 - 1;
     let visible_at = |lx: u32, ly: u32| -> f32 {
-        let fx = (lx as f32 + 0.5) * mask_scale - 0.5;
-        let fy = (ly as f32 + 0.5) * mask_scale - 0.5;
-        let x0 = fx.floor();
-        let y0 = fy.floor();
-        let tx = fx - x0;
-        let ty = fy - y0;
-        let cx = |v: f32| (v as i32).clamp(0, mask_dim_i - 1) as usize;
-        let cy = |v: f32| (v as i32).clamp(0, mask_dim_i - 1) as usize;
-        let md = mask_dim as usize;
-        let x0i = cx(x0);
-        let x1i = cx(x0 + 1.0);
-        let y0i = cy(y0);
-        let y1i = cy(y0 + 1.0);
-        let top = visible[y0i * md + x0i] * (1.0 - tx) + visible[y0i * md + x1i] * tx;
-        let bottom = visible[y1i * md + x0i] * (1.0 - tx) + visible[y1i * md + x1i] * tx;
+        let x0 = ((lx >> 1) as i32).min(mask_dim_x_i).max(0) as usize;
+        let y0 = ((ly >> 1) as i32).min(mask_dim_y_i).max(0) as usize;
+        let x1 = ((x0 + 1) as i32).min(mask_dim_x_i) as usize;
+        let y1 = ((y0 + 1) as i32).min(mask_dim_y_i) as usize;
+        let tx = if lx & 1 == 0 { 0.25 } else { 0.75 };
+        let ty = if ly & 1 == 0 { 0.25 } else { 0.75 };
+        let md = mask_dim_x as usize;
+        let top = visible[y0 * md + x0] * (1.0 - tx) + visible[y0 * md + x1] * tx;
+        let bottom = visible[y1 * md + x0] * (1.0 - tx) + visible[y1 * md + x1] * tx;
         top * (1.0 - ty) + bottom * ty
     };
     let mask_ms = rebuild_started.elapsed().as_millis() as u64;
@@ -750,36 +884,47 @@ pub fn update_lighting(
     // Свет для текселя окна — билинейно из поля: поле вдвое грубее окна
     // (`FIELD_SUBTEXELS` против `LIGHT_SUBTEXELS`), и интерполяция даёт мягкий
     // край тени вместо ступенек по текселям поля.
-    let field_dim_x_i = field_dim_x as i32;
-    let field_dim_y_i = field_dim_y as i32;
-    let offset_x = (origin.0 - map.field_origin.0) as f32 * field_sub - 0.5;
-    let offset_y = (origin.1 - map.field_origin.1) as f32 * field_sub - 0.5;
-    // Общий сэмплер: билинейные веса по всем четырём текселям поля.
-    let field_sample = |lx: u32, ly: u32, pick: &dyn Fn(usize) -> f32| -> f32 {
-        let fx = offset_x + (lx as f32 + 0.5) * (field_sub / SUB);
-        let fy = offset_y + (ly as f32 + 0.5) * (field_sub / SUB);
-        let x0 = fx.floor();
-        let y0 = fy.floor();
-        let tx = fx - x0;
-        let ty = fy - y0;
-        let clamp_x = |v: f32| (v as i32).clamp(0, field_dim_x_i - 1) as usize;
-        let clamp_y = |v: f32| (v as i32).clamp(0, field_dim_y_i - 1) as usize;
-        let x0i = clamp_x(x0);
-        let x1i = clamp_x(x0 + 1.0);
-        let y0i = clamp_y(y0);
-        let y1i = clamp_y(y0 + 1.0);
-        let fdim = field_dim_x as usize;
-        let top = pick(y0i * fdim + x0i) * (1.0 - tx) + pick(y0i * fdim + x1i) * tx;
-        let bottom = pick(y1i * fdim + x0i) * (1.0 - tx) + pick(y1i * fdim + x1i) * tx;
-        top * (1.0 - ty) + bottom * ty
+    // Билинейная выборка поля: поле ровно вдвое грубее оверлея (4 текселя на
+    // тайл против 8), сетки выровнены по тайлам — значит центр текселя оверлея
+    // всегда попадает между четырьмя текселями поля со смещением 0.25, веса
+    // постоянны, и floor/clamp на каждый тексель не нужен (раньше это было
+    // 2-3 мс на пересчёт, а пересчёт идёт на каждый шаг игрока).
+    const _: () = assert!(LIGHT_SUBTEXELS == FIELD_SUBTEXELS * 2);
+    let field_offset_x = (origin.0 - map.field_origin.0) * FIELD_SUBTEXELS as i32;
+    let field_offset_y = (origin.1 - map.field_origin.1) * FIELD_SUBTEXELS as i32;
+    let fdim = field_dim_x as usize;
+    let field_dim_x_i = field_dim_x as i32 - 1;
+    let field_dim_y_i = field_dim_y as i32 - 1;
+    let field_coords = move |lx: u32, ly: u32| -> (usize, usize, usize, usize, f32, f32) {
+        let x0 = (field_offset_x + (lx >> 1) as i32).clamp(0, field_dim_x_i) as usize;
+        let y0 = (field_offset_y + (ly >> 1) as i32).clamp(0, field_dim_y_i) as usize;
+        let x1 = ((x0 + 1) as i32).min(field_dim_x_i) as usize;
+        let y1 = ((y0 + 1) as i32).min(field_dim_y_i) as usize;
+        (
+            x0,
+            x1,
+            y0,
+            y1,
+            if lx & 1 == 0 { 0.25 } else { 0.75 },
+            if ly & 1 == 0 { 0.25 } else { 0.75 },
+        )
     };
     let field_luminance = |lx: u32, ly: u32| -> f32 {
-        field_sample(lx, ly, &|index| map.field[index])
+        let (x0, x1, y0, y1, tx, ty) = field_coords(lx, ly);
+        let top = map.field[y0 * fdim + x0] * (1.0 - tx) + map.field[y0 * fdim + x1] * tx;
+        let bottom = map.field[y1 * fdim + x0] * (1.0 - tx) + map.field[y1 * fdim + x1] * tx;
+        top * (1.0 - ty) + bottom * ty
     };
     let field_tint = |lx: u32, ly: u32| -> [f32; 3] {
+        let (x0, x1, y0, y1, tx, ty) = field_coords(lx, ly);
         let mut rgb = [0.0f32; 3];
+        let (i00, i01, i10, i11) = (y0 * fdim + x0, y0 * fdim + x1, y1 * fdim + x0, y1 * fdim + x1);
         for (channel, slot) in rgb.iter_mut().enumerate() {
-            *slot = field_sample(lx, ly, &|index| map.tint_field[index][channel]);
+            let top = map.tint_field[i00][channel] * (1.0 - tx)
+                + map.tint_field[i01][channel] * tx;
+            let bottom = map.tint_field[i10][channel] * (1.0 - tx)
+                + map.tint_field[i11][channel] * tx;
+            *slot = top * (1.0 - ty) + bottom * ty;
         }
         rgb
     };
@@ -788,9 +933,9 @@ pub fn update_lighting(
     // так видно, ЧТО именно затемнено: стена (законно) или «слепая зона».
     if std::env::var_os("SSR_LIGHT_DEBUG").is_some() {
         let mut grid_art = String::from("\n");
-        for ly in (0..side as i32).rev() {
-            for lx in 0..side as i32 {
-                grid_art.push(if (lx, ly) == (WINDOW_RADIUS, WINDOW_RADIUS) {
+        for ly in (0..side_y).rev() {
+            for lx in 0..side_x {
+                grid_art.push(if (lx, ly) == (side_x / 2, side_y / 2) {
                     '@'
                 } else if wall_at(lx, ly) {
                     '#'
@@ -801,8 +946,8 @@ pub fn update_lighting(
             grid_art.push('\n');
         }
         let mut light_art = String::from("\n");
-        for ly in (0..side as i32).rev() {
-            for lx in 0..side as i32 {
+        for ly in (0..side_y).rev() {
+            for lx in 0..side_x {
                 let mut sum = 0.0f32;
                 for sy in 0..LIGHT_SUBTEXELS {
                     for sx in 0..LIGHT_SUBTEXELS {
@@ -843,12 +988,12 @@ pub fn update_lighting(
             return;
         };
         data.fill(0);
-        for ly in 0..dim {
-            for lx in 0..dim {
+        for ly in 0..dim_y {
+            for lx in 0..dim_x {
                 let luminance = field_luminance(lx, ly);
                 let occlusion = 1.0 - luminance * visible_at(lx, ly);
-                let row = dim - 1 - ly;
-                let target = ((row * dim + lx) * 4) as usize;
+                let row = dim_y - 1 - ly;
+                let target = ((row * dim_x + lx) * 4) as usize;
                 data[target + 3] = (occlusion.clamp(0.0, 1.0) * 255.0) as u8;
             }
         }
@@ -857,8 +1002,8 @@ pub fn update_lighting(
         && let Some(glow_data) = glow_image.data.as_mut()
     {
         glow_data.fill(0);
-        for ly in 0..dim {
-            for lx in 0..dim {
+        for ly in 0..dim_y {
+            for lx in 0..dim_x {
                 let contribution = (field_luminance(lx, ly) - AMBIENT).max(0.0);
                 if contribution < 0.001 {
                     continue;
@@ -869,8 +1014,8 @@ pub fn update_lighting(
                 }
                 let rgb = field_tint(lx, ly);
                 let norm = rgb[0].max(rgb[1]).max(rgb[2]).max(0.001);
-                let row = dim - 1 - ly;
-                let target = ((row * dim + lx) * 4) as usize;
+                let row = dim_y - 1 - ly;
+                let target = ((row * dim_x + lx) * 4) as usize;
                 glow_data[target] = ((rgb[0] / norm) * 255.0) as u8;
                 glow_data[target + 1] = ((rgb[1] / norm) * 255.0) as u8;
                 glow_data[target + 2] = ((rgb[2] / norm) * 255.0) as u8;
