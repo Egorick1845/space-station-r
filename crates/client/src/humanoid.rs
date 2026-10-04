@@ -315,6 +315,102 @@ pub fn update_knocked(
     }
 }
 
+/// Фаза и прошлая позиция владельца для анимации шага.
+#[derive(Default)]
+pub(crate) struct FootPhase {
+    phase: f32,
+    last: Vec2,
+}
+
+// Параметры `FootWalkAnimationComponent` из сборки (`_Mini/FootWalk`): цикл 9 рад/с,
+// множители 0.6375 (ходьба) и 1.2025 (бег), зажим от реальной скорости 0.35..1.1,
+// порог остановки 0.04 (м/с)², амплитуда подъёма стопы 2.5/32 юнита.
+const FOOT_CYCLE_SPEED: f32 = 9.0;
+const FOOT_WALK_RATE: f32 = 0.6375;
+const FOOT_SPRINT_RATE: f32 = 1.2025;
+const FOOT_MIN_SLOW: f32 = 0.35;
+const FOOT_MAX_SLOW: f32 = 1.1;
+const FOOT_MIN_SPEED_SQR: f32 = 0.04;
+const FOOT_AMPLITUDE: f32 = 2.5 / 32.0;
+/// Юнитов мира в тайле (скорость в сборке — метры/с, 1 тайл = 1 м).
+const TILE_UNITS: f32 = ssr_core::tiles::TILE_PX as f32;
+/// Ожидаемые скорости из `MovementSpeedModifierComponent`: ходьба и бег, м/с
+/// (`DefaultBaseWalkSpeed = 2.5`, `DefaultBaseSprintSpeed = 4.5`).
+const WALK_EXPECTED: f32 = 2.5;
+const SPRINT_EXPECTED: f32 = 4.5;
+
+/// Процедурная анимация шага (`FootWalkAnimationSystem` сборки): кадров ходьбы в
+/// RSI нет — ноги и стопы поднимаются синусом от фазы, которая растёт со
+/// скоростью. Поднимается только нога/стопа (руки не анимируются — как в сборке).
+///
+/// Отклонение: в сборке множитель берётся из флага спринта (`MoverComponent`),
+/// у нас флаг спринта пока не реплицируется, поэтому бег определяется по
+/// фактической скорости (выше базовой ходьбы). Устранится вместе с переносом
+/// спринта (PORT_PLAN 2.2) — тогда брать флаг, как в `GetStepRate`.
+pub fn foot_walk_animation(
+    time: Res<Time>,
+    mut walk: Local<std::collections::HashMap<Entity, FootPhase>>,
+    mut parts: Query<(&HumanoidPart, &mut Transform)>,
+    owners: Query<&GlobalTransform, Without<HumanoidPart>>,
+) {
+    let dt = time.delta_secs();
+    if dt <= 0.0 {
+        return;
+    }
+    // Фаза считается один раз на владельца (иначе скорость шага умножилась бы
+    // на число его частей).
+    let mut phases: std::collections::HashMap<Entity, f32> = std::collections::HashMap::new();
+    for (part, _) in parts.iter() {
+        if phases.contains_key(&part.owner) {
+            continue;
+        }
+        let Ok(global) = owners.get(part.owner) else {
+            continue;
+        };
+        let pos = global.translation().truncate();
+        let entry = walk.entry(part.owner).or_insert(FootPhase {
+            phase: 0.0,
+            last: pos,
+        });
+        let speed_tiles = (pos - entry.last).length() / dt / TILE_UNITS;
+        entry.last = pos;
+        if speed_tiles * speed_tiles < FOOT_MIN_SPEED_SQR {
+            entry.phase = 0.0;
+            phases.insert(part.owner, 0.0);
+            continue;
+        }
+        let sprinting = speed_tiles > WALK_EXPECTED;
+        let expected = if sprinting {
+            SPRINT_EXPECTED
+        } else {
+            WALK_EXPECTED
+        };
+        let slow = (speed_tiles / expected).clamp(FOOT_MIN_SLOW, FOOT_MAX_SLOW);
+        let rate = if sprinting {
+            FOOT_SPRINT_RATE
+        } else {
+            FOOT_WALK_RATE
+        };
+        entry.phase += dt * FOOT_CYCLE_SPEED * rate * slow;
+        phases.insert(part.owner, entry.phase);
+    }
+    for (part, mut transform) in parts.iter_mut() {
+        let name = part.key.rsplit('#').next().unwrap_or_default();
+        let left = name.starts_with("l_leg") || name.starts_with("l_foot");
+        let right = name.starts_with("r_leg") || name.starts_with("r_foot");
+        if !left && !right {
+            continue;
+        }
+        let phase = phases.get(&part.owner).copied().unwrap_or(0.0);
+        let wave = if left {
+            phase.sin().max(0.0)
+        } else {
+            (phase + std::f32::consts::PI).sin().max(0.0)
+        };
+        transform.translation.y = wave * FOOT_AMPLITUDE;
+    }
+}
+
 /// Поворот всех частей тела вслед за направлением владельца.
 pub fn update_facing(
     registry: Res<RsiRegistry>,
