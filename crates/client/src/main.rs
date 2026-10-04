@@ -172,6 +172,12 @@ fn main() {
     );
     // Процедурная анимация шага (PORT_PLAN 2.4, `FootWalkAnimationSystem`).
     app.add_systems(Update, humanoid::foot_walk_animation);
+    // «Звёзды» стамина-крита (`StunVisualLayers.StamCrit`): появление слоя и
+    // флипбук кадров.
+    app.add_systems(
+        Update,
+        (humanoid::sync_stun_stars, humanoid::animate_stun_stars),
+    );
     // Space — спринт-тоггл (PORT_PLAN 2.2).
     app.add_systems(Update, hud::sprint_hotkey);
     // Алерт выносливости (PORT_PLAN 1.5): 7 уровней, иконки из сборки.
@@ -259,6 +265,7 @@ fn main() {
             windows::drag_windows,
             audio::door_sounds,
             audio::container_sounds,
+            audio::knockdown_sounds,
             audio::damage_sound,
             audio::build_sound,
             audio::footsteps,

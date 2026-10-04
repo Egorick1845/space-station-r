@@ -170,6 +170,8 @@ fn main() {
         Update,
         (
             damage_test,
+            stamina_crit_test,
+            drop_hands_on_stam_crit,
             power_test,
             breach_test,
             vacuum_test,
@@ -3803,6 +3805,100 @@ fn damage_test(
             weapon: None,
         },
     });
+}
+
+/// Падение от стамина-крита выбрасывает предметы из рук: в сборке
+/// `EnterStamCrit` → `TryUpdateParalyzeDuration` → `OnStunnedSuccessfully`
+/// (Goobstation) → `DropHandItemsEvent`, а `HandsSystem.OnDropHandItems` бросает
+/// предметы с разбросом 45° и скоростью `BaseThrowspeed 15 × [0.45..0.55]` =
+/// 6.75..8.25 м/с. У нас у лежащих предметов нет физики, поэтому разброс
+/// задаём смещением по направлению броска (как «улетел на полтайла»).
+fn drop_hands_on_stam_crit(
+    mut commands: Commands,
+    mut hands: Query<(&mut Hands, &Position, Option<&ssr_core::stamina::Stamina>)>,
+    items: Query<&Item>,
+    knocked: Query<Entity, Added<KnockedDown>>,
+) {
+    for player in knocked.iter() {
+        let Ok((mut hand, position, stamina)) = hands.get_mut(player) else {
+            continue;
+        };
+        // Только стамина-крит: при обычном нокдауне от урона руки не пустеют.
+        if !stamina.is_some_and(|stamina| stamina.critical) {
+            continue;
+        }
+        let mut dropped = 0;
+        for slot in 0..hand.slots.len() {
+            let Some(item) = hand.slots.get(slot).copied().flatten() else {
+                continue;
+            };
+            hand.slots[slot] = None;
+            let Some(entity) = Entity::try_from_bits(item) else {
+                continue;
+            };
+            if items.get(entity).is_err() {
+                continue;
+            }
+            // Разброс ±45° вокруг направления «от игрока вбок»: у нас нет
+            // вектора броска, поэтому берём фиксированные стороны (левая/правая)
+            // с дистанцией из скорости броска за один тик.
+            let angle = if slot == 0 { 0.0 } else { std::f32::consts::PI };
+            let spread = angle + 0.25 * (slot as f32 - 0.5);
+            let distance = THROW_DISTANCE;
+            let offset = Vec2::new(spread.cos(), spread.sin()) * distance;
+            let world = position.0 + offset;
+            commands
+                .entity(entity)
+                .insert((HeldBy { player: 0 }, ItemPosition([world.x, world.y])));
+            dropped += 1;
+            tracing::info!(item, slot, "stamina crit: item dropped from hand");
+        }
+        if dropped > 0 {
+            commands.entity(player).insert(Hands {
+                active: hand.active,
+                slots: hand.slots.clone(),
+            });
+        }
+    }
+}
+
+/// Насколько далеко улетает выроненный предмет (полтайла).
+const THROW_DISTANCE: f32 = crate::TILE_SIZE * 0.6;
+
+/// Тест стамина-крита (`SSR_CRIT_TEST=1`): через 3 с выставляет стамину на/// порог, чтобы проверить падение персонажа (нокдаун 6 с, поворот на 90°).
+fn stamina_crit_test(
+    time: Res<Time>,
+    players: Res<Players>,
+    mut staminas: Query<&mut ssr_core::stamina::Stamina>,
+    mut commands: Commands,
+    mut done: Local<bool>,
+    mut wait: Local<f32>,
+) {
+    if std::env::var_os("SSR_CRIT_TEST").is_none() || *done {
+        return;
+    }
+    // Ждём подключения игрока: до него критить некого. Значение переменной —
+    // задержка в секундах после подключения (по умолчанию 3).
+    let delay: f32 = std::env::var("SSR_CRIT_TEST")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(3.0);
+    let Some(entry) = players.entries.first() else {
+        *wait = 0.0;
+        return;
+    };
+    *wait += time.delta_secs();
+    if *wait < delay {
+        return;
+    }
+    *done = true;
+    if let Ok(mut stamina) = staminas.get_mut(entry.player) {
+        let stun = stamina.enter_crit(time.elapsed_secs());
+        commands.entity(entry.player).insert(KnockedDown {
+            seconds: stun.as_secs_f32(),
+        });
+        tracing::info!(player = ?entry.player, "crit-test: stamina crit forced");
+    }
 }
 
 /// Тест коллизии T2.2: SSR_COLLISION_TEST=1 ставит стену 32×4096 с центром

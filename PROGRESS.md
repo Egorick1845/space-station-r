@@ -732,3 +732,67 @@ EntityStorageComponent.cs`), сеточного окна НЕТ (`StorageWindow`
 - Шрифт Cozette: свой стек шрифтов (Cozette для латиницы + Noto для кириллицы).
 - Меню спавна: сущности спавнятся как предметы (`Item`), а не со своими
   компонентами (нужен конвертер компонентов, IMP.3/фаза 5).
+
+## 2026-10-04 (7) — анимации бега и падения от стамина-крита
+
+Владелец: «анимации бега и падения с стамина критом нету, изучи как это сделано
+в сс14 — возьми нам». Изучено двумя субагентами по сборке
+(`_Mini/FootWalk/*`, `SharedStaminaSystem.cs`, `SharedStunSystem*`,
+`StandingStateSystem.cs`, `RotationVisualizerSystem.cs`, `alerts.yml`,
+`StaminaSystem.cs`), перенесено ядро. Источники — в комментариях к коду.
+
+### 1. Анимация шага/бега — точный перенос `FootWalkAnimationSystem`
+
+Числа из `FootWalkAnimationComponent.cs`: `Amplitude = 2.5/32` (2.5 px),
+`CycleSpeed = 9` рад/с, `WalkRate = 0.6375`, `SprintRate = 1.2025`,
+`MinSlowFactor = 0.35`, `MaxSlowFactor = 1.1`, `MinSpeedSquared = 0.04`,
+`SideFarAmplitudeFactor = 0.4`. Что исправлено против прежней версии:
+
+- **Множитель фазы — по флагу спринта** (`MoverComponent.Sprinting`), а не по
+  фактической скорости: у нас это «не держит Shift» (в сборке
+  `DefaultSprinting = true`), у чужих — реплицированный `Sprinting`/скорость.
+  Скорость входит только через `slowFactor` (`GetStepRate`).
+- **Дальняя нога ×0.4**: East → дальняя левая, West → правая.
+- **Боковые виды (E/W)**: обе ноги идут по `nearY = (East ? rightY : leftY)`;
+  фронтальные (S/N) — каждая по своей фазе; смещение только вверх
+  (`max(0, sin)`), строгая противофаза.
+- Ядро вынесено в чистую функцию `foot_offsets(facing, phase)`; тесты
+  `legs_move_in_counterphase_upwards_only` и `side_view_far_leg_gets_forty_percent`
+  проверяют 2.5 px, противофазу и ×0.4.
+- **Лежачий не шагает** (`CanAnimate`: `IsDown`): анимация глушится, когда
+  владелец сбит с ног.
+
+### 2. Падение от стамина-крита — `RotationVisualsComponent`
+
+- **Поворот 90° за `AnimationTime = 0.125` с** линейно (`advance_body_rotation`,
+  тест `body_rotation_takes_125_ms`: 4 шага по 1/32 с, без перелёта). Раньше
+  поворот был мгновенным рывком.
+- **Свой игрок теперь падает**: состояние `KnockedDown` приходит на
+  РЕПЛИЦИРОВАННУЮ сущность (`OwnPlayerEntity`), а локальный визуал `Player` —
+  отдельная сущность, из-за чего падение своего персонажа не рисовалось вообще.
+- **«Звёзды»** (`StunVisualLayers.StamCrit`): слой `Mobs/Effects/stunned.rsi#stunned`
+  (скопирован из сборки), offset (0, 0.3125), 8 кадров по 0.1 с
+  (`humanoid::sync_stun_stars` + `animate_stun_stars`).
+- **Звук падения** `BodyFall` (`bodyfall1..4.ogg`, скопированы):
+  `audio::knockdown_sounds` по `Added<KnockedDown>`.
+- **Выброс предметов из рук** при крите (`DropHandItemsEvent` →
+  `HandsSystem.OnDropHandItems`): сервер опустошает обе руки и кладёт предметы
+  рядом с игроком (`drop_hands_on_stam_crit`).
+- **Алерт «Knockdown»** (`stunnable.rsi#knocked-down`, скопирован) в колонке
+  алертов, пока игрок лежит (в сборке при стамина-крите — без кольца-таймера).
+- Тест-хук сервера `SSR_CRIT_TEST=<сек>` — принудительный крит через N секунд
+  после подключения (для скриншот-проверки).
+
+Проверено скриншотами: персонаж лежит повёрнутым на 90°, вокруг головы звёзды,
+выроненный лом лежит рядом, в логе `body fall sound` и
+`stamina crit: item dropped from hand`, в HUD — алерт нокдауна.
+
+### 3. Осталось по этому пункту
+
+- Ползание лежачего (`CrawlerComponent`: скорость ×0.45, трение ×0.65, доступ к
+  дверям) — у нас лежачий обездвижен полностью; вставание DoAfter 0.6/0.8/1.2 с
+  (`StandTime 1.2 × Count/(emptyHands+Count)`), форс-вставание за 10 стамины.
+- Аква-вспышка спрайта 0.30 с на каждый стамина-урон
+  (`ColorFlashEffectSystem`).
+- Алерт «Stun» с кольцом-остатком стана и разделение стан/нокдаун
+  (`StatusEffectStunned` в сборке).

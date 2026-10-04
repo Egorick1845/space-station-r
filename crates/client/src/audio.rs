@@ -22,6 +22,10 @@ pub struct Sounds {
     /// `EntityStorageComponent` сборки (`closetopen.ogg` / `closetclose.ogg`).
     closet_open: Handle<AudioSource>,
     closet_close: Handle<AudioSource>,
+    /// Падение тела: `BodyFall` = `/Audio/Effects/bodyfall1..4.ogg`
+    /// (`StandingStateComponent.DownSound`, играется в `Down()` при нокдауне,
+    /// в том числе от стамина-крита).
+    body_fall: Vec<Handle<AudioSource>>,
 }
 
 /// Заявки на разовые звуки от других систем (T5.3).
@@ -49,6 +53,12 @@ pub fn load_sounds(mut commands: Commands, assets: Res<AssetServer>) {
         punch: assets.load("sounds/ss14/boxingpunch1.ogg"),
         closet_open: assets.load("sounds/ss14/closetopen.ogg"),
         closet_close: assets.load("sounds/ss14/closetclose.ogg"),
+        body_fall: vec![
+            assets.load("sounds/ss14/Effects/bodyfall1.ogg"),
+            assets.load("sounds/ss14/Effects/bodyfall2.ogg"),
+            assets.load("sounds/ss14/Effects/bodyfall3.ogg"),
+            assets.load("sounds/ss14/Effects/bodyfall4.ogg"),
+        ],
     });
 }
 
@@ -104,6 +114,29 @@ pub fn container_sounds(
             };
             play(&mut commands, handle);
         }
+    }
+}
+
+/// Падение тела: `BodyFall` (`bodyfall1..4.ogg`) играется в сборке в `Down()`
+/// (`StandingStateSystem`), то есть при нокдауне — включая стамина-крит.
+/// Звук играется и для своего игрока, и для чужих (как в движке: `PlayPredicted`
+/// по сущности).
+pub fn knockdown_sounds(
+    mut commands: Commands,
+    sounds: Res<Sounds>,
+    knocked: Query<
+        (Entity, &ssr_core::mechanics::KnockedDown),
+        Added<ssr_core::mechanics::KnockedDown>,
+    >,
+) {
+    if sounds.body_fall.is_empty() {
+        return;
+    }
+    for (entity, _) in knocked.iter() {
+        // Случайный вариант из четырёх, как `SoundCollectionSpecifier("BodyFall")`.
+        let pick = (entity.to_bits() as usize) % sounds.body_fall.len();
+        play(&mut commands, &sounds.body_fall[pick]);
+        tracing::info!(?entity, "body fall sound");
     }
 }
 

@@ -740,7 +740,7 @@ pub fn animate_alerts(
 }
 
 /// Подпись колонки алертов: уровни Health/Stamina и алерт давления (если есть).
-type AlertsSignature = (u8, u8, Option<(bool, u8)>);
+type AlertsSignature = (u8, u8, Option<(bool, u8)>, bool);
 
 /// Рисует колонку алертов: Health (5 иконок human_alive), Stamina
 /// (7 иконок stamina) и, в опасной зоне, давление (pressure.rsi) — правый
@@ -751,6 +751,7 @@ pub fn render_alerts_column(
     own: Res<OwnPlayerEntity>,
     staminas: Query<&ssr_core::stamina::Stamina>,
     healths: Query<&ssr_core::inventory::Health>,
+    knocked: Query<&ssr_core::mechanics::KnockedDown>,
     positions: Query<&ssr_core::PlayerPosition>,
     atmospheres: Query<(
         &ssr_core::atmosphere::ChunkAtmosphere,
@@ -797,7 +798,11 @@ pub fn render_alerts_column(
     } else {
         pressure_alert
     };
-    let signature = (level_health, level_stamina, pressure_alert);
+    // Алерт «Knockdown» (`alerts.yml`: `stunnable.rsi#knocked-down`) — пока
+    // игрок лежит (нокдаун от стамина-крита или урона). В сборке при
+    // стамина-крите он показывается БЕЗ кольца-таймера.
+    let knockdown = own.0.is_some_and(|entity| knocked.get(entity).is_ok());
+    let signature = (level_health, level_stamina, pressure_alert, knockdown);
     if last.as_ref() == Some(&signature) {
         return;
     }
@@ -805,6 +810,9 @@ pub fn render_alerts_column(
         format!("sprites/ss14/Interface/Alerts/human_alive.rsi#health{level_health}"),
         format!("sprites/ss14/Interface/Alerts/stamina.rsi#stamina{level_stamina}"),
     ];
+    if knockdown {
+        icons.push("sprites/ss14/Interface/Alerts/stunnable.rsi#knocked-down".to_string());
+    }
     if let Some((high, level)) = pressure_alert {
         let side = if high { "high" } else { "low" };
         icons.push(format!(

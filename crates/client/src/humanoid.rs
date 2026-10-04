@@ -56,6 +56,26 @@ pub struct BodySpecies(pub String);
 #[derive(Component)]
 pub struct GhostLayer;
 
+/// «Звёзды» над головой при стамина-крите (`StunVisualLayers.StamCrit` в сборке:
+/// слой поверх всех, offset (0, 0.3125), RSI `Mobs/Effects/stunned.rsi#stunned`,
+/// 8 кадров по 0.1 с).
+#[derive(Component)]
+pub struct StunStars {
+    /// Владелец (визуал), к которому привязан слой.
+    pub owner: Entity,
+    /// Текущий кадр флипбука.
+    pub frame: u32,
+    /// Время в текущем кадре.
+    pub elapsed: f32,
+}
+
+/// Смещение слоя звёзд по Y (`StunSystem`: `offset (0, 0.3125)`).
+const STUN_STARS_OFFSET_Y: f32 = 0.3125;
+/// Ключ спрайта звёзд (`StunVisualsComponent`: `Mobs/Effects/stunned.rsi#stunned`).
+const STUN_STARS_KEY: &str = "sprites/ss14/Mobs/Effects/stunned.rsi#stunned";
+/// z слоя звёзд: выше всех слоёв тела и одежды (`StunVisualLayers.StamCrit`).
+const STUN_STARS_Z: f32 = 0.5;
+
 /// Ключ спрайта части тела: `Mobs/Species/<раса>/parts.rsi#<часть>`.
 fn part_key(species: &str, part: &str) -> String {
     format!("sprites/ss14/Mobs/Species/{species}/parts.rsi#{part}")
@@ -287,32 +307,75 @@ pub fn debug_body(
 }
 
 /// Лежачий игрок: тело поворачивается на 90° (падение, механики владельца).
+///
+/// В сборке это `RotationVisualsComponent` + `SharedRotationVisualsSystem`:
+/// визуал поворачивается на 90° за `AnimationTime = 0.125` с (плавно, не рывком).
+/// Важно: у СВОЕГО игрока состояние падения приходит на реплицированную
+/// сущность (`OwnPlayerEntity`), а локальный визуал `Player` — отдельная
+/// сущность, поэтому раньше падение своего персонажа не рисовалось вообще.
 pub fn update_knocked(
-    mut bodies: Query<(&KnockedDown, &mut Transform), With<crate::Player>>,
-    mut visuals: Query<(&RemotePlayerVisual, &mut Transform), Without<crate::Player>>,
+    time: Res<Time>,
+    own: Res<OwnPlayerEntity>,
     knocked: Query<&KnockedDown>,
+    mut bodies: Query<(Entity, &mut Transform), With<crate::Player>>,
+    mut visuals: Query<(Entity, &RemotePlayerVisual, &mut Transform), Without<crate::Player>>,
+    mut progress: Local<std::collections::HashMap<Entity, f32>>,
+    mut last_own: Local<bool>,
 ) {
-    for (state, mut transform) in bodies.iter_mut() {
-        let target = if state.seconds > 0.0 {
-            Quat::from_rotation_z(std::f32::consts::FRAC_PI_2)
-        } else {
-            Quat::IDENTITY
-        };
+    let dt = time.delta_secs();
+    // Свой игрок: падение определяем по реплицированной сущности.
+    let own_down = own.0.is_some_and(|entity| knocked.contains(entity));
+    if own_down != *last_own {
+        tracing::info!(own = ?own.0, own_down, "knocked state (own player)");
+        *last_own = own_down;
+    }
+    for (entity, mut transform) in bodies.iter_mut() {
+        let angle = advance_body_rotation(
+            progress.entry(entity).or_default(),
+            std::f32::consts::FRAC_PI_2,
+            own_down,
+            dt,
+        );
+        let target = Quat::from_rotation_z(angle);
         if transform.rotation != target {
             transform.rotation = target;
-            tracing::info!("body rotation updated (knocked={})", state.seconds > 0.0);
         }
     }
-    for (visual, mut transform) in visuals.iter_mut() {
-        let target = if knocked.get(visual.player).is_ok() {
-            Quat::from_rotation_z(std::f32::consts::FRAC_PI_2)
-        } else {
-            Quat::IDENTITY
-        };
+    for (entity, visual, mut transform) in visuals.iter_mut() {
+        let angle = advance_body_rotation(
+            progress.entry(entity).or_default(),
+            std::f32::consts::FRAC_PI_2,
+            knocked.contains(visual.player),
+            dt,
+        );
+        let target = Quat::from_rotation_z(angle);
         if transform.rotation != target {
             transform.rotation = target;
         }
     }
+}
+
+/// Время поворота на 90° (`RotationVisualsComponent.AnimationTime` в сборке).
+const ROTATION_TIME: f32 = 0.125;
+
+/// Ведёт угол поворота к цели со скоростью «90° за [`ROTATION_TIME`]».
+/// Возвращает текущий угол (0 — стоит, π/2 — лежит).
+fn advance_body_rotation(current: &mut f32, limit: f32, down: bool, dt: f32) -> f32 {
+    let target = if down { limit } else { 0.0 };
+    let speed = if ROTATION_TIME > 0.0 {
+        limit / ROTATION_TIME
+    } else {
+        limit
+    };
+    let step = speed * dt.max(0.0);
+    if (*current - target).abs() <= step {
+        *current = target;
+    } else if *current < target {
+        *current += step;
+    } else {
+        *current -= step;
+    }
+    *current
 }
 
 /// Фаза и прошлая позиция владельца для анимации шага.
@@ -335,6 +398,8 @@ const FOOT_MIN_SPEED_SQR: f32 = 0.04;
 const BREATHING_THRESHOLD: f32 = ssr_core::stamina::BREATHING_THRESHOLD;
 const CRIT_THRESHOLD: f32 = ssr_core::stamina::CRIT_THRESHOLD;
 const FOOT_AMPLITUDE: f32 = 2.5 / 32.0;
+/// Дальняя нога в боковых видах (`SideFarAmplitudeFactor`).
+const FOOT_FAR_AMPLITUDE_FACTOR: f32 = 0.4;
 /// Юнитов мира в тайле (скорость в сборке — метры/с, 1 тайл = 1 м).
 const TILE_UNITS: f32 = ssr_core::tiles::TILE_PX as f32;
 /// Ожидаемые скорости из `MovementSpeedModifierComponent`: ходьба и бег, м/с
@@ -346,13 +411,20 @@ const SPRINT_EXPECTED: f32 = 4.5;
 /// RSI нет — ноги и стопы поднимаются синусом от фазы, которая растёт со
 /// скоростью. Поднимается только нога/стопа (руки не анимируются — как в сборке).
 ///
-/// Отклонение: в сборке множитель берётся из флага спринта (`MoverComponent`),
-/// у нас флаг спринта пока не реплицируется, поэтому бег определяется по
-/// фактической скорости (выше базовой ходьбы). Устранится вместе с переносом
-/// спринта (PORT_PLAN 2.2) — тогда брать флаг, как в `GetStepRate`.
+/// Множитель фазы берётся из ФЛАГА спринта (`MoverComponent.Sprinting`), а не из
+/// фактической скорости: у нас это «не держит Shift» (в сборке `DefaultSprinting`
+/// = true), у остальных игроков — по реплицированному `Sprinting`/скорости.
+/// Фактическая скорость входит только через `slowFactor` (`GetStepRate`).
+#[allow(clippy::too_many_arguments)]
 pub fn foot_walk_animation(
     time: Res<Time>,
     settings: Res<crate::settings::Settings>,
+    keys: Res<ButtonInput<KeyCode>>,
+    own: Res<OwnPlayerEntity>,
+    knocked: Query<&KnockedDown>,
+    players: Query<(), With<crate::Player>>,
+    sprintings: Query<&ssr_core::mechanics::Sprinting>,
+    facings: Query<&Facing>,
     mut walk: Local<std::collections::HashMap<Entity, FootPhase>>,
     mut parts: Query<(&HumanoidPart, &mut Transform)>,
     owners: Query<&GlobalTransform, Without<HumanoidPart>>,
@@ -367,6 +439,30 @@ pub fn foot_walk_animation(
         }
         return;
     }
+    // Лежачий не шагает: в сборке анимация ног выключается вне
+    // `StandingState.Standing` (лежит/оглушён/мёртв) — `CanAnimate`.
+    let own_down = own.0.is_some_and(|entity| knocked.contains(entity));
+    let is_down = |owner: Entity| -> bool {
+        if players.get(owner).is_ok() {
+            return own_down;
+        }
+        knocked.contains(owner)
+            || visuals
+                .get(owner)
+                .is_ok_and(|visual| knocked.contains(visual.player))
+    };
+    // Спринт в сборке — «игрок не держит кнопку Walk» (`DefaultSprinting = true`).
+    let own_sprinting = !keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+    let is_sprinting = |owner: Entity| -> bool {
+        if players.get(owner).is_ok() {
+            return own_sprinting;
+        }
+        match visuals.get(owner) {
+            // Реплицированный спринт-тоггл (`SprinterComponent`) у чужого игрока.
+            Ok(visual) if sprintings.get(visual.player).is_ok_and(|flag| flag.0) => true,
+            _ => false,
+        }
+    };
     let dt = time.delta_secs();
     if dt <= 0.0 {
         return;
@@ -376,6 +472,10 @@ pub fn foot_walk_animation(
     let mut phases: std::collections::HashMap<Entity, f32> = std::collections::HashMap::new();
     for (part, _) in parts.iter() {
         if phases.contains_key(&part.owner) {
+            continue;
+        }
+        if is_down(part.owner) {
+            phases.insert(part.owner, 0.0);
             continue;
         }
         let Ok(global) = owners.get(part.owner) else {
@@ -393,7 +493,8 @@ pub fn foot_walk_animation(
             phases.insert(part.owner, 0.0);
             continue;
         }
-        let sprinting = speed_tiles > WALK_EXPECTED;
+        // Спринт — по флагу; у чужих, если флага нет, по фактической скорости.
+        let sprinting = is_sprinting(part.owner) || speed_tiles > WALK_EXPECTED;
         let expected = if sprinting {
             SPRINT_EXPECTED
         } else {
@@ -444,27 +545,154 @@ pub fn foot_walk_animation(
     }
     for (part, mut transform) in parts.iter_mut() {
         let name = part.key.rsplit('#').next().unwrap_or_default();
+        if is_down(part.owner) {
+            transform.translation.y = 0.0;
+            continue;
+        }
         let left = name.starts_with("l_leg") || name.starts_with("l_foot");
         let right = name.starts_with("r_leg") || name.starts_with("r_foot");
-        let foot = if left {
-            phases
-                .get(&part.owner)
-                .copied()
-                .map(|phase| phase.sin().max(0.0))
-                .unwrap_or(0.0)
-        } else if right {
-            phases
-                .get(&part.owner)
-                .copied()
-                .map(|phase| (phase + std::f32::consts::PI).sin().max(0.0))
-                .unwrap_or(0.0)
+        // Смещение ног по `FootWalkAnimationSystem`:
+        // leftY = max(0, sin(Phase)) × leftAmp, rightY = то же с Phase+π;
+        // дальняя нога в боковых видах — ×0.4 (`SideFarAmplitudeFactor`),
+        // East → дальняя левая, West → дальняя правая; в боковом виде обе ноги
+        // идут по nearY = (East ? rightY : leftY), в фронтальном (S/N) каждая
+        // нога по своей фазе. Смещение всегда (0, y) — по X сдвига нет.
+        let phase = phases.get(&part.owner).copied().unwrap_or(0.0);
+        let facing = facings.get(part.owner).map(|f| f.0).unwrap_or(0);
+        let (left_y, right_y, near_y) = foot_offsets(facing, phase);
+        let front = facing == 0 || facing == 1;
+        let foot = if front {
+            if left {
+                left_y
+            } else if right {
+                right_y
+            } else {
+                0.0
+            }
+        } else if left || right {
+            // Боковой вид: силуэт ног один, идёт по ближней ноге.
+            near_y
         } else {
             // Руки и прочие части в шаге не участвуют (как в сборке), но дышат
             // вместе с телом.
             0.0
         };
         let breath = breathing.get(&part.owner).copied().unwrap_or(0.0);
-        transform.translation.y = breath + foot * FOOT_AMPLITUDE;
+        transform.translation.y = breath + foot;
+    }
+}
+
+/// Смещение ног по фазе и направлению взгляда — ядро `FootWalkAnimationSystem`:
+/// `leftY = max(0, sin(Phase)) * leftAmp`, `rightY` — тот же синус с `+ PI`
+/// (строгая противофаза, подъём только вверх); дальняя нога в боковом виде
+/// получает `SideFarAmplitudeFactor = 0.4` (East — дальняя левая, West — правая);
+/// `nearY` — ближняя нога (`East ? rightY : leftY`), по ней идут обе ноги в боку.
+/// Возвращает `(leftY, rightY, nearY)`.
+pub(crate) fn foot_offsets(facing: u32, phase: f32) -> (f32, f32, f32) {
+    let mut left_amp = FOOT_AMPLITUDE;
+    let mut right_amp = FOOT_AMPLITUDE;
+    if facing == 2 {
+        left_amp *= FOOT_FAR_AMPLITUDE_FACTOR;
+    } else if facing == 3 {
+        right_amp *= FOOT_FAR_AMPLITUDE_FACTOR;
+    }
+    let left_y = phase.sin().max(0.0) * left_amp;
+    let right_y = (phase + std::f32::consts::PI).sin().max(0.0) * right_amp;
+    let near_y = if facing == 2 { right_y } else { left_y };
+    (left_y, right_y, near_y)
+}
+
+/// Появление/исчезновение слоя «звёзд» при стамина-крите. В сборке это
+/// `StunSystem` (клиент): слой `StunVisualLayers.StamCrit` включается, когда у
+/// сущности есть `SeeingStars` (ставится при стамина-крите), и выключается при
+/// снятии стана. У нас признак — реплицированный `KnockedDown`.
+pub fn sync_stun_stars(
+    mut commands: Commands,
+    registry: Res<RsiRegistry>,
+    own: Res<OwnPlayerEntity>,
+    knocked: Query<&KnockedDown>,
+    players: Query<Entity, With<crate::Player>>,
+    visuals: Query<(Entity, &RemotePlayerVisual)>,
+    stars: Query<(Entity, &StunStars)>,
+) {
+    // Кому положены звёзды: свой игрок — по реплицированной сущности,
+    // остальные — по `RemotePlayerVisual.player`.
+    let own_down = own.0.is_some_and(|entity| knocked.contains(entity));
+    let mut wanted: Vec<Entity> = Vec::new();
+    for entity in players.iter() {
+        if own_down {
+            wanted.push(entity);
+        }
+    }
+    for (entity, visual) in visuals.iter() {
+        if knocked.contains(visual.player) {
+            wanted.push(entity);
+        }
+    }
+    // Убираем звёзды у тех, кто уже не лежит.
+    for (entity, star) in stars.iter() {
+        if !wanted.contains(&star.owner) {
+            commands.entity(entity).despawn();
+        }
+    }
+    let existing: Vec<Entity> = stars.iter().map(|(_, star)| star.owner).collect();
+    let Some(sprite) = registry.get(STUN_STARS_KEY) else {
+        return;
+    };
+    for owner in wanted {
+        if existing.contains(&owner) {
+            continue;
+        }
+        let mut component = Sprite::from_image(sprite.image.clone());
+        component.texture_atlas = Some(TextureAtlas {
+            layout: sprite.layout.clone(),
+            index: sprite.index(0, 0),
+        });
+        commands.entity(owner).with_children(|parent| {
+            parent.spawn((
+                StunStars {
+                    owner,
+                    frame: 0,
+                    elapsed: 0.0,
+                },
+                component,
+                Transform::from_xyz(0.0, STUN_STARS_OFFSET_Y, STUN_STARS_Z),
+            ));
+        });
+    }
+}
+
+/// Флипбук «звёзд»: кадры по `delays` RSI (в `stunned.rsi` — 8 кадров по 0.1 с).
+pub fn animate_stun_stars(
+    time: Res<Time>,
+    registry: Res<RsiRegistry>,
+    mut stars: Query<(&mut StunStars, &mut Sprite)>,
+) {
+    if stars.is_empty() {
+        return;
+    }
+    let dt = time.delta_secs();
+    let Some(sprite) = registry.get(STUN_STARS_KEY) else {
+        return;
+    };
+    let frames = sprite
+        .frames_per_direction
+        .first()
+        .copied()
+        .unwrap_or(1)
+        .max(1);
+    for (mut star, mut image) in stars.iter_mut() {
+        star.elapsed += dt;
+        let delays = sprite.delays.first().map(Vec::as_slice).unwrap_or(&[]);
+        let (elapsed, frame) =
+            crate::hud::advance_alert_frame(star.elapsed, star.frame, delays, frames);
+        star.elapsed = elapsed;
+        if frame != star.frame {
+            star.frame = frame;
+            if let Some(atlas) = image.texture_atlas.as_mut() {
+                atlas.index = sprite.index(0, frame);
+            }
+        }
     }
 }
 
@@ -706,5 +934,83 @@ pub fn sync_worn_clothes(
             spawned,
             "worn clothes updated"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Амплитуда подъёма ноги — `2.5 / 32` юнита (2.5 px при 32 px на тайл).
+    fn amp() -> f32 {
+        2.5 / 32.0
+    }
+
+    /// Ноги строго в противофазе и поднимаются ТОЛЬКО вверх (фронтальный вид).
+    #[test]
+    fn legs_move_in_counterphase_upwards_only() {
+        let half_pi = std::f32::consts::FRAC_PI_2;
+        // Phase = π/2: левая нога вверху, правая на месте.
+        let (left, right, _) = foot_offsets(0, half_pi);
+        assert!((left - amp()).abs() < 1e-6, "левая на полной амплитуде");
+        assert!(right.abs() < 1e-6, "правая внизу");
+        // Phase = 3π/2: наоборот.
+        let (left, right, _) = foot_offsets(0, 3.0 * half_pi);
+        assert!(left.abs() < 1e-6, "левая внизу");
+        assert!((right - amp()).abs() < 1e-6, "правая на полной амплитуде");
+        // Отрицательная полуволна синуса не опускает ногу ниже базы.
+        let (left, right, _) = foot_offsets(0, 1.5 * std::f32::consts::PI * 1.5);
+        assert!(left >= 0.0 && right >= 0.0, "смещение только вверх");
+    }
+
+    /// Дальняя нога в боковом виде получает ×0.4 (`SideFarAmplitudeFactor`):
+    /// East (2) — дальняя левая, West (3) — дальняя правая.
+    #[test]
+    fn side_view_far_leg_gets_forty_percent() {
+        let half_pi = std::f32::consts::FRAC_PI_2;
+        let (left, _, _) = foot_offsets(2, half_pi);
+        assert!(
+            (left - amp() * FOOT_FAR_AMPLITUDE_FACTOR).abs() < 1e-6,
+            "East: левая (дальняя) = 0.4 амплитуды, получено {left}"
+        );
+        // В боку обе ноги идут по ближней: East — по правой.
+        let (_, right, near_east) = foot_offsets(2, 3.0 * half_pi);
+        assert!((right - amp()).abs() < 1e-6);
+        assert!(
+            (near_east - right).abs() < 1e-6,
+            "East: nearY — правая (ближняя)"
+        );
+        // West (3): дальняя правая — она поднимается на фазе 3π/2.
+        let (left_w, right_w, near_west) = foot_offsets(3, 3.0 * half_pi);
+        assert!(
+            (right_w - amp() * FOOT_FAR_AMPLITUDE_FACTOR).abs() < 1e-6,
+            "West: правая (дальняя) = 0.4 амплитуды, получено {right_w}"
+        );
+        assert!(
+            (near_west - left_w).abs() < 1e-6,
+            "West: nearY — левая (ближняя), получено {near_west}"
+        );
+    }
+
+    /// Поворот при падении идёт ровно 0.125 с (`RotationVisualsComponent`),
+    /// то есть 90° за 4 кадра по 1/32 с, и без перелёта.
+    #[test]
+    fn body_rotation_takes_125_ms() {
+        let mut angle = 0.0;
+        let dt = 0.03125;
+        let limit = std::f32::consts::FRAC_PI_2;
+        let mut steps = 0;
+        while angle < limit && steps < 100 {
+            advance_body_rotation(&mut angle, limit, true, dt);
+            steps += 1;
+        }
+        assert_eq!(steps, 4, "90° за 4 шага по 1/32 с = 0.125 с");
+        assert!((angle - limit).abs() < 1e-6, "остановился точно на 90°");
+        // Обратно — тоже 0.125 с.
+        while angle > 0.0 && steps < 100 {
+            advance_body_rotation(&mut angle, limit, false, dt);
+            steps += 1;
+        }
+        assert!(angle.abs() < 1e-6, "встал обратно");
     }
 }
