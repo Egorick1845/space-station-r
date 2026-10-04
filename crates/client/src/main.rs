@@ -29,6 +29,7 @@ mod doors;
 mod hud;
 mod humanoid;
 mod inventory_ui;
+mod light_gpu;
 mod lighting;
 mod lobby;
 mod power_view;
@@ -167,6 +168,8 @@ fn main() {
     );
     // Текстуры интерфейса SS14 (слоты, Storage, Nano-кнопки) — сразу на старте.
     app.add_systems(Startup, ui_theme::load_ui_theme);
+    // Текстуры GPU-конвейера света (карты теней/FOV/света) — один раз на старте.
+    app.add_systems(Startup, light_gpu::setup_light_gpu);
     // FPS-диагностика нужна строке FPS в углу (включается в настройках).
     app.add_plugins(bevy::diagnostic::FrameTimeDiagnosticsPlugin::default());
     // RsiRegistry строится сразу после DefaultPlugins: нужен и игроку (обезьяна),
