@@ -100,7 +100,9 @@ pub fn attach_body(
         }
     });
     if attached == 0 {
-        tracing::warn!(species, "humanoid parts missing — раса не в STARTUP_RSI?");
+        // Норма на первом кадре при ленивой загрузке: спрайты ещё не пришли,
+        // вызов повторится (см. sync_bodies). Ошибка загрузки логируется в rsi.rs.
+        tracing::debug!(species, "humanoid parts not loaded yet");
     }
     attached
 }
@@ -155,6 +157,11 @@ pub fn sync_bodies(
             }
             detach_body(&mut commands, &children, player_entity);
             let parts = attach_body(&mut commands, &registry, player_entity, &species_id);
+            // Спрайты грузятся лениво (T5.3): пока частей не хватает — не
+            // помечаем тело собранным, на следующем кадре попробуем снова.
+            if parts < PARTS.len() {
+                continue;
+            }
             commands
                 .entity(player_entity)
                 .insert(BodySpecies(species_id.clone()));
@@ -174,6 +181,9 @@ pub fn sync_bodies(
         }
         detach_body(&mut commands, &children, visual_entity);
         let parts = attach_body(&mut commands, &registry, visual_entity, &species_id);
+        if parts < PARTS.len() {
+            continue;
+        }
         commands
             .entity(visual_entity)
             .insert(BodySpecies(species_id.clone()));

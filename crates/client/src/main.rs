@@ -101,6 +101,9 @@ fn main() {
     app.init_resource::<settings::Settings>();
     app.init_resource::<doors::DeniedDoors>();
     app.init_resource::<crafting::CraftingState>();
+    app.init_resource::<audio::SoundRequests>();
+    // Ленивая подгрузка RSI (T5.3): обрабатываем заявки из реестра каждый кадр.
+    app.add_systems(Update, rsi::load_requested_rsi);
     // FPS-диагностика нужна строке FPS в углу (включается в настройках).
     app.add_plugins(bevy::diagnostic::FrameTimeDiagnosticsPlugin::default());
     // RsiRegistry строится сразу после DefaultPlugins: нужен и игроку (обезьяна),
@@ -154,6 +157,8 @@ fn main() {
             audio::door_sounds,
             audio::damage_sound,
             audio::build_sound,
+            audio::footsteps,
+            audio::play_requested_sounds,
             settings::apply_volume,
             settings::toggle_settings_menu,
             settings::settings_click,
@@ -468,6 +473,7 @@ fn receive_server(
     mut player_entity: ResMut<PlayerEntity>,
     mut menu: ResMut<inventory_ui::ActionMenu>,
     mut denied: ResMut<doors::DeniedDoors>,
+    mut sounds: ResMut<audio::SoundRequests>,
 ) {
     for mut receiver in receivers.iter_mut() {
         for message in receiver.receive() {
@@ -482,6 +488,7 @@ fn receive_server(
                             denied.0.push(bits);
                             tracing::info!(bits, "door denied event");
                         }
+                        None if kind == "hit" => sounds.punch += 1,
                         None => tracing::info!(kind, "server event"),
                     }
                 }

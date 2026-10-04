@@ -45,7 +45,7 @@ pub struct ContainerSlot {
 }
 
 /// Состояние панели ящика для сравнения при перерисовке.
-type PanelSignature = Option<(Option<Entity>, Vec<Option<u64>>)>;
+type PanelSignature = Option<(Option<Entity>, Vec<Option<u64>>, u32)>;
 /// Клик по слоту ящика.
 type ContainerSlotClicks<'w, 's> = Query<
     'w,
@@ -175,7 +175,7 @@ pub fn render_container_panel(
         }
         None => (None, Vec::new()),
     };
-    let signature = (container_entity, slots.clone());
+    let signature = (container_entity, slots.clone(), sprites.generation());
     if last.as_ref() == Some(&signature) {
         return;
     }

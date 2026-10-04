@@ -310,6 +310,11 @@ pub struct ItemSprites<'w, 's> {
 }
 
 impl ItemSprites<'_, '_> {
+    /// Поколение реестра RSI: меняется, когда подгрузились новые спрайты (T5.3).
+    pub fn generation(&self) -> u32 {
+        self.registry.generation()
+    }
+
     /// Иконка предмета по bits его сущности (None — предмет неизвестен).
     pub fn icon(&self, bits: u64) -> Option<&RsiSprite> {
         let name = Entity::try_from_bits(bits)
@@ -387,15 +392,16 @@ pub fn render_inventory_panel(
     inventories: Query<&Inventory>,
     positions: Res<windows::WindowPositions>,
     root: Query<Entity, With<InventoryPanel>>,
-    mut last: Local<Option<Vec<Option<u64>>>>,
+    mut last: Local<Option<(Vec<Option<u64>>, u32)>>,
 ) {
     let Some(inventory) = own_inventory(&own, &inventories) else {
         return;
     };
-    if last.as_ref() == Some(&inventory.cells) {
+    let signature = (inventory.cells.clone(), sprites.generation());
+    if last.as_ref() == Some(&signature) {
         return;
     }
-    *last = Some(inventory.cells.clone());
+    *last = Some(signature);
     tracing::info!(
         items = inventory.cells.iter().flatten().count(),
         "inventory updated"

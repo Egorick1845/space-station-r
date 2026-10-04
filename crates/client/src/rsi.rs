@@ -44,108 +44,159 @@ impl RsiSprite {
     }
 }
 
-/// Реестр загруженных RSI-состояний.
-#[derive(Resource, Default)]
+/// Реестр RSI: грузится ЛЕНИВО (PLAN.md T5.3) — в assets 2500+ RSI из сборки,
+/// поэтому набор состояния подгружается при первом обращении к нему.
+#[derive(Resource)]
 pub struct RsiRegistry {
+    root: std::path::PathBuf,
     sprites: HashMap<RsiKey, RsiSprite>,
+    /// Заявки на подгрузку папок RSI (`sprites/ss14/...rsi`), из `get`.
+    pending: std::sync::Mutex<Vec<String>>,
+    /// Счётчик загрузок: потребители по нему перерисовывают UI (T5.3).
+    generation: u32,
 }
 
-impl RsiRegistry {
-    pub fn get(&self, key: &str) -> Option<&RsiSprite> {
-        self.sprites.get(key)
+impl Default for RsiRegistry {
+    fn default() -> Self {
+        Self {
+            root: std::path::PathBuf::new(),
+            sprites: HashMap::new(),
+            pending: std::sync::Mutex::new(Vec::new()),
+            generation: 0,
+        }
     }
 }
 
-/// RSI-наборы, которые грузятся при старте. В assets лежат 2500+ RSI из сборки,
-/// грузить их все нельзя — расширяем список по мере использования (ленивая
-/// загрузка по требованию — отдельная задача, T5.3).
+impl RsiRegistry {
+    /// Реестр с корнем ассетов (`assets/sprites/ss14`).
+    pub fn new(root: &Path) -> Self {
+        Self {
+            root: root.to_path_buf(),
+            ..default()
+        }
+    }
+
+    /// Сколько раз подгружались спрайты: потребители по изменению числа
+    /// перерисовывают UI (иконка могла появиться позже первого кадра).
+    pub fn generation(&self) -> u32 {
+        self.generation
+    }
+
+    /// Спрайт состояния. Если RSI ещё не загружен — ставит его в очередь и
+    /// возвращает None: спрайт появится через несколько кадров (T5.3).
+    pub fn get(&self, key: &str) -> Option<&RsiSprite> {
+        if let Some(sprite) = self.sprites.get(key) {
+            return Some(sprite);
+        }
+        let folder = key.split('#').next()?;
+        if let Ok(mut pending) = self.pending.lock()
+            && !pending.iter().any(|item| item == folder)
+        {
+            pending.push(folder.to_string());
+        }
+        None
+    }
+
+    /// Загружает одну папку RSI (вызывается системой подгрузки).
+    fn load_folder(
+        &mut self,
+        folder: &str,
+        images: &mut Assets<Image>,
+        layouts: &mut Assets<TextureAtlasLayout>,
+    ) -> usize {
+        let Some(relative) = folder.strip_prefix("sprites/ss14/") else {
+            return 0;
+        };
+        let dir = self
+            .root
+            .join(relative.replace('/', std::path::MAIN_SEPARATOR_STR));
+        let Ok(rsi) = rsi::load_rsi(&dir) else {
+            tracing::warn!(path = %dir.display(), "rsi load failed");
+            return 0;
+        };
+        let prefix = format!("sprites/ss14/{relative}");
+        let mut loaded = 0;
+        for state in &rsi.states {
+            let key = format!("{prefix}#{}", state.name);
+            if self.sprites.contains_key(&key) {
+                continue;
+            }
+            let (image, layout) = upload_state(&rsi, state, images, layouts);
+            self.sprites.insert(
+                key,
+                RsiSprite {
+                    image,
+                    layout,
+                    directions: state.directions,
+                    frames_per_direction: state.frames_per_direction.clone(),
+                    delays: state.delays.clone(),
+                },
+            );
+            loaded += 1;
+        }
+        loaded
+    }
+}
+
+/// Система ленивой подгрузки: обрабатывает заявки из [`RsiRegistry::get`].
+/// За кадр грузится не больше [`RSI_BUDGET_PER_FRAME`] папок (без фризов).
+pub fn load_requested_rsi(
+    mut registry: ResMut<RsiRegistry>,
+    mut images: ResMut<Assets<Image>>,
+    mut layouts: ResMut<Assets<TextureAtlasLayout>>,
+) {
+    let requests: Vec<String> = match registry.pending.lock() {
+        Ok(mut pending) => std::mem::take(&mut pending),
+        Err(_) => return,
+    };
+    if requests.is_empty() {
+        return;
+    }
+    let mut remaining = Vec::new();
+    for (index, folder) in requests.into_iter().enumerate() {
+        if index >= RSI_BUDGET_PER_FRAME {
+            remaining.push(folder);
+            continue;
+        }
+        let states = registry.load_folder(&folder, &mut images, &mut layouts);
+        if states > 0 {
+            registry.generation += 1;
+            tracing::debug!(folder = %folder, states, "rsi loaded lazily");
+        }
+    }
+    if !remaining.is_empty()
+        && let Ok(mut pending) = registry.pending.lock()
+    {
+        pending.extend(remaining);
+    }
+}
+
+/// Структурные RSI, которые нужны в первом же кадре (комната, двери, ящики,
+/// проводка): остальное подгружается лениво по обращению (T5.3).
 pub const STARTUP_RSI: &[&str] = &[
-    "Mobs/Ghosts/ghost_human.rsi",
-    "Objects/Tools/crowbar.rsi",
-    // Листы металла (T5.3): иконка и inhand для SteelSheet.
-    "Objects/Materials/Sheets/metal.rsi",
     "Structures/Walls/solid.rsi",
     "Structures/Doors/Airlocks/Standard/basic.rsi",
-    // Анимированный фон лобби мини-станции (64 кадра).
-    "_Mini/Lobby/mars.rsi",
-    // Ящик-контейнер (T3.4): состояния base/closed/open.
     "Structures/Storage/Crates/generic.rsi",
-    // Глаза гуманоида (отдельный слой поверх головы, как в SS14).
-    "Mobs/Customization/eyes.rsi",
-    // Предметы каталога (T5.2): иконки и «в руке».
-    "Clothing/Back/Backpacks/backpack.rsi",
-    "Objects/Consumable/Drinks/beer.rsi",
-    "Objects/Consumable/Drinks/cola.rsi",
-    "Objects/Consumable/Drinks/waterbottle.rsi",
-    "Objects/Consumable/Food/Baked/bread.rsi",
-    "Objects/Consumable/Smokeables/Cigarettes/cigarette.rsi",
-    "Objects/Materials/Sheets/glass.rsi",
-    "Objects/Materials/Sheets/metal.rsi",
-    "Objects/Materials/Sheets/other.rsi",
-    "Objects/Materials/ingots.rsi",
-    "Objects/Materials/ore.rsi",
-    "Objects/Materials/parts.rsi",
-    "Objects/Misc/bureaucracy.rsi",
-    "Objects/Misc/pens.rsi",
-    "Objects/Specific/Medical/firstaidkits.rsi",
-    "Objects/Tools/Toolboxes/toolbox_red.rsi",
-    "Objects/Tools/cable-coils.rsi",
-    "Objects/Tools/crowbar.rsi",
-    "Objects/Tools/flashlight.rsi",
-    "Objects/Tools/multitool.rsi",
-    "Objects/Tools/screwdriver.rsi",
-    "Objects/Tools/shovel.rsi",
-    "Objects/Tools/welder.rsi",
-    "Objects/Tools/wirecutters.rsi",
-    "Objects/Tools/wrench.rsi",
-    "Objects/Weapons/Melee/combat_knife.rsi",
-    "Objects/Weapons/Melee/kitchen_knife.rsi",
-    // Электрика (T4.4): кабели, генератор, лампа.
+    "_Mini/Lobby/mars.rsi",
     "Structures/Power/Cables/lv_cable.rsi",
     "Structures/Power/Generation/portable_generator.rsi",
     "Structures/Wallmounts/Lighting/light_tube.rsi",
-    // Тела рас (T5.3): части гуманоидов, собираются в humanoid.rs.
-    "Mobs/Species/Human/parts.rsi",
-    "Mobs/Species/Skeleton/parts.rsi",
-    "Mobs/Species/Arachnid/parts.rsi",
-    "Mobs/Species/Diona/parts.rsi",
-    "Mobs/Species/Gingerbread/parts.rsi",
-    "Mobs/Species/Moth/parts.rsi",
-    "Mobs/Species/Reptilian/parts.rsi",
-    "Mobs/Species/Slime/parts.rsi",
-    "Mobs/Species/Vox/parts.rsi",
 ];
 
-/// Загружает RSI из [`STARTUP_RSI`] и строит реестр.
+/// Сколько папок RSI подгружаем за кадр (ленивая загрузка).
+const RSI_BUDGET_PER_FRAME: usize = 3;
+
+/// Загружает структурные RSI из [`STARTUP_RSI`] (остальное — лениво).
 pub fn build_registry(
     images: &mut Assets<Image>,
     layouts: &mut Assets<TextureAtlasLayout>,
     root: &Path,
 ) -> RsiRegistry {
-    let mut registry = RsiRegistry::default();
-
+    let mut registry = RsiRegistry::new(root);
     for relative in STARTUP_RSI {
-        let dir = root.join(relative.replace('/', std::path::MAIN_SEPARATOR_STR));
-        let Ok(rsi) = rsi::load_rsi(&dir) else {
-            tracing::warn!(path = %dir.display(), "rsi load failed");
-            continue;
-        };
-        let prefix = format!("sprites/ss14/{relative}");
-
-        for state in &rsi.states {
-            let key = format!("{prefix}#{}", state.name);
-            let (image, layout) = upload_state(&rsi, state, images, layouts);
-            let sprite = RsiSprite {
-                image,
-                layout,
-                directions: state.directions,
-                frames_per_direction: state.frames_per_direction.clone(),
-                delays: state.delays.clone(),
-            };
-            registry.sprites.insert(key, sprite);
-        }
+        let folder = format!("sprites/ss14/{relative}");
+        registry.load_folder(&folder, images, layouts);
     }
-
     registry
 }
 

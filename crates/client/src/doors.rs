@@ -74,6 +74,7 @@ pub struct DeniedDoors(pub Vec<u64>);
 pub fn apply_denied_doors(
     mut denied: ResMut<DeniedDoors>,
     entity_map: Option<Res<ServerEntityMap>>,
+    mut sounds: ResMut<crate::audio::SoundRequests>,
     mut visuals: Query<&mut DoorVisual>,
 ) {
     if denied.0.is_empty() {
@@ -96,6 +97,7 @@ pub fn apply_denied_doors(
                     frame: 0,
                     elapsed: 0.0,
                 };
+                sounds.deny += 1;
                 tracing::info!(door = ?visual.door, "access denied: red light");
             }
         }

@@ -1991,6 +1991,18 @@ fn process_actions(
                         weapon,
                     },
                 });
+                // Атакующему — подтверждение удара (звук попадания, T5.3).
+                if let Some(link) = players
+                    .entries
+                    .iter()
+                    .find(|entry| entry.player == player)
+                    .map(|entry| entry.link)
+                    && let Ok(mut sender) = senders.get_mut(link)
+                {
+                    sender.send::<GameChannel>(ServerMessage::Event {
+                        kind: "hit".to_string(),
+                    });
+                }
             }
             ActionKind::Interact { entity } => {
                 let Some(target) = Entity::try_from_bits(entity) else {
