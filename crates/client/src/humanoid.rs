@@ -5,6 +5,7 @@
 //! Свой игрок и другие игроки рисуются одинаково: сущность-визуал носит
 //! [`Facing`], части тела — её дети ([`HumanoidPart`]).
 
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use ssr_core::Species;
 
@@ -47,7 +48,13 @@ fn part_key(species: &str, part: &str) -> String {
 }
 
 /// Собирает тело расы детьми сущности-визуала (родитель носит [`Facing`]).
-pub fn attach_body(commands: &mut Commands, registry: &RsiRegistry, owner: Entity, species: &str) {
+/// Возвращает число прикреплённых частей (0 — спрайты расы не найдены).
+pub fn attach_body(
+    commands: &mut Commands,
+    registry: &RsiRegistry,
+    owner: Entity,
+    species: &str,
+) -> usize {
     let mut attached = 0usize;
     commands.entity(owner).with_children(|parent| {
         for (part, z) in PARTS {
@@ -71,6 +78,28 @@ pub fn attach_body(commands: &mut Commands, registry: &RsiRegistry, owner: Entit
     if attached == 0 {
         tracing::warn!(species, "humanoid parts missing — раса не в STARTUP_RSI?");
     }
+    attached
+}
+
+/// Снимает старые части тела перед пересборкой. Дети удаляются поштучно:
+/// `despawn_related` паникует, если сущность уже удалена в этом же кадре
+/// (например, дубль своего игрока убирает `sync_remote_players`).
+fn detach_body(commands: &mut Commands, children: &Query<&Children>, owner: Entity) {
+    let Ok(list) = children.get(owner) else {
+        return;
+    };
+    for child in list.iter() {
+        commands.entity(child).despawn();
+    }
+}
+
+/// Запросы сущностей для сборки тел (сокращает число аргументов системы).
+#[derive(SystemParam)]
+pub struct BodyQueries<'w, 's> {
+    pub players: Query<'w, 's, Entity, With<crate::Player>>,
+    pub visuals: Query<'w, 's, (Entity, &'static RemotePlayerVisual)>,
+    pub bodies: Query<'w, 's, &'static BodySpecies>,
+    pub children: Query<'w, 's, &'static Children>,
 }
 
 /// Собирает/пересобирает тела, когда раса появилась или сменилась.
@@ -79,10 +108,14 @@ pub fn sync_bodies(
     registry: Res<RsiRegistry>,
     own: Res<OwnPlayerEntity>,
     species: Query<&Species>,
-    players: Query<Entity, With<crate::Player>>,
-    visuals: Query<(Entity, &RemotePlayerVisual)>,
-    bodies: Query<&BodySpecies>,
+    q: BodyQueries,
 ) {
+    let BodyQueries {
+        players,
+        visuals,
+        bodies,
+        children,
+    } = q;
     let species_of = |entity: Entity| {
         species
             .get(entity)
@@ -96,26 +129,31 @@ pub fn sync_bodies(
             if bodies.get(player_entity).ok().map(|b| b.0.as_str()) == Some(species_id.as_str()) {
                 continue;
             }
-            commands.entity(player_entity).despawn_related::<Children>();
-            attach_body(&mut commands, &registry, player_entity, &species_id);
+            detach_body(&mut commands, &children, player_entity);
+            let parts = attach_body(&mut commands, &registry, player_entity, &species_id);
             commands
                 .entity(player_entity)
                 .insert(BodySpecies(species_id.clone()));
-            tracing::info!(species = %species_id, "player body attached");
+            tracing::info!(species = %species_id, parts, "player body attached");
         }
     }
 
     for (visual_entity, visual) in visuals.iter() {
+        // Свой игрок рисуется отдельным визуалом Player: его дубль убирает
+        // sync_remote_players — здесь тело ему собирать не нужно.
+        if Some(visual.player) == own.0 {
+            continue;
+        }
         let species_id = species_of(visual.player);
         if bodies.get(visual_entity).ok().map(|b| b.0.as_str()) == Some(species_id.as_str()) {
             continue;
         }
-        commands.entity(visual_entity).despawn_related::<Children>();
-        attach_body(&mut commands, &registry, visual_entity, &species_id);
+        detach_body(&mut commands, &children, visual_entity);
+        let parts = attach_body(&mut commands, &registry, visual_entity, &species_id);
         commands
             .entity(visual_entity)
             .insert(BodySpecies(species_id.clone()));
-        tracing::info!(player = ?visual.player, species = %species_id, "remote body attached");
+        tracing::info!(player = ?visual.player, species = %species_id, parts, "remote body attached");
     }
 }
 

@@ -174,6 +174,7 @@ fn main() {
             inventory_ui::spawn_health_hud,
             inventory_ui::update_health_hud,
             inventory_ui::update_role_hud,
+            inventory_ui::update_atmos_hud,
             inventory_ui::render_action_menu,
             inventory_ui::inventory_slot_click,
             inventory_ui::hands_ui_click,
@@ -241,6 +242,9 @@ fn main() {
     app.component::<ssr_core::roles::PlayerRole>().replicate();
     // Расы (T5.3). Тот же порядок, что у сервера!
     app.component::<ssr_core::Species>().replicate();
+    // Атмосфера (T4.3). Тот же порядок, что у сервера!
+    app.component::<ssr_core::atmosphere::ChunkAtmosphere>()
+        .replicate();
     app.run();
 }
 

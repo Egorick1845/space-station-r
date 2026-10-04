@@ -535,6 +535,10 @@ pub struct HealthHudText;
 #[derive(Component)]
 pub struct RoleHudText;
 
+/// Строка атмосферы в HUD (T4.3): давление и кислород тайла под игроком.
+#[derive(Component)]
+pub struct AtmosHudText;
+
 /// Создаёт HUD (здоровье + роль) один раз, когда свой игрок появился.
 pub fn spawn_health_hud(
     mut commands: Commands,
@@ -573,7 +577,67 @@ pub fn spawn_health_hud(
                 TextFont::from_font_size(13.0),
                 TextColor(Color::srgb(0.80, 0.80, 0.84)),
             ));
+            panel.spawn((
+                AtmosHudText,
+                Text::new("Атм: —"),
+                TextFont::from_font_size(13.0),
+                TextColor(Color::srgb(0.75, 0.85, 0.75)),
+            ));
         });
+}
+
+/// Показывает атмосферу тайла под своим игроком (T4.3): давление и кислород,
+/// красным — когда дышать нечем.
+pub fn update_atmos_hud(
+    own: Res<OwnPlayerEntity>,
+    positions: Query<&PlayerPosition>,
+    atmospheres: Query<&ssr_core::atmosphere::ChunkAtmosphere>,
+    mut texts: Query<(&mut Text, &mut TextColor), With<AtmosHudText>>,
+) {
+    let Some(entity) = own.0 else {
+        return;
+    };
+    let Ok(position) = positions.get(entity) else {
+        return;
+    };
+    let tiles = ssr_core::tiles::CHUNK_TILES as i32;
+    let tx = (position.0[0] / TILE_UNITS).floor() as i32;
+    let ty = (position.0[1] / TILE_UNITS).floor() as i32;
+    let chunk = (tx.div_euclid(tiles), ty.div_euclid(tiles));
+    let gas = atmospheres
+        .iter()
+        .find(|atmosphere| atmosphere.coords == chunk)
+        .and_then(|atmosphere| {
+            atmosphere.at((tx - chunk.0 * tiles) as u32, (ty - chunk.1 * tiles) as u32)
+        });
+    let (value, color) = match gas {
+        Some(gas) if gas.is_breathable() => (
+            format!(
+                "Атм: {:.0} кПа · O₂ {:.0}%",
+                gas.pressure,
+                gas.oxygen * 100.0
+            ),
+            Color::srgb(0.75, 0.85, 0.75),
+        ),
+        Some(gas) => (
+            format!(
+                "Атм: {:.0} кПа · O₂ {:.0}% ⚠",
+                gas.pressure,
+                gas.oxygen * 100.0
+            ),
+            Color::srgb(0.95, 0.45, 0.35),
+        ),
+        None => ("Атм: —".to_string(), Color::srgb(0.60, 0.60, 0.62)),
+    };
+    for (mut text, mut text_color) in &mut texts {
+        if text.0 != value {
+            text.0 = value.clone();
+            tracing::info!(atmosphere = %value, "atmosphere hud updated");
+        }
+        if text_color.0 != color {
+            text_color.0 = color;
+        }
+    }
 }
 
 /// Показывает роль своего игрока (T4.2): у антагониста — ещё и цель.

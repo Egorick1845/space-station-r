@@ -19,6 +19,7 @@ use bevy::prelude::*;
 use lightyear::connection::server::Start;
 use lightyear::prelude::server::*;
 use lightyear::prelude::*;
+use ssr_core::atmosphere::{ChunkAtmosphere, Gas};
 use ssr_core::inventory::{
     Container, Hands, Health, HeldBy, Inventory, Item, ItemPosition, SLOT_ANY,
 };
@@ -91,6 +92,7 @@ fn main() {
     app.init_resource::<ActionQueue>();
     app.init_resource::<GameRoles>();
     app.init_resource::<RoleCursor>();
+    app.init_resource::<Atmospheres>();
     app.add_systems(Startup, startup);
     app.add_systems(
         Startup,
@@ -98,6 +100,7 @@ fn main() {
             check_prototypes,
             load_roles,
             load_map,
+            init_atmosphere,
             spawn_walls,
             spawn_containers,
             spawn_load_test,
@@ -119,6 +122,12 @@ fn main() {
             update_client_rooms,
             log_player_position,
             damage_test,
+            // Атмосфера (T4.3): диффузия, урон от разгерметизации, тесты.
+            simulate_atmosphere,
+            suffocation,
+            breach_test,
+            vacuum_test,
+            log_atmosphere,
         ),
     );
     app.add_observer(on_link_connected);
@@ -143,6 +152,8 @@ fn main() {
     app.component::<PlayerRole>().replicate();
     // Расы (T5.3). Тот же порядок, что у клиента!
     app.component::<Species>().replicate();
+    // Атмосфера (T4.3). Тот же порядок, что у клиента!
+    app.component::<ChunkAtmosphere>().replicate();
     app.run();
 }
 
@@ -247,9 +258,404 @@ struct SpawnCursor(usize);
 #[derive(Resource, Default)]
 struct GameRoles(RoleSet);
 
+/// Шаг симуляции атмосферы, секунды (T4.3): 5 раз в секунду достаточно.
+const ATMOS_STEP_SECS: f32 = 0.2;
+/// Доля выравнивания давления между соседними тайлами за шаг.
+/// Внимание: явная схема с 4 соседями устойчива только при K <= 0.25.
+const DIFFUSION_K: f32 = 0.2;
+
+/// Атмосфера мира (T4.3, lite): единая сетка газа по тайлам карты.
+/// Хранится плоско (мир маленький), а клиенту отдаётся по чанкам
+/// реплицируемыми компонентами [`ChunkAtmosphere`].
+#[derive(Resource, Default)]
+struct Atmospheres {
+    /// Левый нижний тайл сетки.
+    min: (i32, i32),
+    /// Размер сетки в тайлах.
+    size: (usize, usize),
+    /// Газ по тайлам: индекс = y * width + x.
+    gas: Vec<Gas>,
+    /// Типы тайлов (правила обмена: стена не пропускает, космос — сток).
+    tiles: Vec<TileType>,
+    /// (координаты чанка) → сущность реплицируемой атмосферы.
+    entities: HashMap<(i32, i32), Entity>,
+}
+
+impl Atmospheres {
+    fn index(&self, tx: i32, ty: i32) -> Option<usize> {
+        let (w, h) = self.size;
+        let x = tx - self.min.0;
+        let y = ty - self.min.1;
+        if x < 0 || y < 0 || x >= w as i32 || y >= h as i32 {
+            return None;
+        }
+        Some(y as usize * w + x as usize)
+    }
+
+    /// Газ тайла по мировым координатам тайла.
+    fn gas_at_tile(&self, tx: i32, ty: i32) -> Option<Gas> {
+        self.index(tx, ty).and_then(|i| self.gas.get(i)).copied()
+    }
+
+    /// Газ по мировым координатам в юнитах (для урона и HUD).
+    fn gas_at_units(&self, x: f32, y: f32) -> Option<Gas> {
+        self.gas_at_tile(
+            (x / TILE_SIZE).floor() as i32,
+            (y / TILE_SIZE).floor() as i32,
+        )
+    }
+}
+
 /// Курсор выдачи ролей (T4.2): round-robin, чтобы в раунде были разные роли.
 #[derive(Resource, Default)]
 struct RoleCursor(usize);
+
+/// Инициализирует атмосферу мира (T4.3): пол — воздух станции, стены и космос —
+/// вакуум; по чанкам спавнятся реплицируемые [`ChunkAtmosphere`] для клиента.
+fn init_atmosphere(
+    mut commands: Commands,
+    mut atmospheres: ResMut<Atmospheres>,
+    mut chunk_rooms: ResMut<ChunkRooms>,
+    mut allocator: ResMut<RoomAllocator>,
+    map: Res<GameMap>,
+) {
+    let Some(first) = map.chunks.first() else {
+        return;
+    };
+    let size = ssr_core::tiles::CHUNK_TILES as i32;
+    let mut min = (first.coords.0 * size, first.coords.1 * size);
+    let mut max = min;
+    for chunk in &map.chunks {
+        min = (
+            min.0.min(chunk.coords.0 * size),
+            min.1.min(chunk.coords.1 * size),
+        );
+        max = (
+            max.0.max((chunk.coords.0 + 1) * size),
+            max.1.max((chunk.coords.1 + 1) * size),
+        );
+    }
+    let width = (max.0 - min.0) as usize;
+    let height = (max.1 - min.1) as usize;
+    let mut tiles = vec![TileType::Space; width * height];
+    let mut gas = vec![Gas::VACUUM; width * height];
+    for chunk in &map.chunks {
+        for ly in 0..size as usize {
+            for lx in 0..size as usize {
+                let tx = chunk.coords.0 * size + lx as i32 - min.0;
+                let ty = chunk.coords.1 * size + ly as i32 - min.1;
+                let index = ty as usize * width + tx as usize;
+                let tile = chunk.tiles[ly * size as usize + lx];
+                tiles[index] = tile;
+                if tile == TileType::Floor {
+                    gas[index] = Gas::STATION;
+                }
+            }
+        }
+    }
+
+    for chunk in &map.chunks {
+        let room = chunk_rooms.room_for(chunk.coords, &mut allocator);
+        let entity = commands
+            .spawn((
+                ssr_core::atmosphere::ChunkAtmosphere::pack(
+                    chunk.coords,
+                    &chunk
+                        .tiles
+                        .iter()
+                        .map(|tile| {
+                            if *tile == TileType::Floor {
+                                Gas::STATION
+                            } else {
+                                Gas::VACUUM
+                            }
+                        })
+                        .collect::<Vec<Gas>>(),
+                ),
+                Replicate::to_clients(NetworkTarget::All),
+                Rooms::single(room),
+            ))
+            .id();
+        atmospheres.entities.insert(chunk.coords, entity);
+    }
+    atmospheres.min = min;
+    atmospheres.size = (width, height);
+    atmospheres.tiles = tiles;
+    atmospheres.gas = gas;
+    tracing::info!(
+        width,
+        height,
+        chunks = map.chunks.len(),
+        "atmosphere initialized"
+    );
+}
+
+/// Диффузия газа между тайлами (T4.3): обмен по 4 соседям, космос — сток,
+/// стены не пропускают. Клиентские компоненты обновляются при изменениях.
+fn simulate_atmosphere(
+    mut atmospheres: ResMut<Atmospheres>,
+    mut components: Query<&mut ssr_core::atmosphere::ChunkAtmosphere>,
+    time: Res<Time>,
+    mut next_step: Local<f32>,
+) {
+    *next_step += time.delta_secs();
+    if *next_step < ATMOS_STEP_SECS {
+        return;
+    }
+    *next_step = 0.0;
+    let (width, height) = atmospheres.size;
+    if width == 0 || height == 0 {
+        return;
+    }
+
+    let current = atmospheres.gas.clone();
+    let mut next = current.clone();
+    for y in 0..height as i32 {
+        for x in 0..width as i32 {
+            let index = y as usize * width + x as usize;
+            if atmospheres.tiles[index] != TileType::Floor {
+                continue; // стены и космос газ не держат
+            }
+            // Пары (восток, север) — каждая пара обрабатывается один раз.
+            for (dx, dy) in [(1i32, 0i32), (0, 1)] {
+                let index_b =
+                    atmospheres.index(atmospheres.min.0 + x + dx, atmospheres.min.1 + y + dy);
+                let (pressure_b, oxygen_b, exchange) = match index_b {
+                    // Сосед-пол: обмен с переносом газа (с сохранением).
+                    Some(b) if atmospheres.tiles[b] == TileType::Floor => {
+                        (current[b].pressure, current[b].oxygen, true)
+                    }
+                    // Стена газ не пропускает и не впитывает: пары нет вовсе.
+                    Some(b) if atmospheres.tiles[b] == TileType::Wall => continue,
+                    // Космос (в т.ч. за краем карты): сток — газ уходит.
+                    Some(_) | None => (0.0, 0.0, false),
+                };
+                let a = current[index];
+                let flow = (a.pressure - pressure_b) * DIFFUSION_K;
+                if flow.abs() < 0.01 {
+                    continue;
+                }
+                if flow > 0.0 {
+                    // Из текущего тайла в соседа.
+                    let moved_o2 = flow * a.oxygen;
+                    let a_next = &mut next[index];
+                    a_next.pressure = (a_next.pressure - flow).max(0.0);
+                    if a_next.pressure > 0.001 {
+                        a_next.oxygen =
+                            ((a.pressure * a.oxygen) - moved_o2).max(0.0) / a_next.pressure;
+                    } else {
+                        a_next.oxygen = 0.0;
+                    }
+                    if exchange && let Some(b) = index_b {
+                        let b_current = current[b];
+                        let b_next = &mut next[b];
+                        b_next.pressure += flow;
+                        if b_next.pressure > 0.001 {
+                            b_next.oxygen = (b_current.pressure * b_current.oxygen + moved_o2)
+                                / b_next.pressure;
+                        }
+                    }
+                } else {
+                    // Из соседа в текущий.
+                    let moved = -flow;
+                    let moved_o2 = moved * oxygen_b;
+                    let a_next = &mut next[index];
+                    a_next.pressure += moved;
+                    if a_next.pressure > 0.001 {
+                        a_next.oxygen = (a.pressure * a.oxygen + moved_o2) / a_next.pressure;
+                    }
+                    if exchange && let Some(b) = index_b {
+                        let b_next = &mut next[b];
+                        b_next.pressure = (b_next.pressure - moved).max(0.0);
+                        if b_next.pressure > 0.001 {
+                            b_next.oxygen =
+                                ((pressure_b * oxygen_b) - moved_o2).max(0.0) / b_next.pressure;
+                        } else {
+                            b_next.oxygen = 0.0;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    atmospheres.gas = next;
+
+    // Обновляем реплицируемые компоненты чанков, где значения изменились.
+    let chunk_tiles = ssr_core::tiles::CHUNK_TILES as i32;
+    for (coords, entity) in &atmospheres.entities {
+        let Ok(mut component) = components.get_mut(*entity) else {
+            continue;
+        };
+        let packed = ssr_core::atmosphere::ChunkAtmosphere::pack(
+            *coords,
+            &chunk_slice(&atmospheres, *coords, chunk_tiles),
+        );
+        if *component != packed {
+            *component = packed;
+        }
+    }
+}
+
+/// Срез газа чанка в порядке тайлов [`TileChunkData`].
+fn chunk_slice(atmospheres: &Atmospheres, coords: (i32, i32), chunk_tiles: i32) -> Vec<Gas> {
+    let mut gas = vec![Gas::VACUUM; (chunk_tiles * chunk_tiles) as usize];
+    for ly in 0..chunk_tiles {
+        for lx in 0..chunk_tiles {
+            let tx = coords.0 * chunk_tiles + lx;
+            let ty = coords.1 * chunk_tiles + ly;
+            if let Some(value) = atmospheres.gas_at_tile(tx, ty) {
+                gas[(ly * chunk_tiles + lx) as usize] = value;
+            }
+        }
+    }
+    gas
+}
+
+/// Урон от разгерметизации (T4.3): каждую секунду в негодной атмосфере.
+fn suffocation(
+    time: Res<Time>,
+    mut next_tick: Local<f32>,
+    players: Res<Players>,
+    positions: Query<&PlayerPosition>,
+    atmospheres: Res<Atmospheres>,
+    mut damage_events: MessageWriter<DamageEvent>,
+) {
+    *next_tick += time.delta_secs();
+    if *next_tick < 1.0 {
+        return;
+    }
+    *next_tick = 0.0;
+    for entry in &players.entries {
+        let Ok(position) = positions.get(entry.player) else {
+            continue;
+        };
+        let Some(gas) = atmospheres.gas_at_units(position.0[0], position.0[1]) else {
+            continue;
+        };
+        if gas.is_breathable() {
+            continue;
+        }
+        let cause = if gas.pressure < ssr_core::atmosphere::LOW_PRESSURE_KPA {
+            "vacuum"
+        } else {
+            "no_oxygen"
+        };
+        damage_events.write(DamageEvent {
+            target: entry.player,
+            amount: ssr_core::atmosphere::VACUUM_DAMAGE_PER_SECOND,
+            source: DamageSource::Environment { cause },
+        });
+        tracing::info!(player = ?entry.player, pressure = gas.pressure, oxygen = gas.oxygen, cause, "suffocation damage");
+    }
+}
+
+/// Тест T4.3: SSR_BREACH_TEST=1 — через 3 секунды пробивает стену у космоса
+/// (тайлы (62,0..2) в тестовой карте): комната разгерметизируется.
+fn breach_test(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut elapsed: Local<f32>,
+    mut done: Local<bool>,
+    mut atmospheres: ResMut<Atmospheres>,
+    mut chunks: Query<&mut TileChunkData>,
+    mut index: ResMut<MapIndex>,
+) {
+    if std::env::var_os("SSR_BREACH_TEST").is_none() || *done {
+        return;
+    }
+    *elapsed += time.delta_secs();
+    if *elapsed < 3.0 {
+        return;
+    }
+    *done = true;
+    let chunk_tiles = ssr_core::tiles::CHUNK_TILES as i32;
+    let tx = 62i32;
+    for ty in 0..3i32 {
+        let coords = (tx.div_euclid(chunk_tiles), ty.div_euclid(chunk_tiles));
+        let Some(&entity) = index.chunks.get(&coords) else {
+            continue;
+        };
+        let Ok(mut chunk) = chunks.get_mut(entity) else {
+            continue;
+        };
+        let lx = (tx - coords.0 * chunk_tiles) as usize;
+        let ly = (ty - coords.1 * chunk_tiles) as usize;
+        chunk.tiles[ly * chunk_tiles as usize + lx] = TileType::Floor;
+        if let Some(atmosphere_index) = atmospheres.index(tx, ty) {
+            atmospheres.tiles[atmosphere_index] = TileType::Floor;
+            atmospheres.gas[atmosphere_index] = Gas::STATION;
+        }
+        if let Some(old) = index.colliders.remove(&coords) {
+            commands.entity(old).despawn();
+        }
+        if let Some(new_entity) = spawn_chunk_collider(&mut commands, &chunk) {
+            index.colliders.insert(coords, new_entity);
+        }
+        tracing::info!(tx, ty, "breach: wall opened to space");
+    }
+}
+
+/// Раз в секунду логирует давление у спавна (для проверки T4.3 без клиента).
+fn log_atmosphere(time: Res<Time>, mut next_log: Local<f32>, atmospheres: Res<Atmospheres>) {
+    if std::env::var_os("SSR_ATMOS_LOG").is_none() {
+        return;
+    }
+    *next_log += time.delta_secs();
+    if *next_log < 1.0 {
+        return;
+    }
+    *next_log = 0.0;
+    // Спавн и окрестности пробоя (для проверки утечки в космос).
+    for (tx, ty) in [(0, 0), (61, 0), (60, 0)] {
+        if let Some(gas) = atmospheres.gas_at_tile(tx, ty) {
+            tracing::info!(
+                tx,
+                ty,
+                pressure = gas.pressure,
+                oxygen = gas.oxygen,
+                "atmosphere"
+            );
+        }
+    }
+}
+
+/// Тест T4.3: SSR_VACUUM_TEST=1 — через 3 секунды опустошает тайлы вокруг
+/// спавна: игрок задыхается (проверка урона и HUD без долгой утечки).
+fn vacuum_test(
+    time: Res<Time>,
+    mut elapsed: Local<f32>,
+    mut done: Local<bool>,
+    mut atmospheres: ResMut<Atmospheres>,
+    map: Res<GameMap>,
+) {
+    if std::env::var_os("SSR_VACUUM_TEST").is_none() || *done {
+        return;
+    }
+    *elapsed += time.delta_secs();
+    if *elapsed < 3.0 {
+        return;
+    }
+    *done = true;
+    let Some(&(sx, sy)) = map.spawn_points.first() else {
+        return;
+    };
+    let center = (
+        (sx / TILE_SIZE).floor() as i32,
+        (sy / TILE_SIZE).floor() as i32,
+    );
+    let mut cleared = 0;
+    for dx in -3..=3 {
+        for dy in -3..=3 {
+            if let Some(index) = atmospheres.index(center.0 + dx, center.1 + dy)
+                && atmospheres.tiles[index] == TileType::Floor
+            {
+                atmospheres.gas[index] = Gas::VACUUM;
+                cleared += 1;
+            }
+        }
+    }
+    tracing::info!(tiles = cleared, center = ?center, "vacuum test: area depressurized");
+}
 
 /// Загружает роли (T4.2). Ошибка — пустой набор: сервер не падает, игроки
 /// получают стандартный набор предметов без роли (в логе — error).
@@ -391,6 +797,8 @@ enum DamageSource {
         attacker: Entity,
         weapon: Option<String>,
     },
+    /// Среда (T4.3): разгерметизация, нехватка кислорода, урон без убийцы.
+    Environment { cause: &'static str },
 }
 
 /// Урон, нанесённый за кадр (T4.1): пишется атакой, применяется apply_damage.
@@ -475,6 +883,11 @@ fn handle_client_messages(
     mut actions: ResMut<ActionQueue>,
     mut players: ResMut<Players>,
 ) {
+    // Новый раунд (никого нет): выдача ролей с начала списка — первый игрок
+    // сессии снова получает инженера (и его доступы к дверям).
+    if players.entries.is_empty() {
+        role_cursor.0 = 0;
+    }
     let mut connected: Vec<(Entity, String)> = Vec::new();
     for (link_entity, remote_id, mut receiver) in receivers.iter_mut() {
         for message in receiver.receive() {
@@ -1341,6 +1754,8 @@ fn apply_damage(
             DamageSource::Melee { attacker, weapon } => {
                 (Some(*attacker), weapon.as_deref().unwrap_or("fist"))
             }
+            // Среда: убийцы нет, «оружие» — причина (vacuum/no_oxygen).
+            DamageSource::Environment { cause } => (None, *cause),
         };
         tracing::info!(
             target = ?event.target,
