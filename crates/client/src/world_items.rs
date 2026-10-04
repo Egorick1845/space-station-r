@@ -41,7 +41,7 @@ pub fn sync_floor_item_icons(
                 }
             }
             (Some(position), Err(_)) => {
-                let Some(sprite) = item_icon(&registry, &content.items, &item.name) else {
+                let Some(sprite) = item_icon(&registry, &content, &item.name) else {
                     continue;
                 };
                 commands.entity(entity).insert((

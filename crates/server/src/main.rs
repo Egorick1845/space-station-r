@@ -128,7 +128,7 @@ fn main() {
     app.add_systems(
         Startup,
         (
-            check_prototypes,
+            load_prototypes,
             load_roles,
             load_content,
             load_map,
@@ -252,24 +252,49 @@ fn spawn_containers(
             Replicate::to_clients(NetworkTarget::All),
             ItemRoom(room),
             Rooms::single(room),
+            // Ящик — `EntityStorage` в сборке: у него есть коллизия, пока крышка
+            // закрыта (`IsCollidableWhenOpen = false`), и фикстуры
+            // `-0.4,-0.4,0.4,0.29` тайла. Открытый ящик проходим.
+            RigidBody::Static,
+            Collider::rectangle(TILE_SIZE * 0.8, TILE_SIZE * 0.7),
+            Position(Vector::new(*x, *y)),
+            Rotation::default(),
         ));
     }
     tracing::info!(count = spots.len(), "containers spawned");
 }
 
+/// Спавнимые прототипы сборки (IMP.2/IMP.3): id → есть ли спрайт. Из этого
+/// набора работает команда `spawn` и меню спавна — «как можно больше сущностей»,
+/// а не только наш ручной каталог предметов.
+#[derive(Resource, Default)]
+struct ProtoCatalog(std::collections::HashSet<String>);
+
+impl ProtoCatalog {
+    fn contains(&self, id: &str) -> bool {
+        self.0.contains(id)
+    }
+}
+
 /// Проверяет портированные прототипы (`assets/prototypes_ss14.ron`, IMP.2/IMP.3)
-/// при старте — конвейер импорта валидируется в рантайме. Ресурс с прототипами
-/// добавится, когда появятся игровые системы фаз 4–5, которые их читают.
-fn check_prototypes() {
+/// при старте и запоминает спавнимые (не abstract, entity) со спрайтом.
+fn load_prototypes(mut commands: Commands) {
     let path = ssr_core::assets_root().join("prototypes_ss14.ron");
     match ssr_core::prototypes::ProtoSet::load(&path) {
         Ok(set) => {
-            let with_sprite = set.protos.iter().filter(|p| p.sprite.is_some()).count();
+            let mut spawnable = std::collections::HashSet::new();
+            for proto in &set.protos {
+                if proto.abstract_ || proto.kind != "entity" || proto.sprite.is_none() {
+                    continue;
+                }
+                spawnable.insert(proto.id.clone());
+            }
             tracing::info!(
                 protos = set.protos.len(),
-                with_sprite,
+                spawnable = spawnable.len(),
                 "content prototypes loaded"
             );
+            commands.insert_resource(ProtoCatalog(spawnable));
         }
         Err(e) => tracing::warn!(error = %e, "content prototypes not loaded"),
     }
@@ -303,6 +328,8 @@ struct ServerContent<'w> {
     role_cursor: ResMut<'w, RoleCursor>,
     catalogs: Res<'w, ContentCatalog>,
     stats: ResMut<'w, NetStats>,
+    /// Спавнимые прототипы сборки (меню спавна и команда `spawn`).
+    prototypes: Res<'w, ProtoCatalog>,
 }
 
 /// Запрос телепорта к другому игроку (админ-команда tpto, T-мех).
@@ -1536,6 +1563,7 @@ fn run_admin_command(
     inventories: &mut Query<&mut Inventory>,
     positions: &Query<&PlayerPosition>,
     catalogs: &ContentCatalog,
+    prototypes: &ProtoCatalog,
 ) -> String {
     let mut parts = command.split_whitespace();
     let name = parts.next().unwrap_or_default();
@@ -1559,7 +1587,7 @@ fn run_admin_command(
             let Some(item_id) = parts.next() else {
                 return "использование: spawn <предмет> [кол-во] [floor]".to_string();
             };
-            if catalogs.items.by_id(item_id).is_none() {
+            if catalogs.items.by_id(item_id).is_none() && !prototypes.contains(item_id) {
                 return format!("неизвестный предмет: {item_id}");
             }
             let count: u32 = parts
@@ -2037,6 +2065,7 @@ fn handle_client_messages(
                         &mut inventories,
                         &positions,
                         &content.catalogs,
+                        &content.prototypes,
                     );
                     tracing::info!(%name, command = %command, reply = %reply, "admin command");
                     if let Ok((_, mut sender)) = senders.get_mut(link_entity) {
@@ -2577,6 +2606,10 @@ fn handle_client_messages(
             "HardhatWhite",
             "GasMask",
             "Headset",
+            "ClothingBeltUtility",
+            "ClothingOuterCoatLab",
+            "ClothingEyesGlasses",
+            "IDCardEngineer",
         ] {
             let item = commands
                 .spawn((
@@ -3203,19 +3236,17 @@ fn process_actions(
                             let ly = (ty - ty.div_euclid(chunk_tiles) * chunk_tiles) as usize;
                             c.tiles[ly * ssr_core::tiles::CHUNK_TILES as usize + lx]
                         });
-                    if let (Some(item), Some(tile)) = (hand_item, tile) {
-                        if item_name == "SteelSheet" && tile.is_walkable() {
-                            options.push(ActionOption {
-                                label: "Построить стену".into(),
-                                action: ActionKind::UseItem { item, tx, ty },
-                            });
-                        }
-                        if item_name == "Crowbar" && tile == TileType::Wall {
-                            options.push(ActionOption {
-                                label: "Разобрать стену".into(),
-                                action: ActionKind::UseItem { item, tx, ty },
-                            });
-                        }
+                    if let (Some(item), Some(tile)) = (hand_item, tile)
+                        && item_name == "SteelSheet"
+                        && tile.is_walkable()
+                    {
+                        options.push(ActionOption {
+                            label: "Построить стену".into(),
+                            action: ActionKind::UseItem { item, tx, ty },
+                        });
+                        // Лом НЕ разбирает стены: в сборке стена разбирается
+                        // строительством (`Construction` с инструментами), а
+                        // `Crowbar` умеет только `Prying` (двери и половые плитки).
                     }
                 }
                 if !options.is_empty()
@@ -3429,6 +3460,13 @@ fn process_actions(
                         }
                         container.open = !container.open;
                         let open = container.open;
+                        // Коллизия: закрытый ящик не проходим, открытый — проходим
+                        // (`IsCollidableWhenOpen = false` в `EntityStorageComponent`).
+                        if open {
+                            commands.entity(target).insert(ColliderDisabled);
+                        } else {
+                            commands.entity(target).remove::<ColliderDisabled>();
+                        }
                         // Ящик — `EntityStorage` в сборке: у него НЕТ сеточного
                         // окна. Открытие ВЫСЫПАЕТ содержимое на пол
                         // (`OpenStorage` → `EmptyContents`), закрытие ВСАСЫВАЕТ
@@ -3644,32 +3682,21 @@ fn process_actions(
                     chunk.tiles[cell] = TileType::Wall;
                     tracing::info!(tx, ty, "tile built");
                 } else if item_name == "Crowbar" {
-                    if chunk.tiles[cell] != TileType::Wall {
-                        tracing::warn!(tx, ty, "deconstruct: tile is not a wall");
+                    // Лом (`BaseCrowbar`, качество `Prying`) стен НЕ разбирает:
+                    // в сборке обычную стену снимают сваркой (10 с) → ключом с
+                    // якоря → отвёрткой (2 с). Лом срывает только ПОЛОВЫЕ ПЛИТКИ
+                    // (`BaseStationTile.deconstructTools: [Prying]`,
+                    // `baseTurf: Plating`); обшивку (Plating) он не берёт — там
+                    // качество `Axing` (топор).
+                    if chunk.tiles[cell] != TileType::Floor {
+                        tracing::warn!(
+                            tx, ty, tile = ?chunk.tiles[cell],
+                            "crowbar: снимаются только половые плитки (Prying)"
+                        );
                         continue;
                     }
-                    // Разбор стены открывает техпол: на нём видно проводку.
                     chunk.tiles[cell] = TileType::Plating;
-                    if let Ok(mut inventory) = inventories.get_mut(player) {
-                        let sheet = commands
-                            .spawn((
-                                Item {
-                                    name: "SteelSheet".to_string(),
-                                },
-                                HeldBy {
-                                    player: player.to_bits(),
-                                },
-                                Replicate::to_clients(NetworkTarget::All),
-                                Rooms::default(),
-                            ))
-                            .id();
-                        let sheet_bits = sheet.to_bits();
-                        let (w, h) = ssr_core::inventory::item_size("SteelSheet");
-                        if let Some(slot) = inventory.put_first_fit(sheet_bits, w, h) {
-                            tracing::info!(slot, "deconstruct: material returned");
-                        }
-                    }
-                    tracing::info!(tx, ty, "tile destroyed");
+                    tracing::info!(tx, ty, "floor tile pried (baseTurf: plating)");
                 } else {
                     tracing::warn!(item, name = %item_name, "use item: unknown item");
                     continue;

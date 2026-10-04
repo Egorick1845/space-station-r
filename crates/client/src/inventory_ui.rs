@@ -19,13 +19,14 @@ use crate::containers::ContainerSlot;
 use crate::rsi::{RsiRegistry, RsiSprite};
 use crate::windows;
 
-/// Спрайт предмета в слотах UI: имя предмета → RSI-стейт иконки из каталога.
+/// Спрайт предмета в слотах UI: имя предмета → RSI-стейт иконки. Сначала наш
+/// каталог, затем импортированные прототипы сборки (меню спавна показывает и их).
 pub fn item_icon<'a>(
     registry: &'a RsiRegistry,
-    catalog: &ssr_core::items::ItemSet,
+    content: &'a crate::content::ClientContent,
     name: &str,
 ) -> Option<&'a RsiSprite> {
-    let key = catalog.by_id(name)?.sprite.as_ref()?;
+    let key = content.sprite_key(name)?;
     registry.get(&format!("sprites/ss14/{key}"))
 }
 
@@ -350,23 +351,24 @@ impl ItemSprites<'_, '_> {
         self.items.get(client).ok().map(|item| item.name.clone())
     }
 
-    /// Название предмета для UI по серверным bits (русское имя из каталога).
+    /// Название предмета для UI по серверным bits (русское имя из каталога,
+    /// для импортированных прототипов — имя из прототипа сборки).
     pub fn display_name(&self, bits: u64) -> Option<String> {
         let name = self.item_name(bits)?;
-        Some(self.catalog.items.name_of(&name))
+        Some(self.catalog.display_name(&name))
     }
 
     /// Иконка предмета по его id (для спрайта режима размещения).
     pub fn icon_by_name(&self, name: &str) -> Option<&RsiSprite> {
-        item_icon(&self.registry, &self.catalog.items, name)
+        item_icon(&self.registry, &self.catalog, name)
     }
 
     /// Иконка предмета по bits его сущности (None — предмет неизвестен).
     pub fn icon(&self, bits: u64) -> Option<&RsiSprite> {
         let name = self.item_name(bits)?;
-        let sprite = item_icon(&self.registry, &self.catalog.items, &name);
+        let sprite = item_icon(&self.registry, &self.catalog, &name);
         if sprite.is_none() {
-            tracing::warn!(item = %name, "no icon for item");
+            tracing::debug!(item = %name, "no icon for item");
         }
         sprite
     }

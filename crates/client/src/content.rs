@@ -1,13 +1,47 @@
-//! Контент-каталоги клиента (T5.2): предметы и рецепты из assets/prototypes.
-//! Те же файлы, что у сервера, — клиент показывает иконки и меню крафта.
+//! Контент-каталоги клиента (T5.2): предметы и рецепты из assets/prototypes,
+//! плюс ИМПОРТИРОВАННЫЕ прототипы сборки (`prototypes_ss14.ron`, IMP.2/IMP.3) —
+//! из них собирается меню спавна: «как можно больше сущностей», а не только наш
+//! ручной каталог из 38 предметов.
+
+use std::collections::HashMap;
 
 use bevy::prelude::*;
 
-/// Каталоги предметов и рецептов.
+/// Каталоги предметов и рецептов + спрайты импортированных прототипов.
 #[derive(Resource, Default)]
 pub struct ClientContent {
     pub items: ssr_core::items::ItemSet,
     pub recipes: ssr_core::recipes::RecipeSet,
+    /// Спрайт импортированного прототипа: id → `"path/to/name.rsi#state"`.
+    pub proto_sprites: HashMap<String, String>,
+    /// Имя импортированного прототипа: id → локализованное имя (или id).
+    pub proto_names: HashMap<String, String>,
+}
+
+impl ClientContent {
+    /// Ключ спрайта предмета: сначала наш каталог, затем импортированные
+    /// прототипы сборки (у них спрайт уже в виде `path#state`).
+    pub fn sprite_key(&self, name: &str) -> Option<&str> {
+        if let Some(sprite) = self
+            .items
+            .by_id(name)
+            .and_then(|item| item.sprite.as_deref())
+        {
+            return Some(sprite);
+        }
+        self.proto_sprites.get(name).map(String::as_str)
+    }
+
+    /// Имя для списка спавна: каталог, затем импортированный прототип.
+    pub fn display_name(&self, id: &str) -> String {
+        if let Some(item) = self.items.by_id(id) {
+            return item.name.clone();
+        }
+        self.proto_names
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| id.to_string())
+    }
 }
 
 /// Загружает каталоги при старте.
@@ -15,14 +49,11 @@ pub fn load_content(mut commands: Commands) {
     let root = ssr_core::assets_root().join("prototypes");
     let items = ssr_core::items::ItemSet::load(&root.join("items.ron"));
     let recipes = ssr_core::recipes::RecipeSet::load(&root.join("recipes.ron"));
+    let mut content = ClientContent::default();
     match (items, recipes) {
         (Ok(items), Ok(recipes)) => {
-            tracing::info!(
-                items = items.items.len(),
-                recipes = recipes.recipes.len(),
-                "content catalog loaded (client)"
-            );
-            commands.insert_resource(ClientContent { items, recipes });
+            content.items = items;
+            content.recipes = recipes;
         }
         (items, recipes) => {
             if let Err(e) = items {
@@ -33,4 +64,40 @@ pub fn load_content(mut commands: Commands) {
             }
         }
     }
+    // Импортированные прототипы сборки: 9k+ сущностей. Нужны для меню спавна —
+    // берём только спавнимые (не abstract) и только со спрайтом.
+    let started = std::time::Instant::now();
+    let path = ssr_core::assets_root().join("prototypes_ss14.ron");
+    match ssr_core::prototypes::ProtoSet::load(&path) {
+        Ok(set) => {
+            for proto in set.protos {
+                if proto.abstract_ || proto.kind != "entity" {
+                    continue;
+                }
+                let Some(sprite) = proto.sprite else {
+                    continue;
+                };
+                if let Some(name) = proto.name {
+                    content.proto_names.insert(proto.id.clone(), name);
+                }
+                content.proto_sprites.insert(proto.id, sprite);
+            }
+            tracing::info!(
+                items = content.items.items.len(),
+                recipes = content.recipes.recipes.len(),
+                protos = content.proto_sprites.len(),
+                ms = started.elapsed().as_millis() as u64,
+                "content catalog loaded (client)"
+            );
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "prototypes_ss14.ron not loaded");
+            tracing::info!(
+                items = content.items.items.len(),
+                recipes = content.recipes.recipes.len(),
+                "content catalog loaded (client, без прототипов)"
+            );
+        }
+    }
+    commands.insert_resource(content);
 }

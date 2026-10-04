@@ -12,6 +12,12 @@
         (id: "HardhatWhite", name: "Каска", sprite: Some("Clothing/Head/Hardhats/white.rsi#icon"), size: (1, 1), tags: ["clothing"], slot: Some("head"), worn: Some("Clothing/Head/Hardhats/white.rsi#off-equipped-HELMET")),
         (id: "GasMask", name: "Противогаз", sprite: Some("Clothing/Mask/gas.rsi#icon"), size: (1, 1), tags: ["clothing"], slot: Some("mask"), worn: Some("Clothing/Mask/gas.rsi#equipped-MASK")),
         (id: "Headset", name: "Гарнитура", sprite: Some("Clothing/Ears/Headsets/base.rsi#icon"), size: (1, 1), tags: ["clothing"], slot: Some("ears"), worn: Some("Clothing/Ears/Headsets/base.rsi#equipped-EARS")),
+        // Остальные слоты шаблона человека (`human_inventory_template.yml`):
+        // пояс, верхняя одежда, ID, очки — чтобы система одежды была полной.
+        (id: "ClothingBeltUtility", name: "Пояс с инструментами", sprite: Some("Clothing/Belt/utility.rsi#icon"), inhand: Some("Clothing/Belt/utility.rsi#inhand-right"), size: (2, 1), tags: ["clothing"], slot: Some("belt"), worn: Some("Clothing/Belt/utility.rsi#equipped-BELT")),
+        (id: "ClothingOuterCoatLab", name: "Лабораторный халат", sprite: Some("Clothing/OuterClothing/Coats/labcoat.rsi#icon"), inhand: Some("Clothing/OuterClothing/Coats/labcoat.rsi#inhand-right"), size: (2, 1), tags: ["clothing"], slot: Some("outerClothing"), worn: Some("Clothing/OuterClothing/Coats/labcoat.rsi#equipped-OUTERCLOTHING")),
+        (id: "ClothingEyesGlasses", name: "Очки", sprite: Some("Clothing/Eyes/Glasses/glasses.rsi#icon"), size: (1, 1), tags: ["clothing"], slot: Some("eyes"), worn: Some("Clothing/Eyes/Glasses/glasses.rsi#equipped-EYES")),
+        (id: "IDCardEngineer", name: "ID-карта инженера", sprite: Some("Objects/Misc/id_cards.rsi#default"), size: (1, 1), tags: ["clothing"], slot: Some("id")),
         // ---------------------------------------------------------- инструменты
         (id: "Crowbar", name: "Лом", sprite: Some("Objects/Tools/crowbar.rsi#icon"), inhand: Some("Objects/Tools/crowbar.rsi#inhand-right"), size: (2, 1), tags: ["tool", "pry"]),
         (id: "Wrench", name: "Гаечный ключ", sprite: Some("Objects/Tools/wrench.rsi#icon"), inhand: Some("Objects/Tools/wrench.rsi#inhand-right"), size: (2, 1), tags: ["tool"]),

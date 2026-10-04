@@ -105,10 +105,24 @@ pub struct AppearanceRoot;
 #[derive(Component)]
 pub struct CombatButtonIcon;
 
-/// Маркер у курсора в боевом режиме (в сборке в бою курсор помечается, а ПКМ
-/// не открывает контекстное меню — сам запрет ПКМ уже сделан в verb-ветке).
+/// Маркер у курсора в боевом режиме. В сборке это оверлей
+/// `CombatModeIndicatorsOverlay`: спрайт `Interface/Misc/crosshair_pointers.rsi`
+/// (64×64) состояний `gun_sight` / `gun_bolt_sight` / `melee_sight`, масштаб
+/// `min(UIScale, 1.25) * 0.6` — то есть 38.4 px, БЕЗ смещения от курсора
+/// (центр спрайта в точке курсора), белым с альфой 0.3, поверх чёрного
+/// прямоугольника на 7 px больше (45.4 px, чёрный с альфой 0.5) — обводка.
 #[derive(Component)]
 pub struct CombatCursor;
+
+/// Размер прицела: `64 × Scale`, где `Scale = min(UIScale, 1.25) * 0.6`
+/// (`CombatModeIndicatorsOverlay.DrawSight`). При UIScale = 1 — 38.4 px.
+const COMBAT_SIGHT_SIZE: f32 = 64.0 * 0.6;
+/// Обводка шире прицела на `Vector2(7, 7)` из сборки.
+const COMBAT_SIGHT_STROKE: f32 = 7.0;
+/// Цвета оверлея: `MainColor = White.WithAlpha(0.3)`,
+/// `StrokeColor = Black.WithAlpha(0.5)`.
+const COMBAT_SIGHT_MAIN: Color = Color::srgba(1.0, 1.0, 1.0, 0.3);
+const COMBAT_SIGHT_STROKE_COLOR: Color = Color::srgba(0.0, 0.0, 0.0, 0.5);
 
 /// Меняет иконку кнопки боевого режима: включён — `harm.png`, выключен —
 /// `harmOff.png` (`Interface/Actions/harm*.png` сборки).
@@ -128,11 +142,14 @@ pub fn sync_combat_button(
     }
 }
 
-/// Рисует маркер у курсора в боевом режиме и убирает его вне боя.
+/// Рисует прицел у курсора в боевом режиме и убирает его вне боя: как
+/// `CombatModeIndicatorsOverlay` в сборке — центр спрайта в точке курсора,
+/// обводка под ним. Спрайт: `melee_sight` (в руках нет оружия; у `GunComponent`
+/// сборка берёт `gun_sight`/`gun_bolt_sight`).
 pub fn combat_cursor_marker(
     mut commands: Commands,
     state: Res<HudState>,
-    theme: Res<crate::ui_theme::UiTheme>,
+    registry: Res<crate::rsi::RsiRegistry>,
     windows: Query<&Window>,
     markers: Query<Entity, With<CombatCursor>>,
 ) {
@@ -141,35 +158,47 @@ pub fn combat_cursor_marker(
         .next()
         .and_then(|window| window.cursor_position());
     let existing: Vec<Entity> = markers.iter().collect();
-    let (Some(cursor), true) = (cursor, state.combat) else {
+    let sight = registry.get("sprites/ss14/Interface/Misc/crosshair_pointers.rsi#melee_sight");
+    let (Some(cursor), true, Some(sight)) = (cursor, state.combat, sight) else {
         for entity in existing {
             commands.entity(entity).despawn();
         }
         return;
     };
-    let icon = theme.action_icons.get(2).cloned().unwrap_or_default();
+    let size = COMBAT_SIGHT_SIZE;
+    let stroke = size + COMBAT_SIGHT_STROKE;
+    // Корень — обводка (чёрный прямоугольник под прицелом), ребёнок — сам прицел.
+    let root_node = Node {
+        position_type: PositionType::Absolute,
+        left: px(cursor.x - stroke * 0.5),
+        top: px(cursor.y - stroke * 0.5),
+        width: px(stroke),
+        height: px(stroke),
+        align_items: AlignItems::Center,
+        justify_content: JustifyContent::Center,
+        ..default()
+    };
+    let mut icon = crate::inventory_ui::icon_node(sight);
+    icon.color = COMBAT_SIGHT_MAIN;
+    let icon_node = Node {
+        width: px(size),
+        height: px(size),
+        ..default()
+    };
     if let Some(entity) = existing.first() {
-        commands.entity(*entity).insert(Node {
-            position_type: PositionType::Absolute,
-            left: px(cursor.x - 12.0),
-            top: px(cursor.y - 12.0),
-            width: px(24),
-            height: px(24),
-            ..default()
-        });
+        commands
+            .entity(*entity)
+            .insert((root_node, BackgroundColor(COMBAT_SIGHT_STROKE_COLOR)))
+            .despawn_related::<Children>()
+            .with_child((icon, icon_node));
     } else {
-        commands.spawn((
-            CombatCursor,
-            crate::ui_theme::stretched(&icon),
-            Node {
-                position_type: PositionType::Absolute,
-                left: px(cursor.x - 12.0),
-                top: px(cursor.y - 12.0),
-                width: px(24),
-                height: px(24),
-                ..default()
-            },
-        ));
+        commands
+            .spawn((
+                CombatCursor,
+                root_node,
+                BackgroundColor(COMBAT_SIGHT_STROKE_COLOR),
+            ))
+            .with_child((icon, icon_node));
     }
 }
 
@@ -1361,6 +1390,9 @@ pub fn render_spawn_menu(
         return;
     }
     let query = state.search.to_lowercase();
+    // Список — как `EntitySpawnWindow` в сборке: ВСЕ сущности, у которых есть
+    // спрайт (наш каталог + импортированные прототипы `prototypes_ss14.ron`),
+    // а не только ручной набор предметов.
     let mut matched: Vec<(String, String)> = content
         .items
         .items
@@ -1372,6 +1404,26 @@ pub fn render_spawn_menu(
         })
         .map(|item| (item.id.clone(), item.name.clone()))
         .collect();
+    let mut seen: std::collections::HashSet<String> =
+        matched.iter().map(|(id, _)| id.clone()).collect();
+    for (id, sprite) in content.proto_sprites.iter() {
+        if seen.contains(id) {
+            continue;
+        }
+        let name = content
+            .proto_names
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| id.clone());
+        if !query.is_empty()
+            && !format!("{} {}", id.to_lowercase(), name.to_lowercase()).contains(&query)
+        {
+            continue;
+        }
+        let _ = sprite;
+        seen.insert(id.clone());
+        matched.push((id.clone(), name));
+    }
     matched.sort_by(|a, b| a.1.cmp(&b.1));
     let total = matched.len();
     // Прокрутка непрерывная, как в `EntitySpawnWindow`/`ScrollContainer`.
@@ -1392,7 +1444,7 @@ pub fn render_spawn_menu(
     let icons: Vec<Option<ImageNode>> = matched
         .iter()
         .map(|(id, _)| {
-            crate::inventory_ui::item_icon(&registry, &content.items, id)
+            crate::inventory_ui::item_icon(&registry, &content, id)
                 .map(crate::inventory_ui::icon_node)
         })
         .collect();
