@@ -412,8 +412,13 @@ pub fn hover_outline(
     // тёмная»). Поэтому строим БЕЛУЮ маску клетки спрайта (RGB = белый,
     // альфа исходная) и красим её в жёлтый — плоский силуэт, как шейдер
     // SelectionOutline в SS14.
+    // Обводка — только у предмета, на который наведён курсор: курсор должен
+    // лежать внутри клетки спрайта (никаких «соседних» и «ближайших»).
     let hovered = items.iter().find(|(_, position, held)| {
-        held.player == 0 && Vec2::from_array(position.0).distance(world) <= 24.0
+        let point = Vec2::from_array(position.0);
+        held.player == 0
+            && (point.x - world.x).abs() <= DOOR_HALF
+            && (point.y - world.y).abs() <= DOOR_HALF
     });
     let Some((item, position, _)) = hovered else {
         return;

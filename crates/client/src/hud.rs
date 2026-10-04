@@ -45,6 +45,9 @@ pub struct HudState {
     pub search: String,
     /// Прокрутка списка спавн-меню (строк).
     pub spawn_scroll: usize,
+    /// Поле поиска в фокусе (включается кликом — иначе буквы «съедались» при
+    /// открытии F5 во время игры).
+    pub search_focused: bool,
 }
 
 /// Действие кнопки HUD.
@@ -1025,6 +1028,10 @@ pub fn render_spawn_menu(
         });
 }
 
+/// Поле поиска в спавн-меню (клик — включить ввод).
+#[derive(Component)]
+pub struct MenuSearchButton;
+
 /// Кнопка «Очистить» в спавн-меню.
 #[derive(Component)]
 pub struct MenuClearButton;
@@ -1373,11 +1380,22 @@ pub fn spawn_menu_input(
     mut events: MessageReader<KeyboardInput>,
     keys: Res<ButtonInput<KeyCode>>,
     mut state: ResMut<HudState>,
+    search_clicks: Query<&Interaction, (Changed<Interaction>, With<MenuSearchButton>)>,
 ) {
     if !state.spawn_open && !state.warp_open {
         return;
     }
+    // Клик по полю поиска включает ввод; пока не включён — буквы не перехватываем.
+    for interaction in search_clicks.iter() {
+        if *interaction == Interaction::Pressed {
+            state.search_focused = true;
+        }
+    }
+    if !state.search_focused {
+        return;
+    }
     if keys.just_pressed(KeyCode::F5) || keys.just_pressed(KeyCode::Escape) {
+        state.search_focused = false;
         return;
     }
     for event in events.read() {
@@ -1496,4 +1514,48 @@ pub fn mech_test_mode(
         );
         tracing::info!("mech-test: unghost sent");
     }
+}
+
+/// Esc закрывает все открытые окна (владелец: «сделай, чтобы все окна могли
+/// закрываться на esc»): меню, окно персонажа и рюкзак, крафт. Чат при этом
+/// обрабатывается своей системой (сначала снимает фокус) — здесь он пропускается.
+pub fn close_windows_on_escape(
+    keys: Res<ButtonInput<KeyCode>>,
+    console: Res<Console>,
+    chat: Res<crate::chat::ChatState>,
+    mut state: ResMut<HudState>,
+    mut crafting: ResMut<crate::crafting::CraftingState>,
+    mut placement: ResMut<Placement>,
+    mut uis: Query<&mut crate::inventory_ui::InventoryUi>,
+) {
+    if console.open || chat.focused || !keys.just_pressed(KeyCode::Escape) {
+        return;
+    }
+    // Сначала Esc снимает фокус поиска, потом закрывает окно.
+    if state.search_focused {
+        state.search_focused = false;
+        return;
+    }
+    let any_open = state.spawn_open
+        || state.admin_open
+        || state.warp_open
+        || crafting.open
+        || placement.item.is_some();
+    state.spawn_open = false;
+    state.admin_open = false;
+    state.warp_open = false;
+    placement.item = None;
+    if any_open {
+        tracing::info!("escape: windows closed");
+        return;
+    }
+    for mut ui in uis.iter_mut() {
+        if ui.open || ui.character_open {
+            ui.open = false;
+            ui.character_open = false;
+            tracing::info!("escape: inventory closed");
+            return;
+        }
+    }
+    crafting.open = false;
 }

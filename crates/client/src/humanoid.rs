@@ -337,6 +337,12 @@ pub fn update_facing(
     }
 }
 
+/// Отпечаток внешности: что надето и какая причёска.
+type WornSignature = (
+    Vec<(ssr_core::clothing::ClothingSlot, u64)>,
+    Option<(String, [u8; 3])>,
+);
+
 /// Слой надетой одежды (для пересборки при смене одежды).
 #[derive(Component)]
 pub struct WornLayer {
@@ -375,14 +381,22 @@ pub fn sync_worn_clothes(
     mut commands: Commands,
     registry: Res<RsiRegistry>,
     context: WornContext,
-    clothings: Query<(Entity, &ssr_core::clothing::Clothing)>,
+    clothings: Query<(
+        Entity,
+        &ssr_core::clothing::Clothing,
+        Option<&ssr_core::mechanics::Hair>,
+    )>,
     visuals: Query<(Entity, &crate::inventory_ui::RemotePlayerVisual)>,
     own_visual: Res<crate::inventory_ui::OwnPlayerEntity>,
     worn: Query<(Entity, &WornLayer)>,
-    last: Local<std::collections::HashMap<Entity, Vec<(ssr_core::clothing::ClothingSlot, u64)>>>,
+    last: Local<std::collections::HashMap<Entity, WornSignature>>,
 ) {
-    for (entity, clothing) in clothings.iter() {
-        if last.get(&entity) == Some(&clothing.slots) {
+    for (entity, clothing, hair) in clothings.iter() {
+        let signature = (
+            clothing.slots.clone(),
+            hair.map(|hair| (hair.style.clone(), hair.color)),
+        );
+        if last.get(&entity) == Some(&signature) {
             continue;
         }
         // Визуал игрока: у своего — сама сущность, у чужого — его визуал.
@@ -403,6 +417,35 @@ pub fn sync_worn_clothes(
             }
         }
         let mut spawned = 0;
+        let helmet = clothing
+            .get(ssr_core::clothing::ClothingSlot::Head)
+            .is_some();
+        if let Some(hair) = hair
+            && !helmet
+        {
+            let key = format!(
+                "sprites/ss14/Mobs/Customization/human_hair.rsi#{}",
+                hair.style
+            );
+            if let Some(sprite) = registry.get(&key) {
+                let mut component = Sprite::from_image(sprite.image.clone());
+                component.texture_atlas = Some(TextureAtlas {
+                    layout: sprite.layout.clone(),
+                    index: sprite.index(0, 0),
+                });
+                component.color = Color::srgb_u8(hair.color[0], hair.color[1], hair.color[2]);
+                commands.entity(visual).with_children(|parent| {
+                    parent.spawn((
+                        HumanoidPart { owner: visual, key },
+                        WornLayer { owner: visual },
+                        component,
+                        // Между шеей (1.21) и шлемом (1.22): шлем перекрывает волосы.
+                        Transform::from_xyz(0.0, 0.0, 1.212),
+                    ));
+                });
+                spawned += 1;
+            }
+        }
         commands.entity(visual).with_children(|parent| {
             for (slot, item) in clothing.slots.iter() {
                 let Some(key) = context.key(*item) else {

@@ -24,8 +24,8 @@ use ssr_core::clothing::{Clothing, ClothingSlot};
 use ssr_core::inventory::{
     Container, Hands, Health, HeldBy, Inventory, Item, ItemPosition, SLOT_ANY,
 };
-use ssr_core::mechanics::Sex;
 use ssr_core::mechanics::{Ghost, KNOCKDOWN_SECS, KnockedDown, RUN_SPEED_MULT};
+use ssr_core::mechanics::{HAIR_STYLES, Hair, Sex};
 use ssr_core::power::{Cable, Consumer, Generator, Light, Powered};
 use ssr_core::roles::{Access, PlayerRole, RoleSet};
 use ssr_core::tiles::{MapFile, TileChunkData, TileType};
@@ -1323,6 +1323,16 @@ struct AuxParams<'w, 's> {
     clothings: Query<'w, 's, &'static mut Clothing>,
 }
 
+/// Индекс из времени: без внешних RNG-зависимостей.
+fn rand_index(bound: usize) -> usize {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as usize)
+        .unwrap_or(0);
+    if bound == 0 { 0 } else { nanos % bound }
+}
+
 /// Простой «бросок монетки» для пола на спавне (без выбора игрока — как в SS14).
 fn rand_bool() -> bool {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -2439,6 +2449,16 @@ fn handle_client_messages(
             .and_then(|value| Sex::from_id(&value))
             .unwrap_or_else(|| if rand_bool() { Sex::Female } else { Sex::Male });
         commands.entity(player).insert(sex);
+        // Причёска: случайный стиль и цвет, как выбор внешности в лобби SS14.
+        let hair = Hair {
+            style: HAIR_STYLES[rand_index(HAIR_STYLES.len())].to_string(),
+            color: [
+                80 + rand_index(176) as u8,
+                50 + rand_index(120) as u8,
+                30 + rand_index(100) as u8,
+            ],
+        };
+        commands.entity(player).insert(hair);
         if let Some(role) = role {
             commands.entity(player).insert((
                 PlayerRole {

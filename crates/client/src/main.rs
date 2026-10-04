@@ -308,7 +308,12 @@ fn main() {
         )
             .run_if(in_game),
     );
-    app.add_systems(Update, screenshot_test_mode);
+    app.add_systems(
+        Update,
+        (hud::close_windows_on_escape, screenshot_test_mode)
+            .run_if(in_game)
+            .chain(),
+    );
     app.add_systems(
         Update,
         (

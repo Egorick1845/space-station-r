@@ -56,3 +56,19 @@ impl Sex {
         }
     }
 }
+
+/// Причёска: стиль (состояние `Mobs/Customization/human_hair.rsi`) и цвет.
+/// В SS14 это маркинг слоя `HumanoidVisualLayers.Hair`; человек скрывает волосы
+/// под шлемом (`hideLayersOnEquip: [Hair, Snout]` в `human.yml`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, bevy::prelude::Component)]
+pub struct Hair {
+    /// Имя состояния RSI (например "80s", "afro", "bedhead").
+    pub style: String,
+    /// Цвет волос (RGB).
+    pub color: [u8; 3],
+}
+
+/// Причёски, которые могут выпасть на спавне (проверены по meta.json сборки).
+pub const HAIR_STYLES: [&str; 8] = [
+    "80s", "afro", "antenna", "b", "baby", "bedhead", "baldfade", "a",
+];
