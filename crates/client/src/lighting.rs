@@ -34,12 +34,19 @@ use crate::inventory_ui::OwnPlayerEntity;
 const AMBIENT: f32 = 0.082;
 /// Затухание из `SharedPointLightComponent.Falloff`.
 const FALLOFF: f32 = 6.8;
-/// Высота источника над полом (`LIGHTING_HEIGHT = 1.0` в шейдере).
-const LIGHTING_HEIGHT: f32 = 1.0;
 /// Полуразмер окна карты в тайлах: вьюпорт 21×15, диагональ ≈ 13, плюс поля.
 const WINDOW_RADIUS: i32 = 16;
 /// Сторона окна (квадрат, нечётная — центр совпадает с тайлом игрока).
 const WINDOW_SIDE: u32 = (WINDOW_RADIUS * 2 + 1) as u32;
+/// Текселей карты света на тайл: свет и тени считаются по полтайла, поэтому
+/// тень от стены — прямая линия, а не квадрат тайла (в движке карта света
+/// тоже вдвое мельче экрана, `light.resolution_scale = 0.5`).
+const LIGHT_SUBTEXELS: u32 = 2;
+/// Сторона карты света в текселях.
+const LIGHT_DIM: u32 = WINDOW_SIDE * LIGHT_SUBTEXELS;
+/// Ширина полярной карты теней — `ShadowMapSize` в движке (512 px по кругу).
+const SHADOW_BINS: usize = 512;
+const PI: f32 = std::f32::consts::PI;
 /// Как часто карта может пересчитываться при изменениях (сек).
 const REBUILD_PERIOD: f32 = 0.15;
 /// Слой тьмы — выше ВСЕХ мировых спрайтов (двери 1.5, тела до 1.23), ниже UI:
@@ -106,11 +113,11 @@ pub struct LightScene {
 
 /// Создаёт картинки карты света и спрайты.
 pub fn setup_lighting(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
-    let size = (WINDOW_SIDE * WINDOW_SIDE * 4) as usize;
+    let size = (LIGHT_DIM * LIGHT_DIM * 4) as usize;
     let mut dark = Image::new(
         Extent3d {
-            width: WINDOW_SIDE,
-            height: WINDOW_SIDE,
+            width: LIGHT_DIM,
+            height: LIGHT_DIM,
             depth_or_array_layers: 1,
         },
         TextureDimension::D2,
@@ -127,8 +134,8 @@ pub fn setup_lighting(mut commands: Commands, mut images: ResMut<Assets<Image>>)
     dark.sampler = bevy::image::ImageSampler::nearest();
     let glow = Image::new(
         Extent3d {
-            width: WINDOW_SIDE,
-            height: WINDOW_SIDE,
+            width: LIGHT_DIM,
+            height: LIGHT_DIM,
             depth_or_array_layers: 1,
         },
         TextureDimension::D2,
@@ -141,13 +148,15 @@ pub fn setup_lighting(mut commands: Commands, mut images: ResMut<Assets<Image>>)
     let sprite = commands
         .spawn((
             Sprite::from_image(image.clone()),
-            Transform::from_xyz(0.0, 0.0, DARK_Z).with_scale(Vec3::splat(TILE_UNITS)),
+            Transform::from_xyz(0.0, 0.0, DARK_Z)
+                .with_scale(Vec3::splat(TILE_UNITS / LIGHT_SUBTEXELS as f32)),
         ))
         .id();
     let glow_sprite = commands
         .spawn((
             Sprite::from_image(glow_image.clone()),
-            Transform::from_xyz(0.0, 0.0, GLOW_Z).with_scale(Vec3::splat(TILE_UNITS)),
+            Transform::from_xyz(0.0, 0.0, GLOW_Z)
+                .with_scale(Vec3::splat(TILE_UNITS / LIGHT_SUBTEXELS as f32)),
         ))
         .id();
     commands.insert_resource(LightMap {
@@ -161,51 +170,6 @@ pub fn setup_lighting(mut commands: Commands, mut images: ResMut<Assets<Image>>)
 
 /// Затухание света из `light_shared.swsl`: `s = clamp(sqrt(d²+1)/radius)`,
 /// `val = (1-s²)² / (1 + falloff·s)`.
-/// Видно ли тайл `to` из тайла `from`: суперпокрывающая линия Брезенхэма.
-/// Стена на пути перекрывает видимость (сам конечный тайл может быть стеной —
-/// его лицевая грань видна). Диагональный шаг требует свободных обеих
-/// ортогональных клеток — через стык двух стен под углом не видно, как и в
-/// геометрии окклюдеров движка.
-fn line_of_sight(from: (i32, i32), to: (i32, i32), solid: &impl Fn(i32, i32) -> bool) -> bool {
-    let (x0, y0) = from;
-    let (x1, y1) = to;
-    let (dx, dy) = ((x1 - x0).abs(), (y1 - y0).abs());
-    let (sx, sy) = (if x0 < x1 { 1 } else { -1 }, if y0 < y1 { 1 } else { -1 });
-    let mut err = dx - dy;
-    let (mut x, mut y) = (x0, y0);
-    while (x, y) != (x1, y1) {
-        let e2 = 2 * err;
-        if e2 > -dy && e2 < dx {
-            if solid(x + sx, y) || solid(x, y + sy) {
-                return false;
-            }
-            x += sx;
-            y += sy;
-            err += dx - dy;
-        } else if e2 > -dy {
-            x += sx;
-            err -= dy;
-        } else {
-            y += sy;
-            err += dx;
-        }
-        if (x, y) != (x1, y1) && solid(x, y) {
-            return false;
-        }
-    }
-    true
-}
-
-fn attenuation(dist: f32, radius: f32) -> f32 {
-    if radius <= 0.0 {
-        return 0.0;
-    }
-    let s = ((dist * dist + LIGHTING_HEIGHT).sqrt() / radius).clamp(0.0, 1.0);
-    let s2 = s * s;
-    ((1.0 - s2) * (1.0 - s2) / (1.0 + FALLOFF * s)).clamp(0.0, 1.0)
-}
-
-/// Пересобирает объединённую карту «свет × туман» при изменениях мира.
 #[allow(clippy::too_many_arguments)]
 pub fn update_lighting(
     time: Res<Time>,
@@ -354,181 +318,220 @@ pub fn update_lighting(
         }
     }
 
-    // 1) Видимость (туман войны): СТРОГАЯ прямая видимость из тайла игрока —
-    //    как теневой конус FOV в движке (`fov-lighting.swsl`): стена перекрывает
-    //    всё, что за ней. Раньше здесь была заливка BFS, и свет был виден за
-    //    углами стен — владелец: «не должно быть видно ничего за стеной».
-    let mut fov = vec![0.0f32; (side * side) as usize];
-    {
-        let center = (WINDOW_RADIUS, WINDOW_RADIUS);
-        let solid = |x: i32, y: i32| -> bool {
-            if x < 0 || y < 0 || x >= side as i32 || y >= side as i32 {
-                return true;
-            }
-            grid[(y as u32 * side + x as u32) as usize]
-        };
-        for ly in 0..side as i32 {
-            for lx in 0..side as i32 {
-                if line_of_sight(center, (lx, ly), &solid) {
-                    fov[(ly as u32 * side + lx as u32) as usize] = 1.0;
-                }
-            }
+    // === Свет и тени ЛУЧАМИ по модели движка (SS14_LIGHTING.md) ===
+    // Вместо тайловой заливки: полярные карты теней на каждый источник
+    // (`shadow-depth` в движке — 512 бинов «расстояние до стены по углу»),
+    // мягкая тень из `light-soft.swsl` (7 выборок вдоль перпендикуляра, сигма
+    // и гауссовы веса от расстояния до ближайшего окклюдера) и мягкая маска
+    // видимости по Chebyshev. Карта считается по полтайла, поэтому тени —
+    // прямые лучи с полутенями, а не квадраты тайлов.
+    use ssr_core::light::{NO_OCCLUDER, attenuation, chebyshev_upper_bound, ray_segment_distance};
+    const SUB: f32 = LIGHT_SUBTEXELS as f32;
+    let dim = LIGHT_DIM;
+    let step = 1.0 / SUB;
+
+    // 1) Стены окна — отрезками: грань стены, у которой сосед не стена (общие
+    //    рёбра массива стен теней не дают — правило движка).
+    let wall_at = |lx: i32, ly: i32| -> bool {
+        if lx < 0 || ly < 0 || lx >= side as i32 || ly >= side as i32 {
+            return true;
         }
-        // Лицевые грани стен: стена видна, если виден хотя бы один её сосед
-        // (в движке FOV строится по ГРАНЯМ окклюдеров — ближняя грань стены
-        // освещена, а всё за ней в тени). Без этого дальние стены коридора
-        // оставались чёрными: линия к центру такого тайла задевает угол.
-        for ly in 1..side as i32 - 1 {
-            for lx in 1..side as i32 - 1 {
-                let index = (ly as u32 * side + lx as u32) as usize;
-                if !grid[index] {
-                    continue;
-                }
-                let neighbours = [(lx + 1, ly), (lx - 1, ly), (lx, ly + 1), (lx, ly - 1)];
-                if neighbours
-                    .iter()
-                    .any(|&(nx, ny)| fov[(ny as u32 * side + nx as u32) as usize] > 0.0)
-                {
-                    fov[index] = 1.0;
-                }
+        grid[(ly as u32 * side + lx as u32) as usize]
+    };
+    let mut segments: Vec<((f32, f32), (f32, f32))> = Vec::new();
+    for ly in 0..side as i32 {
+        for lx in 0..side as i32 {
+            if !wall_at(lx, ly) {
+                continue;
+            }
+            let (x0, y0) = ((origin.0 + lx) as f32, (origin.1 + ly) as f32);
+            let (x1, y1) = (x0 + 1.0, y0 + 1.0);
+            if !wall_at(lx, ly - 1) {
+                segments.push(((x0, y0), (x1, y0)));
+            }
+            if !wall_at(lx, ly + 1) {
+                segments.push(((x0, y1), (x1, y1)));
+            }
+            if !wall_at(lx - 1, ly) {
+                segments.push(((x0, y0), (x0, y1)));
+            }
+            if !wall_at(lx + 1, ly) {
+                segments.push(((x1, y0), (x1, y1)));
             }
         }
     }
 
-    // 1а) Мягкий край видимости: маска сглаживается по соседям, иначе свет у
-    //      границы видимого — резкая ступенька (владелец: «сделай свет мягче»).
-    //      В движке эту мягкость даёт VSM-маска FOV (`fov-lighting.swsl`).
-    let fov = {
-        let mut soft = vec![0.0f32; (side * side) as usize];
-        for ly in 0..side as i32 {
-            for lx in 0..side as i32 {
-                let mut sum = 0.0;
-                let mut count = 0.0;
-                for oy in -1..=1 {
-                    for ox in -1..=1 {
-                        let (nx, ny) = (lx + ox, ly + oy);
-                        if nx < 0 || ny < 0 || nx >= side as i32 || ny >= side as i32 {
-                            continue;
-                        }
-                        let weight = if ox == 0 && oy == 0 {
-                            4.0
-                        } else if ox == 0 || oy == 0 {
-                            2.0
-                        } else {
-                            1.0
-                        };
-                        sum += fov[(ny as u32 * side + nx as u32) as usize] * weight;
-                        count += weight;
-                    }
+    // 2) Полярная карта: для точки — расстояние до стены по каждому углу.
+    let polar_map = |point: (f32, f32)| -> Vec<f32> {
+        let mut map = vec![NO_OCCLUDER; SHADOW_BINS];
+        for (bin, slot) in map.iter_mut().enumerate() {
+            let angle = (bin as f32 / SHADOW_BINS as f32) * 2.0 * PI - PI;
+            let dir = (angle.cos(), angle.sin());
+            let mut best = NO_OCCLUDER;
+            for &(a, b) in &segments {
+                if let Some(dist) = ray_segment_distance(point, dir, a, b) {
+                    best = best.min(dist);
                 }
-                soft[(ly as u32 * side + lx as u32) as usize] = sum / count;
+            }
+            *slot = best;
+        }
+        map
+    };
+    let lamp_maps: Vec<Vec<f32>> = lamp_state
+        .iter()
+        .map(|(lx, ly, _, _)| polar_map((*lx as f32 + 0.5, *ly as f32 + 0.5)))
+        .collect();
+    let eye_map = polar_map((player_tile.0 as f32 + 0.5, player_tile.1 as f32 + 0.5));
+
+    // Чтение карты по направлению: линейная интерполяция бинов и заворот на шве
+    // ±π (в движке `WrapMode.Repeat` при `Filter = true`).
+    let sample_map = |map: &[f32], dx: f32, dy: f32| -> f32 {
+        let u = (dy.atan2(-dx) / PI + 1.0).clamp(0.0, 1.0) * SHADOW_BINS as f32 - 0.5;
+        let base = u.floor();
+        let t = u - base;
+        let i0 = (base as isize).rem_euclid(SHADOW_BINS as isize) as usize;
+        let i1 = (base as isize + 1).rem_euclid(SHADOW_BINS as isize) as usize;
+        map[i0] * (1.0 - t) + map[i1] * t
+    };
+    // Момент VSM по расстоянию (дисперсию добавляем, как `shadow-depth.frag`).
+    let moment = |dist: f32| (dist, dist * dist + 0.25);
+
+    // 3) Мягкая тень из `light-soft.swsl`: 7 выборок по перпендикуляру к лучу,
+    //    сигма и гауссовы веса по расстоянию до ближайшего окклюдера.
+    let soft_shadow = |map: &[f32], diff: (f32, f32)| -> f32 {
+        let len = (diff.0 * diff.0 + diff.1 * diff.1).sqrt();
+        let norm = len.max(1e-6);
+        let perp = (-diff.1 / norm, diff.0 / norm);
+        // `1/32 * lightSoftness * 1.5` при softness = 1 — как в шейдере.
+        let offset_step = 1.0 / 32.0 * 1.5;
+        let mut samples = [0.0f32; 7];
+        let mut mindist = NO_OCCLUDER;
+        for k in 0..4 {
+            let offset = (
+                perp.0 * offset_step * k as f32,
+                perp.1 * offset_step * k as f32,
+            );
+            let plus = sample_map(map, diff.0 + offset.0, diff.1 + offset.1);
+            if k == 0 {
+                samples[0] = plus;
+                mindist = mindist.min(plus);
+            } else {
+                let minus = sample_map(map, diff.0 - offset.0, diff.1 - offset.1);
+                samples[k] = plus;
+                samples[k + 3] = minus;
+                mindist = mindist.min(plus).min(minus);
             }
         }
-        soft
+        let mindist = mindist.max(0.001);
+        let sigma = ((len - mindist) * 0.75).max(0.001);
+        let mut weights = [0.0f32; 4];
+        for (k, weight) in weights.iter_mut().enumerate() {
+            let kf = k as f32;
+            *weight = (-(kf * kf) / (2.0 * sigma * sigma)).exp();
+        }
+        let total = weights[0] + 2.0 * (weights[1] + weights[2] + weights[3]);
+        let mut occlusion = 0.0f32;
+        for (k, &value) in samples.iter().enumerate() {
+            let weight = match k {
+                0 => weights[0],
+                1 | 2 => weights[1],
+                3 | 4 => weights[2],
+                _ => weights[3],
+            };
+            occlusion += chebyshev_upper_bound(moment(value), len) * weight;
+        }
+        occlusion / total.max(1e-4)
     };
 
-    // 2) Свет: ambient + BFS от каждой лампы по нестенным клеткам.
-    //    Складываем вклады аддитивно (как SrcAlpha+One в SS14).
-    let mut light = vec![AMBIENT; (side * side) as usize];
-    let mut tint = vec![[0.0f32; 3]; (side * side) as usize];
-    for (lamp_x, lamp_y, radius, energy) in &lamp_state {
-        let (lx, ly) = (lamp_x - origin.0, lamp_y - origin.1);
+    // 4) Свет по текселям полтайла: аддитивные вклады источников (в движке
+    //    `BlendFunc(SrcAlpha, One)`), затем ambient карты.
+    let mut light = vec![AMBIENT; (dim * dim) as usize];
+    let mut tint = vec![[0.0f32; 3]; (dim * dim) as usize];
+    for (lamp_index, (lamp_x, lamp_y, radius, energy)) in lamp_state.iter().enumerate() {
+        let map = &lamp_maps[lamp_index];
+        let center = (*lamp_x as f32 + 0.5, *lamp_y as f32 + 0.5);
         let radius = *radius as f32;
         let energy = *energy as f32 / 100.0;
-        if lx < 0 || ly < 0 || lx >= side as i32 || ly >= side as i32 {
-            continue;
-        }
-        let start = (lx, ly);
-        let start_index = (ly as u32 * side + lx as u32) as usize;
-        if grid[start_index] {
-            continue; // лампа внутри стены (как отключённая в SS14)
-        }
-        let mut queue = std::collections::VecDeque::new();
-        let mut visited = vec![false; (side * side) as usize];
-        visited[start_index] = true;
-        queue.push_back(start);
-        while let Some((cx, cy)) = queue.pop_front() {
-            for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                let (nx, ny) = (cx + dx, cy + dy);
-                if nx < 0 || ny < 0 || nx >= side as i32 || ny >= side as i32 {
+        let color = lamp_color(*lamp_x, *lamp_y);
+        let min_x = (((center.0 - radius) - origin.0 as f32) * SUB)
+            .floor()
+            .max(0.0) as u32;
+        let max_x = ((((center.0 + radius) - origin.0 as f32) * SUB).ceil()).min(dim as f32) as u32;
+        let min_y = (((center.1 - radius) - origin.1 as f32) * SUB)
+            .floor()
+            .max(0.0) as u32;
+        let max_y = ((((center.1 + radius) - origin.1 as f32) * SUB).ceil()).min(dim as f32) as u32;
+        for ty in min_y..max_y {
+            for tx in min_x..max_x {
+                let px = origin.0 as f32 + (tx as f32 + 0.5) * step;
+                let py = origin.1 as f32 + (ty as f32 + 0.5) * step;
+                let diff = (px - center.0, py - center.1);
+                let dist2 = diff.0 * diff.0 + diff.1 * diff.1;
+                if dist2 > radius * radius {
                     continue;
                 }
-                let index = (ny as u32 * side + nx as u32) as usize;
-                if grid[index] || visited[index] {
+                let occlusion = soft_shadow(map, diff);
+                if occlusion <= 0.0 {
                     continue;
                 }
-                visited[index] = true;
-                let distance = (((nx - lx) as f32).powi(2) + ((ny - ly) as f32).powi(2)).sqrt();
-                if distance > radius {
+                // `sqr_dist` в шейдере считается с `LIGHTING_HEIGHT`: свет висит
+                // на высоте 1 м над полом.
+                let value = attenuation(
+                    dist2 + ssr_core::light::LIGHTING_HEIGHT,
+                    radius,
+                    energy,
+                    FALLOFF,
+                    0.0,
+                ) * occlusion;
+                if value <= 0.0 {
                     continue;
                 }
-                let value = attenuation(distance, radius) * energy;
-                if value < 0.001 {
-                    continue;
-                }
+                let index = (ty * dim + tx) as usize;
                 light[index] += value;
-                // Цвет лампы (тёплый #FFE4CE) накапливается тем же вкладом.
-                let color = lamp_color(*lamp_x, *lamp_y);
                 for channel in 0..3 {
                     tint[index][channel] += color[channel] * value;
                 }
-                queue.push_back((nx, ny));
             }
         }
     }
 
-    // 3) Wall bleed: стены берут максимум света соседей (свет «просачивается»
-    //    в стену, но не сквозь неё — как wall-bleed-blur + wall-merge в SS14).
+    // 5) Видимость глаза — мягкая маска (`fov-lighting.swsl`: `occlusion =
+    //    Chebyshev(момент карты FOV, расстояние)`), а не бинарный флаг.
+    let mut visible = vec![0.0f32; (dim * dim) as usize];
+    for ty in 0..dim {
+        for tx in 0..dim {
+            let px = origin.0 as f32 + (tx as f32 + 0.5) * step;
+            let py = origin.1 as f32 + (ty as f32 + 0.5) * step;
+            let diff = (
+                px - (player_tile.0 as f32 + 0.5),
+                py - (player_tile.1 as f32 + 0.5),
+            );
+            let len = (diff.0 * diff.0 + diff.1 * diff.1).sqrt();
+            let wall = sample_map(&eye_map, diff.0, diff.1);
+            visible[(ty * dim + tx) as usize] = chebyshev_upper_bound(moment(wall), len);
+        }
+    }
+
+    // 6) Просачивание света на стены (`wall-bleed` в движке): тайл-стена берёт
+    //    максимум света соседей, иначе стены были бы чёрными.
     let mut bleed = light.clone();
-    for ly in 1..side - 1 {
-        for lx in 1..side - 1 {
-            let index = (ly * side + lx) as usize;
-            if !grid[index] {
+    for ty in 1..dim - 1 {
+        for tx in 1..dim - 1 {
+            let tile = ((tx / LIGHT_SUBTEXELS) as i32, (ty / LIGHT_SUBTEXELS) as i32);
+            if !wall_at(tile.0, tile.1) {
                 continue;
             }
+            let index = (ty * dim + tx) as usize;
             let mut best = light[index];
-            for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                let neighbor = ((ly as i32 + dy) as u32 * side + (lx as i32 + dx) as u32) as usize;
+            for (dx, dy) in [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
+                let neighbor =
+                    (((ty as i32 + dy) as u32) * dim + ((tx as i32 + dx) as u32)) as usize;
                 best = best.max(light[neighbor]);
             }
             bleed[index] = best;
         }
     }
-    let light = bleed;
-
-    // 4) Мягкие края: размытие 3×3 по полу (стены и туман не перетекают).
-    let mut blurred = light.clone();
-    let mut blurred_tint = tint.clone();
-    for ly in 1..side - 1 {
-        for lx in 1..side - 1 {
-            let index = (ly * side + lx) as usize;
-            if grid[index] {
-                continue;
-            }
-            let mut sum = 0.0f32;
-            let mut count = 0.0f32;
-            let mut rgb = [0.0f32; 3];
-            for dy in -1i32..=1 {
-                for dx in -1i32..=1 {
-                    let x = (lx as i32 + dx) as u32;
-                    let y = (ly as i32 + dy) as u32;
-                    let neighbor = (y * side + x) as usize;
-                    if grid[neighbor] {
-                        continue;
-                    }
-                    sum += light[neighbor];
-                    for channel in 0..3 {
-                        rgb[channel] += tint[neighbor][channel];
-                    }
-                    count += 1.0;
-                }
-            }
-            blurred[index] = sum / count.max(1.0f32);
-            for channel in 0..3 {
-                blurred_tint[index][channel] = rgb[channel] / count.max(1.0f32);
-            }
-        }
-    }
+    let (blurred, blurred_tint) = (bleed, tint);
 
     // 5) Пишем слои: тьма alpha = 1 − свет×видимость (это и есть light×fov
     //    одним оверлеем), оттенок — под тьмой, она его маскирует.
@@ -540,14 +543,13 @@ pub fn update_lighting(
             return;
         };
         data.fill(0);
-        for ly in 0..side {
-            for lx in 0..side {
-                let index = (ly * side + lx) as usize;
-                let visible = fov[index];
+        for ly in 0..dim {
+            for lx in 0..dim {
+                let index = (ly * dim + lx) as usize;
                 let luminance = blurred[index];
-                let occlusion = 1.0 - luminance * visible;
-                let row = side - 1 - ly;
-                let target = ((row * side + lx) * 4) as usize;
+                let occlusion = 1.0 - luminance * visible[index];
+                let row = dim - 1 - ly;
+                let target = ((row * dim + lx) * 4) as usize;
                 data[target + 3] = (occlusion.clamp(0.0, 1.0) * 255.0) as u8;
             }
         }
@@ -556,22 +558,22 @@ pub fn update_lighting(
         && let Some(glow_data) = glow_image.data.as_mut()
     {
         glow_data.fill(0);
-        for ly in 0..side {
-            for lx in 0..side {
-                let index = (ly * side + lx) as usize;
+        for ly in 0..dim {
+            for lx in 0..dim {
+                let index = (ly * dim + lx) as usize;
                 let contribution = (blurred[index] - AMBIENT).max(0.0);
                 if contribution < 0.001 {
                     continue;
                 }
                 let rgb = blurred_tint[index];
                 let norm = rgb[0].max(rgb[1]).max(rgb[2]).max(0.001);
-                let row = side - 1 - ly;
-                let target = ((row * side + lx) * 4) as usize;
+                let row = dim - 1 - ly;
+                let target = ((row * dim + lx) * 4) as usize;
                 glow_data[target] = ((rgb[0] / norm) * 255.0) as u8;
                 glow_data[target + 1] = ((rgb[1] / norm) * 255.0) as u8;
                 glow_data[target + 2] = ((rgb[2] / norm) * 255.0) as u8;
                 glow_data[target + 3] =
-                    ((contribution * fov[index] * GLOW_ALPHA).min(1.0) * 255.0) as u8;
+                    ((contribution * visible[index] * GLOW_ALPHA).min(1.0) * 255.0) as u8;
             }
         }
     }
