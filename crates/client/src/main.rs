@@ -169,6 +169,7 @@ fn main() {
             inventory_ui::sync_inhand_items,
             humanoid::sync_bodies,
             humanoid::update_facing,
+            humanoid::debug_body,
             inventory_ui::render_inventory_panel,
             inventory_ui::render_hands_panel,
             inventory_ui::spawn_health_hud,
@@ -180,6 +181,13 @@ fn main() {
             inventory_ui::hands_ui_click,
             inventory_ui::world_click,
             inventory_ui::action_menu_click,
+        )
+            .run_if(in_game),
+    );
+    // Тест-режимы клиента (SSR_*_TEST) — отдельной группой.
+    app.add_systems(
+        Update,
+        (
             inventory_ui::inventory_test_mode,
             inventory_ui::build_test_mode,
             inventory_ui::attack_test_mode,

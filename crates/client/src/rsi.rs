@@ -70,6 +70,8 @@ pub const STARTUP_RSI: &[&str] = &[
     "_Mini/Lobby/mars.rsi",
     // Ящик-контейнер (T3.4): состояния base/closed/open.
     "Structures/Storage/Crates/generic.rsi",
+    // Глаза гуманоида (отдельный слой поверх головы, как в SS14).
+    "Mobs/Customization/eyes.rsi",
     // Тела рас (T5.3): части гуманоидов, собираются в humanoid.rs.
     "Mobs/Species/Human/parts.rsi",
     "Mobs/Species/Skeleton/parts.rsi",

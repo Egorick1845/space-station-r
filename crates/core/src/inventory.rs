@@ -17,12 +17,26 @@ pub const INVENTORY_SLOTS: usize = INVENTORY_COLS as usize * INVENTORY_ROWS as u
 /// Слот «первый свободный» для запросов перемещения.
 pub const SLOT_ANY: u8 = u8::MAX;
 
-/// Инвентарь: по слоту на предмет; None — пусто (ADR-3, реплицируется).
-#[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct Inventory {
-    pub slots: Vec<Option<u64>>,
+/// Размеры предметов в клетках инвентаря (тетрис-сетка, как в SS14):
+/// (ширина, высота). Неизвестные предметы — 1×1.
+pub fn item_size(name: &str) -> (u8, u8) {
+    match name {
+        // Лом в SS14 длинный: 2 клетки по горизонтали.
+        "Crowbar" => (2, 1),
+        "SteelSheet" => (1, 1),
+        _ => (1, 1),
+    }
 }
 
+/// Инвентарь-сетка (SS14-тетрис): в каждой клетке — bits предмета, который её
+/// занимает; предмет размера w×h заполняет w·h клеток (ADR-3, реплицируется).
+#[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Inventory {
+    /// Клетки построчно (7×4): None — пусто.
+    pub cells: Vec<Option<u64>>,
+}
+
+#[allow(clippy::derivable_impls)]
 impl Default for Inventory {
     fn default() -> Self {
         Self::new()
@@ -32,56 +46,117 @@ impl Default for Inventory {
 impl Inventory {
     pub fn new() -> Self {
         Self {
-            slots: vec![None; INVENTORY_SLOTS],
+            cells: vec![None; INVENTORY_SLOTS],
         }
-    }
-
-    /// Первый свободный слот.
-    pub fn first_empty(&self) -> Option<u8> {
-        self.slots
-            .iter()
-            .position(|s| s.is_none())
-            .map(|index| index as u8)
-    }
-
-    /// Слот, в котором лежит предмет.
-    pub fn slot_of(&self, item: u64) -> Option<u8> {
-        self.slots
-            .iter()
-            .position(|s| *s == Some(item))
-            .map(|index| index as u8)
     }
 
     pub fn contains(&self, item: u64) -> bool {
-        self.slot_of(item).is_some()
+        self.cells.contains(&Some(item))
     }
 
-    /// Забрать предмет (для переноса/выброса).
-    pub fn take(&mut self, item: u64) -> bool {
-        match self.slot_of(item) {
-            Some(slot) => {
-                self.slots[slot as usize] = None;
-                true
-            }
-            None => false,
-        }
+    /// Клетки, занятые предметом.
+    pub fn cells_of(&self, item: u64) -> Vec<usize> {
+        self.cells
+            .iter()
+            .enumerate()
+            .filter(|(_, cell)| **cell == Some(item))
+            .map(|(index, _)| index)
+            .collect()
     }
 
-    /// Положить предмет в конкретный слот (только в пустой и в пределах сетки).
-    pub fn put(&mut self, slot: u8, item: u64) -> bool {
-        let index = slot as usize;
-        if index >= self.slots.len() || self.slots[index].is_some() {
+    /// Клетка-якорь предмета (верхняя левая из занятых).
+    pub fn anchor_of(&self, item: u64) -> Option<u8> {
+        self.cells_of(item)
+            .into_iter()
+            .min()
+            .map(|index| index as u8)
+    }
+
+    /// Подходит ли позиция для предмета w×h (все клетки пусты и внутри сетки).
+    fn fits(&self, w: u8, h: u8, index: u8) -> bool {
+        let x = index % INVENTORY_COLS;
+        let y = index / INVENTORY_COLS;
+        if x + w > INVENTORY_COLS || y + h > INVENTORY_ROWS {
             return false;
         }
-        self.slots[index] = Some(item);
+        (0..h).all(|dy| {
+            (0..w).all(|dx| {
+                let cell = (y + dy) * INVENTORY_COLS + (x + dx);
+                self.cells.get(cell as usize).copied().flatten().is_none()
+            })
+        })
+    }
+
+    /// Позиция для предмета w×h: конкретная клетка (если задана) или первая
+    /// подходящая (перебор построчно).
+    pub fn find_place(&self, w: u8, h: u8, at: Option<u8>) -> Option<u8> {
+        match at {
+            Some(index) => self.fits(w, h, index).then_some(index),
+            None => (0..INVENTORY_SLOTS as u8).find(|index| self.fits(w, h, *index)),
+        }
+    }
+
+    /// Кладёт предмет в клетку-якорь (занимает w×h клеток).
+    pub fn place(&mut self, item: u64, w: u8, h: u8, index: u8) -> bool {
+        if !self.fits(w, h, index) {
+            return false;
+        }
+        let x = index % INVENTORY_COLS;
+        let y = index / INVENTORY_COLS;
+        for dy in 0..h {
+            for dx in 0..w {
+                let cell = (y + dy) * INVENTORY_COLS + (x + dx);
+                self.cells[cell as usize] = Some(item);
+            }
+        }
         true
     }
 
-    /// Положить в первый свободный слот; возвращает номер слота.
-    pub fn put_first_empty(&mut self, item: u64) -> Option<u8> {
-        let slot = self.first_empty()?;
-        self.put(slot, item).then_some(slot)
+    /// Убирает предмет со всех клеток.
+    pub fn take(&mut self, item: u64) -> bool {
+        let mut taken = false;
+        for cell in self.cells.iter_mut() {
+            if *cell == Some(item) {
+                *cell = None;
+                taken = true;
+            }
+        }
+        taken
     }
+
+    /// Кладёт предмет в первую подходящую позицию; возвращает клетку-якорь.
+    pub fn put_first_fit(&mut self, item: u64, w: u8, h: u8) -> Option<u8> {
+        let index = self.find_place(w, h, None)?;
+        self.place(item, w, h, index).then_some(index)
+    }
+}
+
+/// Раскладка предметов в сетке для отрисовки «тетрисом»: для каждого предмета
+/// (bits, x, y, w, h) — ограничивающий прямоугольник занятых им клеток.
+pub fn item_layout(cells: &[Option<u64>]) -> Vec<(u64, u8, u8, u8, u8)> {
+    let mut seen: Vec<u64> = Vec::new();
+    let mut layout = Vec::new();
+    for cell in cells.iter().flatten() {
+        if seen.contains(cell) {
+            continue;
+        }
+        seen.push(*cell);
+        let coords: Vec<(u8, u8)> = cells
+            .iter()
+            .enumerate()
+            .filter(|(_, value)| **value == Some(*cell))
+            .map(|(index, _)| {
+                let index = index as u8;
+                (index % INVENTORY_COLS, index / INVENTORY_COLS)
+            })
+            .collect();
+        let x = coords.iter().map(|c| c.0).min().unwrap_or(0);
+        let y = coords.iter().map(|c| c.1).min().unwrap_or(0);
+        let w = coords.iter().map(|c| c.0).max().unwrap_or(0) - x + 1;
+        let h = coords.iter().map(|c| c.1).max().unwrap_or(0) - y + 1;
+        layout.push((*cell, x, y, w, h));
+    }
+    layout
 }
 
 /// Рук у персонажа (как в SS14: две руки, активная переключается).
@@ -199,26 +274,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn inventory_basic_ops() {
+    fn inventory_grid_places_and_takes() {
         let mut inv = Inventory::new();
-        assert_eq!(inv.slots.len(), INVENTORY_SLOTS);
-        assert_eq!(inv.first_empty(), Some(0));
-
-        assert!(inv.put(3, 42));
+        assert_eq!(inv.cells.len(), INVENTORY_SLOTS);
+        // Лом 2×1 занимает две клетки.
+        assert_eq!(inv.put_first_fit(42, 2, 1), Some(0));
         assert!(inv.contains(42));
-        assert_eq!(inv.slot_of(42), Some(3));
-        // Занятый слот не перезаписывается.
-        assert!(!inv.put(3, 99));
-        // Вне сетки — отказ.
-        assert!(!inv.put(INVENTORY_SLOTS as u8, 99));
-
-        assert_eq!(inv.put_first_empty(7), Some(0));
-        assert_eq!(inv.first_empty(), Some(1));
-
+        assert_eq!(inv.cells_of(42), vec![0, 1]);
+        assert_eq!(inv.anchor_of(42), Some(0));
+        // Следующий предмет кладётся после лома.
+        assert_eq!(inv.put_first_fit(7, 1, 1), Some(2));
+        // Явная позиция занята — отказ.
+        assert_eq!(inv.find_place(1, 1, Some(0)), None);
         assert!(inv.take(42));
-        assert!(!inv.contains(42));
-        assert_eq!(inv.first_empty(), Some(1));
+        assert_eq!(inv.anchor_of(42), None);
+        // После освобождения первая позиция снова доступна.
+        assert_eq!(inv.put_first_fit(9, 1, 1), Some(0));
         assert!(!inv.take(42), "повторное изъятие не проходит");
+    }
+
+    #[test]
+    fn inventory_grid_size_respected() {
+        let mut inv = Inventory::new();
+        // 2×1 не влезает в последний столбец, но влезает в первый.
+        let last_in_row = INVENTORY_COLS - 1;
+        assert_eq!(inv.find_place(2, 1, Some(last_in_row)), None);
+        assert_eq!(inv.put_first_fit(5, 2, 1), Some(0));
+        // 1×1 встаёт в оставшуюся клетку второго ряда? Нет — рядом с ломом.
+        assert_eq!(inv.find_place(1, 1, Some(1)), None);
+        assert_eq!(inv.find_place(8, 1, None), None, "шире сетки — не влезает");
+        assert_eq!(inv.find_place(7, 5, None), None, "выше сетки — не влезает");
+        assert_eq!(
+            inv.find_place(7, 2, None),
+            Some(7),
+            "вся ширина во втором ряду"
+        );
     }
 
     #[test]
@@ -250,9 +340,19 @@ mod tests {
     fn inventory_full() {
         let mut inv = Inventory::new();
         for i in 0..INVENTORY_SLOTS as u64 {
-            assert!(inv.put_first_empty(i).is_some());
+            assert!(inv.put_first_fit(i, 1, 1).is_some());
         }
-        assert_eq!(inv.first_empty(), None);
-        assert_eq!(inv.put_first_empty(1234), None);
+        assert_eq!(inv.put_first_fit(1234, 1, 1), None);
+        // Освободили две клетки подряд — лом снова влезает.
+        assert!(inv.take(0));
+        assert!(inv.take(1));
+        assert_eq!(inv.put_first_fit(1234, 2, 1), Some(0));
+    }
+
+    #[test]
+    fn item_sizes_from_names() {
+        assert_eq!(item_size("Crowbar"), (2, 1));
+        assert_eq!(item_size("SteelSheet"), (1, 1));
+        assert_eq!(item_size("Unknown"), (1, 1));
     }
 }

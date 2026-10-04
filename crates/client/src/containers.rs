@@ -169,7 +169,7 @@ pub fn render_container_panel(
         Some((entity, _)) => {
             let slots = inventories
                 .get(entity)
-                .map(|inv| inv.slots.clone())
+                .map(|inv| inv.cells.clone())
                 .unwrap_or_default();
             (Some(entity), slots)
         }
@@ -224,59 +224,46 @@ pub fn render_container_panel(
                 TextColor(Color::srgb(1.0, 0.62, 0.15)),
             ));
             panel
-                .spawn(Node {
-                    flex_direction: FlexDirection::Column,
-                    row_gap: px(3),
-                    ..default()
-                })
+                .spawn(crate::inventory_ui::grid_node())
                 .with_children(|grid| {
-                    for row in 0..ssr_core::inventory::INVENTORY_ROWS {
-                        grid.spawn(Node {
-                            flex_direction: FlexDirection::Row,
-                            column_gap: px(3),
-                            ..default()
-                        })
-                        .with_children(|line| {
-                            for col in 0..ssr_core::inventory::INVENTORY_COLS {
-                                let index =
-                                    (row * ssr_core::inventory::INVENTORY_COLS + col) as usize;
-                                let item = slots.get(index).copied().flatten();
-                                let mut slot = line.spawn((
-                                    ContainerSlot {
-                                        container: container_entity,
-                                        slot: index as u8,
-                                    },
-                                    Button,
-                                    Node {
-                                        width: px(34),
-                                        height: px(34),
-                                        border: UiRect::all(px(2)),
-                                        align_items: AlignItems::Center,
-                                        justify_content: JustifyContent::Center,
-                                        ..default()
-                                    },
-                                    BackgroundColor(Color::srgb(0.12, 0.12, 0.15)),
-                                    BorderColor::from(Color::srgb(0.28, 0.28, 0.33)),
-                                ));
-                                if let Some(bits) = item
-                                    && let Some(sprite) = sprites.icon(bits)
-                                {
-                                    let mut image = ImageNode::new(sprite.image.clone());
-                                    image.texture_atlas = Some(TextureAtlas {
-                                        layout: sprite.layout.clone(),
-                                        index: sprite.index(0, 0),
-                                    });
-                                    slot.with_child((
-                                        image,
-                                        Node {
-                                            width: px(26),
-                                            height: px(26),
-                                            ..default()
-                                        },
-                                    ));
-                                }
-                            }
+                    // Пустые клетки (клик — положить из руки в эту позицию).
+                    for index in 0..(ssr_core::inventory::INVENTORY_COLS
+                        * ssr_core::inventory::INVENTORY_ROWS)
+                    {
+                        let x = index % ssr_core::inventory::INVENTORY_COLS;
+                        let y = index / ssr_core::inventory::INVENTORY_COLS;
+                        grid.spawn((
+                            ContainerSlot {
+                                container: container_entity,
+                                slot: index,
+                            },
+                            Button,
+                            crate::inventory_ui::cell_node(x, y),
+                            BackgroundColor(Color::srgb(0.12, 0.12, 0.15)),
+                            BorderColor::from(Color::srgb(0.28, 0.28, 0.33)),
+                        ));
+                    }
+                    // Предметы поверх — во всю занятую площадь (тетрис).
+                    for (bits, x, y, w, h) in ssr_core::inventory::item_layout(&slots) {
+                        let Some(sprite) = sprites.icon(bits) else {
+                            continue;
+                        };
+                        let mut image = ImageNode::new(sprite.image.clone());
+                        image.texture_atlas = Some(TextureAtlas {
+                            layout: sprite.layout.clone(),
+                            index: sprite.index(0, 0),
                         });
+                        grid.spawn((
+                            ContainerSlot {
+                                container: container_entity,
+                                slot: y * ssr_core::inventory::INVENTORY_COLS + x,
+                            },
+                            Button,
+                            crate::inventory_ui::item_node(x, y, w, h),
+                            BackgroundColor(Color::srgba(0.16, 0.16, 0.21, 0.9)),
+                            BorderColor::from(Color::srgb(0.38, 0.38, 0.45)),
+                        ))
+                        .with_child((image, crate::inventory_ui::fill_node()));
                     }
                 });
             panel.spawn((
@@ -313,7 +300,7 @@ pub fn container_slot_click(
         let item = inventories
             .get(slot.container)
             .ok()
-            .and_then(|inv| inv.slots.get(slot.slot as usize).copied().flatten());
+            .and_then(|inv| inv.cells.get(slot.slot as usize).copied().flatten());
         match item {
             Some(item) => {
                 // Взять из ящика себе в рюкзак.
@@ -408,7 +395,7 @@ pub fn container_test_mode(
         && let Some(item) = inventories
             .get(container_entity)
             .ok()
-            .and_then(|inv| inv.slots.iter().flatten().copied().next())
+            .and_then(|inv| inv.cells.iter().flatten().copied().next())
     {
         for mut sender in senders.iter_mut() {
             sender.send::<GameChannel>(ClientMessage::TransferItem {
@@ -433,7 +420,7 @@ pub fn container_test_mode(
         && let Some(item) = inventories
             .get(container_entity)
             .ok()
-            .and_then(|inv| inv.slots.iter().flatten().copied().next())
+            .and_then(|inv| inv.cells.iter().flatten().copied().next())
     {
         for mut sender in senders.iter_mut() {
             sender.send::<GameChannel>(ClientMessage::TransferItem {

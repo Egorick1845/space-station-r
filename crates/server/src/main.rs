@@ -125,6 +125,7 @@ fn main() {
             // Атмосфера (T4.3): диффузия, урон от разгерметизации, тесты.
             simulate_atmosphere,
             suffocation,
+            auto_doors,
             breach_test,
             vacuum_test,
             log_atmosphere,
@@ -192,7 +193,7 @@ fn spawn_containers(
         };
         let mut items = Vec::new();
         for name in names {
-            items.push(
+            items.push((
                 commands
                     .spawn((
                         Item {
@@ -204,10 +205,13 @@ fn spawn_containers(
                     ))
                     .id()
                     .to_bits(),
-            );
+                ssr_core::inventory::item_size(name),
+            ));
         }
-        for item in items {
-            inventory.put_first_empty(item);
+        for (item, (w, h)) in items {
+            if inventory.put_first_fit(item, w, h).is_none() {
+                tracing::warn!("container: no room for item");
+            }
         }
         let room = chunk_rooms.room_for(chunk_coords(*x, *y), &mut allocator);
         commands.spawn((
@@ -263,6 +267,17 @@ const ATMOS_STEP_SECS: f32 = 0.2;
 /// Доля выравнивания давления между соседними тайлами за шаг.
 /// Внимание: явная схема с 4 соседями устойчива только при K <= 0.25.
 const DIFFUSION_K: f32 = 0.2;
+
+/// Автоматика двери (как в SS14): открывается при подходе игрока с доступом,
+/// закрывается через [`AUTO_CLOSE_SECS`] после того, как рядом никого не осталось.
+const AUTO_DOOR_RANGE: f32 = 44.0;
+const AUTO_CLOSE_SECS: f32 = 4.0;
+
+/// Таймер автозакрытия двери (только сервер, не реплицируется).
+#[derive(Component)]
+struct DoorAuto {
+    close_in: f32,
+}
 
 /// Атмосфера мира (T4.3, lite): единая сетка газа по тайлам карты.
 /// Хранится плоско (мир маленький), а клиенту отдаётся по чанкам
@@ -549,6 +564,56 @@ fn suffocation(
     }
 }
 
+/// Автоматика дверей (как в SS14): подошёл игрок с доступом — дверь
+/// открывается; ушёл — закрывается через [`AUTO_CLOSE_SECS`].
+fn auto_doors(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut doors: Query<(Entity, &mut Door, &mut DoorAuto)>,
+    positions: Query<&PlayerPosition>,
+    access: Query<&Access>,
+    players: Res<Players>,
+) {
+    for (entity, mut door, mut auto) in doors.iter_mut() {
+        let center = Vec2::from_array(door.position);
+        let mut nearby = false;
+        for entry in &players.entries {
+            let Ok(position) = positions.get(entry.player) else {
+                continue;
+            };
+            if Vec2::from_array(position.0).distance(center) > AUTO_DOOR_RANGE {
+                continue;
+            }
+            let allowed = match door.access.as_deref() {
+                None => true,
+                Some(required) => access
+                    .get(entry.player)
+                    .map(|keys| keys.list.iter().any(|key| key == required))
+                    .unwrap_or(false),
+            };
+            if allowed {
+                nearby = true;
+                break;
+            }
+        }
+        if nearby {
+            auto.close_in = AUTO_CLOSE_SECS;
+            if !door.open {
+                door.open = true;
+                commands.entity(entity).insert(ColliderDisabled);
+                tracing::info!(door = ?entity, "door auto-opened");
+            }
+        } else if door.open {
+            auto.close_in -= time.delta_secs();
+            if auto.close_in <= 0.0 {
+                door.open = false;
+                commands.entity(entity).remove::<ColliderDisabled>();
+                tracing::info!(door = ?entity, "door auto-closed");
+            }
+        }
+    }
+}
+
 /// Тест T4.3: SSR_BREACH_TEST=1 — через 3 секунды пробивает стену у космоса
 /// (тайлы (62,0..2) в тестовой карте): комната разгерметизируется.
 fn breach_test(
@@ -716,6 +781,9 @@ fn load_map(
                 position: [x, y],
                 access,
             },
+            DoorAuto {
+                close_in: AUTO_CLOSE_SECS,
+            },
             Replicate::to_clients(NetworkTarget::All),
             Rooms::single(room),
             RigidBody::Static,
@@ -866,6 +934,17 @@ fn on_link_disconnected(
 /// исполняемое (атака, двери, применение предметов, verbs) уходит в очередь
 /// [`ActionQueue`] и обрабатывается одной системой [`process_actions`].
 #[allow(clippy::too_many_arguments)]
+/// Размер предмета по bits сущности (из имени, `item_size`): (ширина, высота).
+fn item_size_of(items: &Query<&Item>, bits: u64) -> (u8, u8) {
+    Entity::try_from_bits(bits)
+        .and_then(|entity| items.get(entity).ok())
+        .map(|item| ssr_core::inventory::item_size(&item.name))
+        .unwrap_or((1, 1))
+}
+
+/// Обработчик всех сообщений клиентов: одна точка приёма (MessageReceiver
+/// осушается `receive()`), поэтому аргументов много.
+#[allow(clippy::too_many_arguments)]
 fn handle_client_messages(
     mut commands: Commands,
     map: Res<GameMap>,
@@ -880,6 +959,7 @@ fn handle_client_messages(
     mut hands: Query<&mut Hands>,
     containers: Query<(Entity, &Container)>,
     container_positions: Query<&ItemPosition>,
+    items: Query<&Item>,
     mut actions: ResMut<ActionQueue>,
     mut players: ResMut<Players>,
 ) {
@@ -1024,17 +1104,14 @@ fn handle_client_messages(
                     let Ok(mut dest_inventory) = inventories.get_mut(dest_entity) else {
                         continue;
                     };
-                    let slot = if to_slot == SLOT_ANY {
-                        dest_inventory.first_empty()
-                    } else {
-                        Some(to_slot)
-                    };
-                    let Some(slot) = slot else {
-                        tracing::warn!(?dest_entity, "transfer: no free slot");
+                    let (w, h) = item_size_of(&items, item);
+                    let anchor = (to_slot != SLOT_ANY).then_some(to_slot);
+                    let Some(index) = dest_inventory.find_place(w, h, anchor) else {
+                        tracing::warn!(?dest_entity, w, h, "transfer: no room for item");
                         continue;
                     };
-                    if !dest_inventory.put(slot, item) {
-                        tracing::warn!(slot, "transfer: slot busy");
+                    if !dest_inventory.place(item, w, h, index) {
+                        tracing::warn!(index, "transfer: placement failed");
                         continue;
                     }
 
@@ -1048,7 +1125,7 @@ fn handle_client_messages(
                     } else if let Ok(mut inventory) = inventories.get_mut(sender_player) {
                         inventory.take(item);
                     }
-                    tracing::info!(item, slot, from = ?source_container, to = ?dest_entity, "item transferred");
+                    tracing::info!(item, index, from = ?source_container, to = ?dest_entity, "item transferred");
                     continue;
                 }
                 ClientMessage::SwitchHand => {
@@ -1071,12 +1148,14 @@ fn handle_client_messages(
                     let Ok(mut hand) = hands.get_mut(player) else {
                         continue;
                     };
-                    let Some(item) = inventory.slots.get(slot as usize).copied().flatten() else {
+                    let Some(item) = inventory.cells.get(slot as usize).copied().flatten() else {
                         continue;
                     };
+                    let anchor = inventory.anchor_of(item).unwrap_or(slot);
+                    let (w, h) = item_size_of(&items, item);
                     inventory.take(item);
                     if !hand.take_in_active(item) {
-                        inventory.put(slot, item);
+                        inventory.place(item, w, h, anchor);
                         tracing::warn!(slot, "take in hand: active hand busy");
                         continue;
                     }
@@ -1096,7 +1175,8 @@ fn handle_client_messages(
                     if !hand.take(item) {
                         continue;
                     }
-                    match inventory.put_first_empty(item) {
+                    let (w, h) = item_size_of(&items, item);
+                    match inventory.put_first_fit(item, w, h) {
                         Some(slot) => tracing::info!(item, slot, "item stowed"),
                         None => {
                             hand.take_in_active(item);
@@ -1120,7 +1200,8 @@ fn handle_client_messages(
                         hand.take_in_active(item);
                         continue;
                     };
-                    match inventory.put_first_empty(item) {
+                    let (w, h) = item_size_of(&items, item);
+                    match inventory.put_first_fit(item, w, h) {
                         Some(slot) => tracing::info!(item, slot, "item stowed from hand"),
                         None => {
                             hand.take_in_active(item);
@@ -1245,7 +1326,10 @@ fn handle_client_messages(
                     Rooms::default(),
                 ))
                 .id();
-            inventory.put_first_empty(item.to_bits());
+            let (w, h) = ssr_core::inventory::item_size(item_name);
+            if inventory.put_first_fit(item.to_bits(), w, h).is_none() {
+                tracing::warn!(item = %item_name, "inventory: no room for starting item");
+            }
         }
         commands.entity(player).insert(inventory);
         if let Some(role) = role {
@@ -1716,7 +1800,8 @@ fn process_actions(
                             ))
                             .id();
                         let sheet_bits = sheet.to_bits();
-                        if let Some(slot) = inventory.put_first_empty(sheet_bits) {
+                        let (w, h) = ssr_core::inventory::item_size("SteelSheet");
+                        if let Some(slot) = inventory.put_first_fit(sheet_bits, w, h) {
                             tracing::info!(slot, "deconstruct: material returned");
                         }
                     }

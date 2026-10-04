@@ -47,6 +47,11 @@ fn part_key(species: &str, part: &str) -> String {
     format!("sprites/ss14/Mobs/Species/{species}/parts.rsi#{part}")
 }
 
+/// Глаза — отдельный слой поверх головы (как `MobHumanoidEyes` в SS14).
+const EYES_KEY: &str = "sprites/ss14/Mobs/Customization/eyes.rsi#eyes";
+/// Расы, которым глаза-человеческие не рисуем (своя голова/маска).
+const NO_EYES: &[&str] = &["Skeleton", "Diona", "Gingerbread"];
+
 /// Собирает тело расы детьми сущности-визуала (родитель носит [`Facing`]).
 /// Возвращает число прикреплённых частей (0 — спрайты расы не найдены).
 pub fn attach_body(
@@ -71,6 +76,25 @@ pub fn attach_body(
                 HumanoidPart { owner, key },
                 component,
                 Transform::from_xyz(0.0, 0.0, *z),
+            ));
+            attached += 1;
+        }
+        // Глаза: отдельный слой поверх головы (кроме рас со своей головой).
+        if !NO_EYES.contains(&species)
+            && let Some(sprite) = registry.get(EYES_KEY)
+        {
+            let mut component = Sprite::from_image(sprite.image.clone());
+            component.texture_atlas = Some(TextureAtlas {
+                layout: sprite.layout.clone(),
+                index: sprite.index(0, 0),
+            });
+            parent.spawn((
+                HumanoidPart {
+                    owner,
+                    key: EYES_KEY.to_string(),
+                },
+                component,
+                Transform::from_xyz(0.0, 0.0, 0.11),
             ));
             attached += 1;
         }
@@ -154,6 +178,35 @@ pub fn sync_bodies(
             .entity(visual_entity)
             .insert(BodySpecies(species_id.clone()));
         tracing::info!(player = ?visual.player, species = %species_id, parts, "remote body attached");
+    }
+}
+
+/// Отладка (SSR_DEBUG_BODY=1): раз в секунду печатает позицию и видимость
+/// каждой части тела — проверка, что тело реально рисуется и не разъехалось.
+pub fn debug_body(
+    time: Res<Time>,
+    mut next_log: Local<f32>,
+    parts: Query<(Entity, &HumanoidPart, &GlobalTransform, &ViewVisibility)>,
+) {
+    if std::env::var_os("SSR_DEBUG_BODY").is_none() {
+        return;
+    }
+    *next_log += time.delta_secs();
+    if *next_log < 1.0 {
+        return;
+    }
+    *next_log = 0.0;
+    for (entity, part, transform, visible) in parts.iter() {
+        tracing::info!(
+            ?entity,
+            owner = ?part.owner,
+            x = transform.translation().x,
+            y = transform.translation().y,
+            z = transform.translation().z,
+            visible = visible.get(),
+            part = %part.key,
+            "body part"
+        );
     }
 }
 

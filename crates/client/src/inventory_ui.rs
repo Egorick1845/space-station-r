@@ -319,7 +319,63 @@ impl ItemSprites<'_, '_> {
     }
 }
 
-/// Пересобирает панель рюкзака при изменениях содержимого.
+/// Размер клетки сетки и зазор (px) — общие для панелей рюкзака и ящика.
+pub const GRID_CELL: f32 = 36.0;
+/// Зазор между клетками сетки.
+pub const GRID_GAP: f32 = 3.0;
+
+/// Сетка инвентаря: относительный контейнер размером колонки×строки.
+pub fn grid_node() -> Node {
+    Node {
+        width: px(INVENTORY_COLS as f32 * GRID_CELL + (INVENTORY_COLS as f32 - 1.0) * GRID_GAP),
+        height: px(INVENTORY_ROWS as f32 * GRID_CELL + (INVENTORY_ROWS as f32 - 1.0) * GRID_GAP),
+        ..default()
+    }
+}
+
+/// Клетка сетки: абсолютная позиция по (x, y) от левого верхнего угла.
+pub fn cell_node(x: u8, y: u8) -> Node {
+    Node {
+        position_type: PositionType::Absolute,
+        left: px(x as f32 * (GRID_CELL + GRID_GAP)),
+        top: px(y as f32 * (GRID_CELL + GRID_GAP)),
+        width: px(GRID_CELL),
+        height: px(GRID_CELL),
+        border: UiRect::all(px(2)),
+        align_items: AlignItems::Center,
+        justify_content: JustifyContent::Center,
+        ..default()
+    }
+}
+
+/// Предмет в сетке: занимает w×h клеток начиная с (x, y) — «тетрис».
+pub fn item_node(x: u8, y: u8, w: u8, h: u8) -> Node {
+    let mut node = cell_node(x, y);
+    node.width = px(w as f32 * GRID_CELL + (w as f32 - 1.0) * GRID_GAP);
+    node.height = px(h as f32 * GRID_CELL + (h as f32 - 1.0) * GRID_GAP);
+    node
+}
+
+/// Картинка/подпись на всю площадь клетки или предмета.
+pub fn fill_node() -> Node {
+    Node {
+        width: Val::Percent(100.0),
+        height: Val::Percent(100.0),
+        ..default()
+    }
+}
+
+/// Иконка предмета в сетке (атлас RSI) — размер на всю клетку/предмет.
+fn icon_node(sprite: &RsiSprite) -> ImageNode {
+    let mut image = ImageNode::new(sprite.image.clone());
+    image.texture_atlas = Some(TextureAtlas {
+        layout: sprite.layout.clone(),
+        index: sprite.index(0, 0),
+    });
+    image
+}
+
+/// Пересобирает панель рюкзака при изменениях содержимого (тетрис-сетка).
 pub fn render_inventory_panel(
     mut commands: Commands,
     sprites: ItemSprites,
@@ -332,12 +388,12 @@ pub fn render_inventory_panel(
     let Some(inventory) = own_inventory(&own, &inventories) else {
         return;
     };
-    if last.as_ref() == Some(&inventory.slots) {
+    if last.as_ref() == Some(&inventory.cells) {
         return;
     }
-    *last = Some(inventory.slots.clone());
+    *last = Some(inventory.cells.clone());
     tracing::info!(
-        items = inventory.slots.iter().filter(|s| s.is_some()).count(),
+        items = inventory.cells.iter().flatten().count(),
         "inventory updated"
     );
 
@@ -371,58 +427,34 @@ pub fn render_inventory_panel(
                 TextFont::from_font_size(13.0),
                 TextColor(Color::srgb(0.88, 0.88, 0.90)),
             ));
-            panel
-                .spawn(Node {
-                    flex_direction: FlexDirection::Column,
-                    row_gap: px(3),
-                    ..default()
-                })
-                .with_children(|grid| {
-                    for row in 0..INVENTORY_ROWS {
-                        grid.spawn(Node {
-                            flex_direction: FlexDirection::Row,
-                            column_gap: px(3),
-                            ..default()
-                        })
-                        .with_children(|line| {
-                            for col in 0..INVENTORY_COLS {
-                                let index = (row * INVENTORY_COLS + col) as usize;
-                                let item = inventory.slots.get(index).copied().flatten();
-                                let mut slot = line.spawn((
-                                    InvSlot(index as u8),
-                                    Button,
-                                    Node {
-                                        width: px(36),
-                                        height: px(36),
-                                        border: UiRect::all(px(2)),
-                                        align_items: AlignItems::Center,
-                                        justify_content: JustifyContent::Center,
-                                        ..default()
-                                    },
-                                    BackgroundColor(Color::srgb(0.12, 0.12, 0.15)),
-                                    BorderColor::from(Color::srgb(0.28, 0.28, 0.33)),
-                                ));
-                                if let Some(bits) = item
-                                    && let Some(sprite) = sprites.icon(bits)
-                                {
-                                    let mut image = ImageNode::new(sprite.image.clone());
-                                    image.texture_atlas = Some(TextureAtlas {
-                                        layout: sprite.layout.clone(),
-                                        index: sprite.index(0, 0),
-                                    });
-                                    slot.with_child((
-                                        image,
-                                        Node {
-                                            width: px(28),
-                                            height: px(28),
-                                            ..default()
-                                        },
-                                    ));
-                                }
-                            }
-                        });
-                    }
-                });
+            panel.spawn(grid_node()).with_children(|grid| {
+                // Пустые клетки (клик по ним — положить предмет из руки).
+                for index in 0..(INVENTORY_COLS * INVENTORY_ROWS) {
+                    let x = index % INVENTORY_COLS;
+                    let y = index / INVENTORY_COLS;
+                    grid.spawn((
+                        InvSlot(index),
+                        Button,
+                        cell_node(x, y),
+                        BackgroundColor(Color::srgb(0.12, 0.12, 0.15)),
+                        BorderColor::from(Color::srgb(0.28, 0.28, 0.33)),
+                    ));
+                }
+                // Предметы поверх: иконка размером во все занятые клетки.
+                for (bits, x, y, w, h) in ssr_core::inventory::item_layout(&inventory.cells) {
+                    let Some(sprite) = sprites.icon(bits) else {
+                        continue;
+                    };
+                    grid.spawn((
+                        InvSlot(y * INVENTORY_COLS + x),
+                        Button,
+                        item_node(x, y, w, h),
+                        BackgroundColor(Color::srgba(0.16, 0.16, 0.21, 0.9)),
+                        BorderColor::from(Color::srgb(0.38, 0.38, 0.45)),
+                    ))
+                    .with_child((icon_node(sprite), fill_node()));
+                }
+            });
             panel.spawn((
                 Text::new("ЛКМ — взять в руку; X — сменить руку; ПКМ — действия"),
                 TextFont::from_font_size(11.0),
@@ -1016,7 +1048,7 @@ pub fn inventory_test_mode(
         tracing::warn!(own = ?own.0, "inv-test: own inventory not resolved");
         return;
     };
-    let Some(item) = inventory.slots.iter().flatten().copied().next() else {
+    let Some(item) = inventory.cells.iter().flatten().copied().next() else {
         tracing::warn!("inv-test: own inventory is empty");
         state.1 = true;
         return;
@@ -1062,6 +1094,7 @@ pub fn build_test_mode(
     own: Res<OwnPlayerEntity>,
     positions: Query<&PlayerPosition>,
     inventories: Query<&Inventory>,
+    items: Query<&Item>,
     mut senders: Query<&mut MessageSender<ClientMessage>, With<Connected>>,
     mut state: Local<BuildTestState>,
 ) {
@@ -1081,22 +1114,30 @@ pub fn build_test_mode(
     );
     let target = (tile.0 + 2, tile.1);
 
-    // Слоты спавна: Crowbar(0), SteelSheet(1), SteelSheet(2).
-    let slot_item = |slot: usize| -> Option<u64> {
-        own_inventory(&own, &inventories)?
-            .slots
-            .get(slot)
-            .copied()
+    // Тетрис: позиции предметов не фиксированы — ищем по имени, берём по якорю.
+    let item_named = |name: &str| -> Option<(u64, u8)> {
+        let inventory = own_inventory(&own, &inventories)?;
+        inventory
+            .cells
+            .iter()
             .flatten()
+            .copied()
+            .find(|bits| {
+                Entity::try_from_bits(*bits)
+                    .and_then(|entity| items.get(entity).ok())
+                    .map(|item| item.name == name)
+                    .unwrap_or(false)
+            })
+            .map(|bits| (bits, inventory.anchor_of(bits).unwrap_or(0)))
     };
 
     if !state.taken_sheet
         && state.elapsed >= 5.0
-        && let Some(sheet) = slot_item(1)
+        && let Some((sheet, anchor)) = item_named("SteelSheet")
     {
         state.sheet = Some(sheet);
         for mut sender in senders.iter_mut() {
-            sender.send::<GameChannel>(ClientMessage::TakeInHand { slot: 1 });
+            sender.send::<GameChannel>(ClientMessage::TakeInHand { slot: anchor });
         }
         state.taken_sheet = true;
         tracing::info!("build-test: take sheet in hand");
@@ -1119,11 +1160,11 @@ pub fn build_test_mode(
     if state.built
         && !state.taken_tool
         && state.elapsed >= 14.0
-        && let Some(crowbar) = slot_item(0)
+        && let Some((crowbar, anchor)) = item_named("Crowbar")
     {
         state.crowbar = Some(crowbar);
         for mut sender in senders.iter_mut() {
-            sender.send::<GameChannel>(ClientMessage::TakeInHand { slot: 0 });
+            sender.send::<GameChannel>(ClientMessage::TakeInHand { slot: anchor });
         }
         state.taken_tool = true;
         tracing::info!("build-test: take crowbar in hand");
