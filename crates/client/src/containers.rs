@@ -155,10 +155,10 @@ fn open_container_in_reach<'a>(
 pub fn render_container_panel(
     mut commands: Commands,
     sprites: crate::inventory_ui::ItemSprites,
-    theme: Res<crate::ui_theme::UiTheme>,
+    _theme: Res<crate::ui_theme::UiTheme>,
     own: Res<crate::inventory_ui::OwnPlayerEntity>,
     positions: Query<&PlayerPosition>,
-    window_positions: Res<crate::windows::WindowPositions>,
+    _window_positions: Res<crate::windows::WindowPositions>,
     containers: WorldContainers,
     inventories: Query<&Inventory>,
     root: Query<Entity, With<ContainerPanel>>,

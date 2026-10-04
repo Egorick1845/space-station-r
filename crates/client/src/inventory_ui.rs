@@ -1869,6 +1869,7 @@ pub fn drag_ghost(
 }
 
 /// Отпускание ЛКМ: перенос предмета в клетку под курсором или на пол.
+#[allow(clippy::too_many_arguments)]
 pub fn drag_release(
     mouse: Res<ButtonInput<MouseButton>>,
     mut drag: ResMut<DragItem>,
