@@ -151,6 +151,7 @@ fn open_container_in_reach<'a>(
 
 /// Рисует панель открытого ящика (слоты и содержимое).
 #[allow(clippy::too_many_arguments)]
+#[allow(unreachable_code)]
 pub fn render_container_panel(
     mut commands: Commands,
     sprites: crate::inventory_ui::ItemSprites,
@@ -187,6 +188,11 @@ pub fn render_container_panel(
     for entity in root.iter() {
         commands.entity(entity).despawn();
     }
+    // Ящики в сборке — `EntityStorage`: сеточного окна у них НЕТ. Предмет просто
+    // перетаскивают в ящик, и он там лежит (владелец: «нет никакого интерфейса
+    // хранилища у ящика»). Ниже — прежний рендер StorageWindow, оставлен как
+    // справка до полного переноса EntityStorage (PORT_PLAN 1.7).
+    return;
     let Some(container_entity) = container_entity else {
         return;
     };

@@ -1877,6 +1877,13 @@ pub fn drag_release(
     container_slots: CrateSlots,
     equip_targets: EquipSlotTargets,
     ui: Query<&Interaction, With<Button>>,
+    windows: Query<&Window>,
+    camera: Single<(&Camera, &GlobalTransform), With<Camera2d>>,
+    crates: Query<(
+        Entity,
+        &ssr_core::inventory::Container,
+        &ssr_core::inventory::ItemPosition,
+    )>,
 ) {
     if !mouse.just_released(MouseButton::Left) || drag.item == 0 {
         return;
@@ -1915,6 +1922,35 @@ pub fn drag_release(
         tracing::info!(item, to_slot = slot.0, "drag: item moved in backpack");
         return;
     }
+    // Ящик в мире под курсором: в сборке это `EntityStorage` — предмет просто
+    // перетаскивают в ящик, и он там лежит (сеточного окна у ящика нет).
+    let cursor_world = windows
+        .iter()
+        .next()
+        .and_then(|window| window.cursor_position())
+        .and_then(|cursor| {
+            let (camera, transform) = *camera;
+            camera.viewport_to_world_2d(transform, cursor).ok()
+        });
+    if let Some(point) = cursor_world {
+        const HALF: f32 = ssr_core::tiles::TILE_PX as f32 / 2.0;
+        let hit = crates.iter().find(|(_, _, position)| {
+            let crate_point = Vec2::from_array(position.0);
+            (crate_point.x - point.x).abs() <= HALF && (crate_point.y - point.y).abs() <= HALF
+        });
+        if let Some((crate_entity, _, _)) = hit {
+            for mut sender in senders.iter_mut() {
+                sender.send::<GameChannel>(ClientMessage::TransferItem {
+                    item,
+                    to_slot: SLOT_ANY,
+                    target_player: crate_entity.to_bits(),
+                });
+            }
+            tracing::info!(item, ?crate_entity, "drag: item put into crate");
+            return;
+        }
+    }
+
     // Слот экипировки под курсором: надеваем перетаскиванием, как в SS14.
     for (interaction, slot) in equip_targets.iter() {
         if *interaction != Interaction::Hovered {
