@@ -1,4 +1,5 @@
 @echo off
+chcp 65001 >nul
 rem Быстрый запуск игрового клиента Space Station R (T0.2)
 setlocal
 cd /d "%~dp0.."

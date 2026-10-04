@@ -6,7 +6,7 @@
 //! cargo run -p ssr-core --bin gen-map -- assets/maps/test.ron
 //! ```
 
-use ssr_core::tiles::{DoorAccess, MapFile, gen_test_map};
+use ssr_core::tiles::{DoorAccess, MapFile, MapLayout, gen_test_map};
 
 fn main() {
     let out = std::env::args()
@@ -23,12 +23,41 @@ fn main() {
         position: (144.0, 16.0),
         access: "engineering".into(),
     }];
+    // Электрика (T4.4): генератор у коридора, кабель к дверям, лампы на кабеле.
+    // Баланс: 20 кВт генерации против 3 двери × 4 + 2 лампы × 1 = 14 кВт.
+    // Позиции — центры тайлов (как у дверей).
+    let tile = |tx: f32, ty: f32| (tx * 32.0 + 16.0, ty * 32.0 + 16.0);
+    let generators = vec![{
+        let (x, y) = tile(1.0, 1.0);
+        (x, y, 20.0)
+    }];
+    let cables: Vec<(f32, f32)> = [
+        (0.0, 1.0),
+        (1.0, 1.0),
+        (2.0, 1.0),
+        (3.0, 1.0),
+        (4.0, 1.0),
+        (4.0, 0.0),
+        (4.0, 2.0),
+    ]
+    .iter()
+    .map(|(tx, ty)| tile(*tx, *ty))
+    .collect();
+    let lights: Vec<(f32, f32)> = [(2.0, 1.0), (3.0, 1.0)]
+        .iter()
+        .map(|(tx, ty)| tile(*tx, *ty))
+        .collect();
     MapFile::save(
         std::path::Path::new(&out),
-        "test",
-        spawn_points,
-        doors,
-        door_access,
+        MapLayout {
+            name: "test".into(),
+            spawn_points,
+            doors,
+            door_access,
+            cables,
+            generators,
+            lights,
+        },
         &chunks,
     )
     .expect("save map");

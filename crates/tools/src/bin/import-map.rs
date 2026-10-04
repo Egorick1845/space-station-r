@@ -10,7 +10,7 @@ use std::path::Path;
 
 use base64::Engine as _;
 use serde_yaml_ng::Value;
-use ssr_core::tiles::{CHUNK_TILES, MapFile, TileChunk, TileType};
+use ssr_core::tiles::{CHUNK_TILES, MapFile, MapLayout, TileChunk, TileType};
 
 /// Наш масштаб: 1 тайл SS14 = 32 юнита мира (IMP-1).
 const TILE_UNITS: f32 = 32.0;
@@ -152,10 +152,12 @@ fn main() {
         .to_string();
     MapFile::save(
         Path::new(output),
-        &name,
-        spawn_points.clone(),
-        doors.clone(),
-        Vec::new(),
+        MapLayout {
+            name,
+            spawn_points: spawn_points.clone(),
+            doors: doors.clone(),
+            ..Default::default()
+        },
         &chunk_list,
     )
     .expect("save map");

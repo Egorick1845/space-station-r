@@ -1,4 +1,5 @@
 @echo off
+chcp 65001 >nul
 rem Быстрый запуск headless-сервера Space Station R (T0.3)
 setlocal
 cd /d "%~dp0.."

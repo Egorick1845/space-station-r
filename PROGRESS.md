@@ -1,6 +1,6 @@
 # Прогресс проекта Space Station R
 
-Обновлено: 04.10.2026 | Текущая фаза: 4 | Следующая задача: T4.4
+Обновлено: 04.10.2026 | Текущая фаза: 4 | Следующая задача: T4.5
 
 ## Фаза 0 — Фундамент
 
@@ -35,7 +35,7 @@
 - [x] T4.1 Здоровье и урон
 - [x] T4.2 Роли
 - [x] T4.3 Симуляция атмосферы (lite)
-- [ ] T4.4 Электрика (lite)
+- [x] T4.4 Электрика (lite)
 - [ ] T4.5 Цели раунда
 
 ## Фаза 5 — Контент и полировка
@@ -62,7 +62,7 @@
 - Карта грузится сервером из assets/maps/test.ron (T2.3); чанки реплицируются клиенту с учётом интереса — клиент ничего не генерирует
 - Формат карты — текстовые строки тайлов (' ' космос, '.' пол, '#' стена); генерация: `cargo run -p ssr-core --bin gen-map -- assets/maps/test.ron`
 - Двери (T3.1): позиции в поле `doors` файла карты; клик мышью → Interact → серверная валидация радиуса 1.5 тайла → toggle + ColliderDisabled; состояние реплицируется всем клиентам
-- Тестовые режимы: клиент — SSR_AUTO_WALK(+_MS, +_DIR), SSR_INTERACT_TEST, SSR_INV_TEST, SSR_LOCK_INPUT, SSR_LOBBY/SSR_AUTO_PLAY; сервер — SSR_MAP, SSR_DAMAGE_TEST, SSR_ROLE, SSR_SPECIES, SSR_BREACH_TEST, SSR_VACUUM_TEST, SSR_ATMOS_LOG; оба — SSR_PORT; клиент — SSR_DUMP_ONLY (офлайн-дамп чанков в PNG), SSR_DEBUG_BODY (лог частей тела)
+- Тестовые режимы: клиент — SSR_AUTO_WALK(+_MS, +_DIR), SSR_INTERACT_TEST, SSR_INV_TEST, SSR_LOCK_INPUT, SSR_LOBBY/SSR_AUTO_PLAY; сервер — SSR_MAP, SSR_DAMAGE_TEST, SSR_ROLE, SSR_SPECIES, SSR_BREACH_TEST, SSR_VACUUM_TEST, SSR_ATMOS_LOG, SSR_POWER_TEST; оба — SSR_PORT; клиент — SSR_DUMP_ONLY (офлайн-дамп чанков в PNG), SSR_DEBUG_BODY (лог частей тела)
 - Инвентарь (T3.2): `Inventory` 7×4 (u64-bits предметов, ADR-7) + `Item` в core; сервер выдаёт демо-предметы, `TransferItem` валидирует владение/дистанцию/слот
 - **Стройка/разрушение (T3.3)**: `UseItem` — сервер по имени предмета решает (SteelSheet строит, Crowbar ломает); тайл меняется в `TileChunkData` (реплицируется), коллайдеры чанка пересобираются; **запрет стройки на тайле любого игрока**; материал возвращается ломом; SSR_BUILD_TEST
 - **Руки (SS14-модель)**: `Hands {active, slots[2]}` — активная рука, взять из рюкзака (клик по слоту), убрать в рюкзак (клик по активной руке), переключение рукой; `HeldBy` + иконка предмета у спрайта держателя

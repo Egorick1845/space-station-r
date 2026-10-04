@@ -224,15 +224,16 @@ fn advance(anim: DoorAnim, rsi: Option<&crate::rsi::RsiSprite>, dt: f32) -> Door
 pub fn update_door_visuals(
     time: Res<Time>,
     mut commands: Commands,
-    doors: Query<&Door>,
+    doors: Query<(&Door, Option<&ssr_core::power::Powered>)>,
     mut visuals: Query<(Entity, &mut DoorVisual)>,
     mut sprites: Query<&mut Sprite>,
+    mut visibilities: Query<&mut Visibility>,
     registry: Res<RsiRegistry>,
 ) {
     let dt = time.delta_secs();
 
     for (visual_entity, mut visual) in visuals.iter_mut() {
-        let Ok(door) = doors.get(visual.door) else {
+        let Ok((door, door_power)) = doors.get(visual.door) else {
             // Дверь исчезла (despawn с сервера).
             commands.entity(visual_entity).despawn();
             continue;
@@ -312,6 +313,19 @@ pub fn update_door_visuals(
             && let Ok(mut sprite) = sprites.get_mut(visual.overlay)
         {
             apply_door_state(&mut sprite, light, frame);
+        }
+        // Без питания лампа двери не горит (T4.4, как unlit в SS14).
+        let powered = door_power.map(|state| state.0).unwrap_or(true);
+        if let Ok(mut visibility) = visibilities.get_mut(visual.overlay) {
+            let target = if powered {
+                Visibility::Inherited
+            } else {
+                Visibility::Hidden
+            };
+            if *visibility != target {
+                *visibility = target;
+                tracing::info!(door = ?visual.door, powered, "door light changed");
+            }
         }
     }
 }

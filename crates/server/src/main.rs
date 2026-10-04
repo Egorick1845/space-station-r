@@ -23,6 +23,7 @@ use ssr_core::atmosphere::{ChunkAtmosphere, Gas};
 use ssr_core::inventory::{
     Container, Hands, Health, HeldBy, Inventory, Item, ItemPosition, SLOT_ANY,
 };
+use ssr_core::power::{Cable, Consumer, Generator, Light, Powered};
 use ssr_core::roles::{Access, PlayerRole, RoleSet};
 use ssr_core::tiles::{MapFile, TileChunkData, TileType};
 use ssr_core::{
@@ -100,6 +101,7 @@ fn main() {
             check_prototypes,
             load_roles,
             load_map,
+            spawn_power,
             init_atmosphere,
             spawn_walls,
             spawn_containers,
@@ -126,6 +128,8 @@ fn main() {
             simulate_atmosphere,
             suffocation,
             auto_doors,
+            power_grid,
+            power_test,
             breach_test,
             vacuum_test,
             log_atmosphere,
@@ -155,6 +159,12 @@ fn main() {
     app.component::<Species>().replicate();
     // Атмосфера (T4.3). Тот же порядок, что у клиента!
     app.component::<ChunkAtmosphere>().replicate();
+    // Электрика (T4.4). Тот же порядок, что у клиента!
+    app.component::<Cable>().replicate();
+    app.component::<Generator>().replicate();
+    app.component::<Consumer>().replicate();
+    app.component::<Light>().replicate();
+    app.component::<Powered>().replicate();
     app.run();
 }
 
@@ -251,6 +261,10 @@ fn check_prototypes() {
 struct GameMap {
     spawn_points: Vec<(f32, f32)>,
     chunks: Vec<TileChunkData>,
+    /// Электрика из файла карты (T4.4).
+    cables: Vec<(f32, f32)>,
+    generators: Vec<(f32, f32, f32)>,
+    lights: Vec<(f32, f32)>,
 }
 
 /// Курсор выдачи точек спавна (T2.4): каждый новый игрок получает следующую
@@ -324,6 +338,202 @@ impl Atmospheres {
 /// Курсор выдачи ролей (T4.2): round-robin, чтобы в раунде были разные роли.
 #[derive(Resource, Default)]
 struct RoleCursor(usize);
+
+/// Потребители сети: позиция, потребление, питание.
+type GridConsumers<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static ItemPosition,
+        &'static Consumer,
+        &'static mut Powered,
+    ),
+    (Without<Generator>, Without<Cable>),
+>;
+/// Генераторы сети.
+type GridGenerators<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static ItemPosition,
+        &'static Generator,
+        &'static mut Powered,
+    ),
+    (Without<Consumer>, Without<Cable>),
+>;
+
+/// Спавнит электрику (T4.4): кабели, генераторы, лампы из файла карты.
+fn spawn_power(
+    mut commands: Commands,
+    mut chunk_rooms: ResMut<ChunkRooms>,
+    mut allocator: ResMut<RoomAllocator>,
+    map: Res<GameMap>,
+) {
+    for &(x, y) in &map.cables {
+        let room = chunk_rooms.room_for(chunk_coords(x, y), &mut allocator);
+        commands.spawn((
+            Cable,
+            ItemPosition([x, y]),
+            Replicate::to_clients(NetworkTarget::All),
+            Rooms::single(room),
+        ));
+    }
+    for &(x, y, power_kw) in &map.generators {
+        let room = chunk_rooms.room_for(chunk_coords(x, y), &mut allocator);
+        commands.spawn((
+            Generator { power_kw },
+            Powered(true),
+            ItemPosition([x, y]),
+            Replicate::to_clients(NetworkTarget::All),
+            Rooms::single(room),
+        ));
+    }
+    for &(x, y) in &map.lights {
+        let room = chunk_rooms.room_for(chunk_coords(x, y), &mut allocator);
+        commands.spawn((
+            Light,
+            Consumer {
+                draw_kw: ssr_core::power::LIGHT_DRAW_KW,
+            },
+            Powered(false),
+            ItemPosition([x, y]),
+            Replicate::to_clients(NetworkTarget::All),
+            Rooms::single(room),
+        ));
+    }
+    tracing::info!(
+        cables = map.cables.len(),
+        generators = map.generators.len(),
+        lights = map.lights.len(),
+        "power spawned"
+    );
+}
+
+/// Считает энергобаланс сетей (T4.4): кабели, соединённые по 4 сторонам,
+/// образуют сеть; питание есть, если выработка покрывает потребление.
+/// Карты без генераторов считаются запитанными (страховка для импорта).
+fn power_grid(
+    time: Res<Time>,
+    mut next_step: Local<f32>,
+    mut last_summary: Local<String>,
+    mut consumers: GridConsumers,
+    mut generators: GridGenerators,
+    cables: Query<&ItemPosition, With<Cable>>,
+) {
+    *next_step += time.delta_secs();
+    if *next_step < 1.0 {
+        return;
+    }
+    *next_step = 0.0;
+
+    let tile_of = |position: &[f32; 2]| {
+        (
+            (position[0] / TILE_SIZE) as i32,
+            (position[1] / TILE_SIZE) as i32,
+        )
+    };
+    let cable_tiles: HashMap<(i32, i32), ()> = cables
+        .iter()
+        .map(|position| (tile_of(&position.0), ()))
+        .collect();
+
+    if generators.iter().next().is_none() {
+        for (_, _, mut powered) in consumers.iter_mut() {
+            powered.0 = true;
+        }
+        return;
+    }
+
+    // Сети: BFS по кабельным тайлам.
+    let mut visited: HashMap<(i32, i32), usize> = HashMap::new();
+    let mut networks: Vec<Vec<(i32, i32)>> = Vec::new();
+    for &tile in cable_tiles.keys() {
+        if visited.contains_key(&tile) {
+            continue;
+        }
+        let index = networks.len();
+        let mut stack = vec![tile];
+        let mut network = Vec::new();
+        while let Some(current) = stack.pop() {
+            if visited.insert(current, index).is_some() {
+                continue;
+            }
+            network.push(current);
+            for (dx, dy) in [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
+                let next = (current.0 + dx, current.1 + dy);
+                if cable_tiles.contains_key(&next) && !visited.contains_key(&next) {
+                    stack.push(next);
+                }
+            }
+        }
+        networks.push(network);
+    }
+
+    let mut supply: Vec<f32> = vec![0.0; networks.len()];
+    let mut demand: Vec<f32> = vec![0.0; networks.len()];
+    for (position, generator, _) in generators.iter() {
+        if let Some(&index) = visited.get(&tile_of(&position.0)) {
+            supply[index] += generator.power_kw;
+        }
+    }
+    for (position, consumer, _) in consumers.iter() {
+        if let Some(&index) = visited.get(&tile_of(&position.0)) {
+            demand[index] += consumer.draw_kw;
+        }
+    }
+
+    let mut summary = String::new();
+    for (index, network) in networks.iter().enumerate() {
+        let powered = supply[index] >= demand[index] && supply[index] > 0.0;
+        summary.push_str(&format!(
+            "[{} кабелей: {:.0}/{:.0} кВт{}] ",
+            network.len(),
+            supply[index],
+            demand[index],
+            if powered { "" } else { " ОБЕСТОЧЕНО" }
+        ));
+        for (position, _, mut state) in generators.iter_mut() {
+            if visited.get(&tile_of(&position.0)) == Some(&index) {
+                state.0 = powered;
+            }
+        }
+        for (position, _, mut state) in consumers.iter_mut() {
+            if visited.get(&tile_of(&position.0)) == Some(&index) {
+                state.0 = powered;
+            }
+        }
+    }
+    for (position, _, mut state) in consumers.iter_mut() {
+        if !visited.contains_key(&tile_of(&position.0)) {
+            state.0 = false;
+        }
+    }
+    if *last_summary != summary {
+        *last_summary = summary.clone();
+        tracing::info!(grid = %summary, "power grid");
+    }
+}
+
+/// Тест T4.4: SSR_POWER_TEST=1 — через 5 секунд обесточивает генераторы.
+fn power_test(
+    time: Res<Time>,
+    mut elapsed: Local<f32>,
+    mut done: Local<bool>,
+    mut generators: Query<&mut Generator>,
+) {
+    if std::env::var_os("SSR_POWER_TEST").is_none() || *done {
+        return;
+    }
+    *elapsed += time.delta_secs();
+    if *elapsed < 5.0 {
+        return;
+    }
+    *done = true;
+    for mut generator in generators.iter_mut() {
+        generator.power_kw = 0.0;
+    }
+    tracing::info!("power test: generators shut down");
+}
 
 /// Инициализирует атмосферу мира (T4.3): пол — воздух станции, стены и космос —
 /// вакуум; по чанкам спавнятся реплицируемые [`ChunkAtmosphere`] для клиента.
@@ -572,9 +782,19 @@ fn auto_doors(
     mut doors: Query<(Entity, &mut Door, &mut DoorAuto)>,
     positions: Query<&PlayerPosition>,
     access: Query<&Access>,
+    powered: Query<&Powered>,
     players: Res<Players>,
 ) {
     for (entity, mut door, mut auto) in doors.iter_mut() {
+        // Без питания дверь не работает (T4.4) и закрывается, если была открыта.
+        if !powered.get(entity).map(|state| state.0).unwrap_or(true) {
+            if door.open {
+                door.open = false;
+                commands.entity(entity).remove::<ColliderDisabled>();
+                tracing::info!(door = ?entity, "door closed (unpowered)");
+            }
+            continue;
+        }
         let center = Vec2::from_array(door.position);
         let mut nearby = false;
         for entry in &players.entries {
@@ -784,6 +1004,12 @@ fn load_map(
             DoorAuto {
                 close_in: AUTO_CLOSE_SECS,
             },
+            Consumer {
+                draw_kw: ssr_core::power::DOOR_DRAW_KW,
+            },
+            Powered(true),
+            // Позиция нужна энергобалансу (T4.4) и UI.
+            ItemPosition([x, y]),
             Replicate::to_clients(NetworkTarget::All),
             Rooms::single(room),
             RigidBody::Static,
@@ -801,6 +1027,9 @@ fn load_map(
     );
     commands.insert_resource(GameMap {
         spawn_points: file.spawn_points,
+        cables: file.cables,
+        generators: file.generators,
+        lights: file.lights,
         chunks,
     });
 }
@@ -1494,6 +1723,15 @@ fn spawn_walls(mut commands: Commands, map: Res<GameMap>, mut index: ResMut<MapI
     tracing::info!(walls = total, "map wall colliders spawned");
 }
 
+/// Запросы здоровья/доступа/питания для обработки действий (сокращает
+/// число аргументов системы: у функций-систем лимит 16 параметров).
+#[derive(bevy::ecs::system::SystemParam)]
+struct ActionQueries<'w, 's> {
+    healths: Query<'w, 's, &'static Health>,
+    access: Query<'w, 's, &'static Access>,
+    powered: Query<'w, 's, &'static Powered>,
+}
+
 /// Доступ к двери (T4.2): дверь без ключа открыта всем, с ключом — только
 /// ролям, у которых этот ключ есть; игрок без роли получает отказ.
 fn has_door_access(access: &Query<&Access>, player: Entity, door: &Door) -> bool {
@@ -1517,12 +1755,11 @@ fn process_actions(
     positions: Query<&PlayerPosition>,
     mut inventories: Query<&mut Inventory>,
     mut hands: Query<&mut Hands>,
-    healths: Query<&Health>,
+    world: ActionQueries,
     mut doors: Query<&mut Door>,
     mut containers: Query<&mut Container>,
     container_positions: Query<&ItemPosition>,
     items: Query<&Item>,
-    access: Query<&Access>,
     mut senders: Query<&mut MessageSender<ServerMessage>, With<Connected>>,
     players: Res<Players>,
     mut damage_events: MessageWriter<DamageEvent>,
@@ -1538,14 +1775,14 @@ fn process_actions(
                 let mut options: Vec<ActionOption> = Vec::new();
                 if entity != 0 {
                     if let Some(target) = Entity::try_from_bits(entity) {
-                        if healths.get(target).is_ok() {
+                        if world.healths.get(target).is_ok() {
                             options.push(ActionOption {
                                 label: "Ударить".into(),
                                 action: ActionKind::Attack { target: entity },
                             });
                         }
                         if let Ok(door) = doors.get(target)
-                            && has_door_access(&access, player, door)
+                            && has_door_access(&world.access, player, door)
                         {
                             options.push(ActionOption {
                                 label: if door.open {
@@ -1621,7 +1858,7 @@ fn process_actions(
                     tracing::warn!(?target_entity, "attack: too far");
                     continue;
                 }
-                if healths.get(target_entity).is_err() {
+                if world.healths.get(target_entity).is_err() {
                     tracing::warn!(?target_entity, "attack: target has no health");
                     continue;
                 }
@@ -1686,8 +1923,18 @@ fn process_actions(
                     tracing::warn!(?player, "interact: too far");
                     continue;
                 }
+                // Питание (T4.4): обесточенная дверь не открывается.
+                if !world
+                    .powered
+                    .get(target)
+                    .map(|state| state.0)
+                    .unwrap_or(true)
+                {
+                    tracing::warn!(door = ?target, "door is unpowered");
+                    continue;
+                }
                 // Доступ (T4.2): дверь с ключом открывают только роли с этим ключом.
-                if !has_door_access(&access, player, &door) {
+                if !has_door_access(&world.access, player, &door) {
                     tracing::warn!(
                         ?player,
                         door = ?target,

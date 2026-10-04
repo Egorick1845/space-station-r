@@ -72,6 +72,10 @@ pub const STARTUP_RSI: &[&str] = &[
     "Structures/Storage/Crates/generic.rsi",
     // Глаза гуманоида (отдельный слой поверх головы, как в SS14).
     "Mobs/Customization/eyes.rsi",
+    // Электрика (T4.4): кабели, генератор, лампа.
+    "Structures/Power/Cables/lv_cable.rsi",
+    "Structures/Power/Generation/portable_generator.rsi",
+    "Structures/Wallmounts/Lighting/light_tube.rsi",
     // Тела рас (T5.3): части гуманоидов, собираются в humanoid.rs.
     "Mobs/Species/Human/parts.rsi",
     "Mobs/Species/Skeleton/parts.rsi",

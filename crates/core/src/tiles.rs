@@ -174,6 +174,15 @@ pub struct MapFile {
     /// Доступы дверей (T4.2): какие двери требуют ключ роли.
     #[serde(default)]
     pub door_access: Vec<DoorAccess>,
+    /// Кабели (T4.4): центры тайлов с проводом.
+    #[serde(default)]
+    pub cables: Vec<(f32, f32)>,
+    /// Генераторы (T4.4): (x, y, кВт).
+    #[serde(default)]
+    pub generators: Vec<(f32, f32, f32)>,
+    /// Лампы (T4.4): центры тайлов.
+    #[serde(default)]
+    pub lights: Vec<(f32, f32)>,
     pub chunks: Vec<MapChunkFile>,
 }
 
@@ -182,6 +191,19 @@ pub struct MapFile {
 pub struct DoorAccess {
     pub position: (f32, f32),
     pub access: String,
+}
+
+/// Всё, что генераторы карт кладут в файл, кроме чанков (T4.4+: двери,
+/// доступы, кабели, генераторы, лампы).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MapLayout {
+    pub name: String,
+    pub spawn_points: Vec<(f32, f32)>,
+    pub doors: Vec<(f32, f32)>,
+    pub door_access: Vec<DoorAccess>,
+    pub cables: Vec<(f32, f32)>,
+    pub generators: Vec<(f32, f32, f32)>,
+    pub lights: Vec<(f32, f32)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -199,19 +221,24 @@ impl MapFile {
         ron::from_str(&text).map_err(|e| format!("parse {}: {e}", path.display()))
     }
 
-    pub fn save(
-        path: &Path,
-        name: &str,
-        spawn_points: Vec<(f32, f32)>,
-        doors: Vec<(f32, f32)>,
-        door_access: Vec<DoorAccess>,
-        chunks: &[TileChunk],
-    ) -> Result<(), String> {
-        let file = Self {
-            name: name.to_string(),
+    pub fn save(path: &Path, layout: MapLayout, chunks: &[TileChunk]) -> Result<(), String> {
+        let MapLayout {
+            name,
             spawn_points,
             doors,
             door_access,
+            cables,
+            generators,
+            lights,
+        } = layout;
+        let file = Self {
+            name,
+            spawn_points,
+            doors,
+            door_access,
+            cables,
+            generators,
+            lights,
             chunks: chunks
                 .iter()
                 .map(|c| MapChunkFile {
@@ -299,13 +326,18 @@ mod tests {
 
         MapFile::save(
             &path,
-            "test",
-            vec![(16.0, 16.0)],
-            vec![(144.0, 16.0)],
-            vec![DoorAccess {
-                position: (144.0, 16.0),
-                access: "engineering".into(),
-            }],
+            MapLayout {
+                name: "test".into(),
+                spawn_points: vec![(16.0, 16.0)],
+                doors: vec![(144.0, 16.0)],
+                door_access: vec![DoorAccess {
+                    position: (144.0, 16.0),
+                    access: "engineering".into(),
+                }],
+                cables: vec![(0.0, 16.0), (32.0, 16.0)],
+                generators: vec![(0.0, 16.0, 20.0)],
+                lights: vec![(32.0, 16.0)],
+            },
             &chunks,
         )
         .expect("save");
@@ -315,6 +347,9 @@ mod tests {
         assert_eq!(file.doors, vec![(144.0, 16.0)]);
         assert_eq!(file.door_access.len(), 1);
         assert_eq!(file.door_access[0].access, "engineering");
+        assert_eq!(file.cables.len(), 2);
+        assert_eq!(file.generators[0].2, 20.0);
+        assert_eq!(file.lights.len(), 1);
         let restored = file.to_chunks().expect("to_chunks");
         assert_eq!(restored.len(), chunks.len());
         for (original, restored) in chunks.iter().zip(restored.iter()) {
@@ -330,6 +365,9 @@ mod tests {
             spawn_points: vec![],
             doors: vec![],
             door_access: vec![],
+            cables: vec![],
+            generators: vec![],
+            lights: vec![],
             chunks: vec![MapChunkFile {
                 coords: (0, 0),
                 rows: vec![".".to_string()],

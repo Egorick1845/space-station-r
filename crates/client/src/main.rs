@@ -24,6 +24,7 @@ mod doors;
 mod humanoid;
 mod inventory_ui;
 mod lobby;
+mod power_view;
 mod rsi;
 mod settings;
 mod tiles;
@@ -197,6 +198,9 @@ fn main() {
     app.add_systems(
         Update,
         (
+            power_view::spawn_power_visuals,
+            power_view::update_cables,
+            power_view::update_power_visuals,
             containers::spawn_crate_visuals,
             containers::update_crate_visuals,
             containers::render_container_panel,
@@ -253,6 +257,12 @@ fn main() {
     // Атмосфера (T4.3). Тот же порядок, что у сервера!
     app.component::<ssr_core::atmosphere::ChunkAtmosphere>()
         .replicate();
+    // Электрика (T4.4). Тот же порядок, что у сервера!
+    app.component::<ssr_core::power::Cable>().replicate();
+    app.component::<ssr_core::power::Generator>().replicate();
+    app.component::<ssr_core::power::Consumer>().replicate();
+    app.component::<ssr_core::power::Light>().replicate();
+    app.component::<ssr_core::power::Powered>().replicate();
     app.run();
 }
 
