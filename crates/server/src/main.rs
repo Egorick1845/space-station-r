@@ -94,12 +94,14 @@ fn main() {
     app.init_resource::<GameRoles>();
     app.init_resource::<RoleCursor>();
     app.init_resource::<Atmospheres>();
+    app.init_resource::<ContentCatalog>();
     app.add_systems(Startup, startup);
     app.add_systems(
         Startup,
         (
             check_prototypes,
             load_roles,
+            load_content,
             load_map,
             spawn_power,
             init_atmosphere,
@@ -275,6 +277,38 @@ struct SpawnCursor(usize);
 /// Роли (T4.2): прототипы из `assets/prototypes/roles.ron`.
 #[derive(Resource, Default)]
 struct GameRoles(RoleSet);
+
+/// Каталоги контента (T5.2): предметы и рецепты из assets/prototypes.
+#[derive(Resource, Default)]
+struct ContentCatalog {
+    items: ssr_core::items::ItemSet,
+    recipes: ssr_core::recipes::RecipeSet,
+}
+
+/// Загружает каталоги предметов и рецептов (T5.2).
+fn load_content(mut commands: Commands) {
+    let root = ssr_core::assets_root().join("prototypes");
+    let items = ssr_core::items::ItemSet::load(&root.join("items.ron"));
+    let recipes = ssr_core::recipes::RecipeSet::load(&root.join("recipes.ron"));
+    match (items, recipes) {
+        (Ok(items), Ok(recipes)) => {
+            tracing::info!(
+                items = items.items.len(),
+                recipes = recipes.recipes.len(),
+                "content catalog loaded"
+            );
+            commands.insert_resource(ContentCatalog { items, recipes });
+        }
+        (items, recipes) => {
+            if let Err(e) = items {
+                tracing::error!(error = %e, "items.ron not loaded");
+            }
+            if let Err(e) = recipes {
+                tracing::error!(error = %e, "recipes.ron not loaded");
+            }
+        }
+    }
+}
 
 /// Шаг симуляции атмосферы, секунды (T4.3): 5 раз в секунду достаточно.
 const ATMOS_STEP_SECS: f32 = 0.2;
@@ -1164,10 +1198,10 @@ fn on_link_disconnected(
 /// [`ActionQueue`] и обрабатывается одной системой [`process_actions`].
 #[allow(clippy::too_many_arguments)]
 /// Размер предмета по bits сущности (из имени, `item_size`): (ширина, высота).
-fn item_size_of(items: &Query<&Item>, bits: u64) -> (u8, u8) {
+fn item_size_of(catalogs: &ContentCatalog, items: &Query<&Item>, bits: u64) -> (u8, u8) {
     Entity::try_from_bits(bits)
         .and_then(|entity| items.get(entity).ok())
-        .map(|item| ssr_core::inventory::item_size(&item.name))
+        .map(|item| catalogs.items.size_of(&item.name))
         .unwrap_or((1, 1))
 }
 
@@ -1186,9 +1220,9 @@ fn handle_client_messages(
     positions: Query<&PlayerPosition>,
     mut inventories: Query<&mut Inventory>,
     mut hands: Query<&mut Hands>,
-    containers: Query<(Entity, &Container)>,
-    container_positions: Query<&ItemPosition>,
+    containers: Query<(Entity, &Container, &ItemPosition)>,
     items: Query<&Item>,
+    catalogs: Res<ContentCatalog>,
     mut actions: ResMut<ActionQueue>,
     mut players: ResMut<Players>,
 ) {
@@ -1258,16 +1292,13 @@ fn handle_client_messages(
                         };
                         if containers.get(target).is_ok() {
                             // В контейнер: только открытый и только рядом.
-                            let Ok((_, container)) = containers.get(target) else {
+                            let Ok((_, container, item_position)) = containers.get(target) else {
                                 continue;
                             };
                             if !container.open {
                                 tracing::warn!(?target, "transfer: container is closed");
                                 continue;
                             }
-                            let Ok(item_position) = container_positions.get(target) else {
-                                continue;
-                            };
                             if !in_range(item_position.0) {
                                 tracing::warn!(?target, "transfer: container too far");
                                 continue;
@@ -1300,14 +1331,10 @@ fn handle_client_messages(
                     let in_hands = hands.get(sender_player).ok().is_some_and(|h| h.has(item));
                     if !in_own && !in_hands {
                         // Ищем предмет в открытых контейнерах рядом.
-                        for (container_entity, container) in containers.iter() {
+                        for (container_entity, container, item_position) in containers.iter() {
                             if !container.open {
                                 continue;
                             }
-                            let Ok(item_position) = container_positions.get(container_entity)
-                            else {
-                                continue;
-                            };
                             if !in_range(item_position.0) {
                                 continue;
                             }
@@ -1333,7 +1360,7 @@ fn handle_client_messages(
                     let Ok(mut dest_inventory) = inventories.get_mut(dest_entity) else {
                         continue;
                     };
-                    let (w, h) = item_size_of(&items, item);
+                    let (w, h) = item_size_of(&catalogs, &items, item);
                     let anchor = (to_slot != SLOT_ANY).then_some(to_slot);
                     let Some(index) = dest_inventory.find_place(w, h, anchor) else {
                         tracing::warn!(?dest_entity, w, h, "transfer: no room for item");
@@ -1356,6 +1383,87 @@ fn handle_client_messages(
                     }
                     tracing::info!(item, index, from = ?source_container, to = ?dest_entity, "item transferred");
                     continue;
+                }
+                ClientMessage::Craft { recipe } => {
+                    let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {
+                        continue;
+                    };
+                    let player = entry.player;
+                    let Some(recipe) = catalogs.recipes.by_id(&recipe).cloned() else {
+                        tracing::warn!(recipe, "craft: unknown recipe");
+                        continue;
+                    };
+                    let Ok(mut inventory) = inventories.get_mut(player) else {
+                        continue;
+                    };
+                    // Материалы ищем в рюкзаке игрока.
+                    let have: Vec<String> = inventory
+                        .cells
+                        .iter()
+                        .flatten()
+                        .copied()
+                        .filter_map(Entity::try_from_bits)
+                        .filter_map(|entity| items.get(entity).ok())
+                        .map(|item| item.name.clone())
+                        .collect();
+                    if !ssr_core::recipes::can_craft(&recipe, &have) {
+                        tracing::warn!(recipe = %recipe.id, "craft: not enough materials");
+                        continue;
+                    }
+                    // Списываем вход.
+                    let mut consumed = 0usize;
+                    for (id, count) in &recipe.inputs {
+                        let mut left = *count;
+                        while left > 0 {
+                            let Some(bits) =
+                                inventory.cells.iter().flatten().copied().find(|bits| {
+                                    Entity::try_from_bits(*bits)
+                                        .and_then(|entity| items.get(entity).ok())
+                                        .map(|item| item.name == *id)
+                                        .unwrap_or(false)
+                                })
+                            else {
+                                break;
+                            };
+                            inventory.take(bits);
+                            if let Some(entity) = Entity::try_from_bits(bits) {
+                                commands.entity(entity).despawn();
+                            }
+                            consumed += 1;
+                            left -= 1;
+                        }
+                    }
+                    // Выдаём результат (по размеру из каталога, тетрис).
+                    let (output_id, count) = recipe.output.clone();
+                    let (w, h) = catalogs.items.size_of(&output_id);
+                    let mut produced = 0usize;
+                    for _ in 0..count {
+                        let entity = commands
+                            .spawn((
+                                Item {
+                                    name: output_id.clone(),
+                                },
+                                HeldBy {
+                                    player: player.to_bits(),
+                                },
+                                Replicate::to_clients(NetworkTarget::All),
+                                Rooms::default(),
+                            ))
+                            .id();
+                        if inventory.put_first_fit(entity.to_bits(), w, h).is_none() {
+                            tracing::warn!(item = %output_id, "craft: no room in inventory");
+                            commands.entity(entity).despawn();
+                            break;
+                        }
+                        produced += 1;
+                    }
+                    tracing::info!(
+                        recipe = %recipe.id,
+                        consumed,
+                        produced,
+                        output = %output_id,
+                        "crafted"
+                    );
                 }
                 ClientMessage::SwitchHand => {
                     let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {
@@ -1381,7 +1489,7 @@ fn handle_client_messages(
                         continue;
                     };
                     let anchor = inventory.anchor_of(item).unwrap_or(slot);
-                    let (w, h) = item_size_of(&items, item);
+                    let (w, h) = item_size_of(&catalogs, &items, item);
                     inventory.take(item);
                     if !hand.take_in_active(item) {
                         inventory.place(item, w, h, anchor);
@@ -1404,7 +1512,7 @@ fn handle_client_messages(
                     if !hand.take(item) {
                         continue;
                     }
-                    let (w, h) = item_size_of(&items, item);
+                    let (w, h) = item_size_of(&catalogs, &items, item);
                     match inventory.put_first_fit(item, w, h) {
                         Some(slot) => tracing::info!(item, slot, "item stowed"),
                         None => {
@@ -1429,7 +1537,7 @@ fn handle_client_messages(
                         hand.take_in_active(item);
                         continue;
                     };
-                    let (w, h) = item_size_of(&items, item);
+                    let (w, h) = item_size_of(&catalogs, &items, item);
                     match inventory.put_first_fit(item, w, h) {
                         Some(slot) => tracing::info!(item, slot, "item stowed from hand"),
                         None => {
@@ -1555,7 +1663,7 @@ fn handle_client_messages(
                     Rooms::default(),
                 ))
                 .id();
-            let (w, h) = ssr_core::inventory::item_size(item_name);
+            let (w, h) = catalogs.items.size_of(item_name);
             if inventory.put_first_fit(item.to_bits(), w, h).is_none() {
                 tracing::warn!(item = %item_name, "inventory: no room for starting item");
             }

@@ -19,28 +19,29 @@ use crate::PlayerEntity;
 use crate::rsi::{RsiRegistry, RsiSprite};
 use crate::windows;
 
+/// Спрайт предмета в слотах UI: имя предмета → RSI-стейт иконки из каталога.
+pub fn item_icon<'a>(
+    registry: &'a RsiRegistry,
+    catalog: &ssr_core::items::ItemSet,
+    name: &str,
+) -> Option<&'a RsiSprite> {
+    let key = catalog.by_id(name)?.sprite.as_ref()?;
+    registry.get(&format!("sprites/ss14/{key}"))
+}
+
+/// Спрайт предмета в руке: inhand-стейт из каталога (если есть).
+pub fn item_inhand<'a>(
+    registry: &'a RsiRegistry,
+    catalog: &ssr_core::items::ItemSet,
+    name: &str,
+) -> Option<&'a RsiSprite> {
+    let key = catalog.by_id(name)?.inhand.as_ref()?;
+    registry.get(&format!("sprites/ss14/{key}"))
+}
+
 /// Юнитов на тайл (клик по тайловой сетке).
 const TILE_UNITS: f32 = 32.0;
 
-/// Спрайт предмета в слотах UI: имя предмета → RSI-стейт иконки.
-pub fn item_icon<'a>(registry: &'a RsiRegistry, name: &str) -> Option<&'a RsiSprite> {
-    let path = match name {
-        "Crowbar" => "Objects/Tools/crowbar.rsi#icon",
-        "SteelSheet" => "Objects/Materials/Sheets/metal.rsi#steel",
-        _ => return None,
-    };
-    registry.get(&format!("sprites/ss14/{path}"))
-}
-
-/// Спрайт предмета в руке: inhand-стейт (4 направления), если он есть.
-pub fn item_inhand<'a>(registry: &'a RsiRegistry, name: &str) -> Option<&'a RsiSprite> {
-    let path = match name {
-        "Crowbar" => "Objects/Tools/crowbar.rsi#inhand-right",
-        "SteelSheet" => "Objects/Materials/Sheets/metal.rsi#steel-inhand-right",
-        _ => return None,
-    };
-    registry.get(&format!("sprites/ss14/{path}"))
-}
 /// Время до авто-переноса в тестовом режиме SSR_INV_TEST.
 const INV_TEST_DELAY: f32 = 5.0;
 
@@ -205,9 +206,11 @@ pub fn sync_remote_players(
 
 /// Рисует предмет из АКТИВНОЙ руки у спрайта держателя (SS14-модель):
 /// спрайт берётся по имени предмета (inhand-стейт) и поворачивается по взгляду.
+#[allow(clippy::too_many_arguments)]
 pub fn sync_inhand_items(
     mut commands: Commands,
     registry: Res<RsiRegistry>,
+    catalog: Res<crate::content::ClientContent>,
     entity_map: Option<Res<ServerEntityMap>>,
     items: Query<(Entity, &HeldBy, &Item)>,
     hands: Query<&Hands>,
@@ -244,7 +247,7 @@ pub fn sync_inhand_items(
             .ok()
             .map(|(_, _, item)| item.name.clone());
         if let Some(name) = name
-            && let Some(rsi) = item_inhand(&registry, &name)
+            && let Some(rsi) = item_inhand(&registry, &catalog.items, &name)
             && let Some(atlas) = sprite.texture_atlas.as_mut()
         {
             let index = rsi.index(facing.0.min(3), 0);
@@ -276,7 +279,7 @@ pub fn sync_inhand_items(
         if !active_matches {
             continue;
         }
-        let Some(rsi) = item_inhand(&registry, &item.name) else {
+        let Some(rsi) = item_inhand(&registry, &catalog.items, &item.name) else {
             continue;
         };
         let mut sprite = Sprite::from_image(rsi.image.clone());
@@ -302,6 +305,7 @@ pub fn sync_inhand_items(
 #[derive(SystemParam)]
 pub struct ItemSprites<'w, 's> {
     registry: Res<'w, RsiRegistry>,
+    catalog: Res<'w, crate::content::ClientContent>,
     items: Query<'w, 's, &'static Item>,
 }
 
@@ -311,7 +315,7 @@ impl ItemSprites<'_, '_> {
         let name = Entity::try_from_bits(bits)
             .and_then(|entity| self.items.get(entity).ok())
             .map(|item| item.name.clone())?;
-        let sprite = item_icon(&self.registry, &name);
+        let sprite = item_icon(&self.registry, &self.catalog.items, &name);
         if sprite.is_none() {
             tracing::warn!(item = %name, "no icon for item");
         }

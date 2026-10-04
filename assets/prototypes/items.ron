@@ -1,0 +1,44 @@
+// Каталог предметов (T5.2): id (он же Item.name в мире), название, спрайты,
+// размер в клетках инвентаря (тетрис) и теги.
+// Спрайты проверены по сборке мини-станции (существуют в assets/sprites/ss14).
+(
+    items: [
+        // ---------------------------------------------------------- инструменты
+        (id: "Crowbar", name: "Лом", sprite: Some("Objects/Tools/crowbar.rsi#icon"), inhand: Some("Objects/Tools/crowbar.rsi#inhand-right"), size: (2, 1), tags: ["tool", "pry"]),
+        (id: "Wrench", name: "Гаечный ключ", sprite: Some("Objects/Tools/wrench.rsi#icon"), inhand: Some("Objects/Tools/wrench.rsi#inhand-right"), size: (2, 1), tags: ["tool"]),
+        (id: "Screwdriver", name: "Отвёртка", sprite: Some("Objects/Tools/screwdriver.rsi#screwdriver"), inhand: Some("Objects/Tools/screwdriver.rsi#inhand-right"), size: (1, 1), tags: ["tool"]),
+        (id: "Wirecutters", name: "Кусачки", sprite: Some("Objects/Tools/wirecutters.rsi#cutters"), inhand: Some("Objects/Tools/wirecutters.rsi#inhand-right"), size: (1, 1), tags: ["tool"]),
+        (id: "Welder", name: "Сварочный аппарат", sprite: Some("Objects/Tools/welder.rsi#icon"), inhand: Some("Objects/Tools/welder.rsi#inhand-right"), size: (2, 1), tags: ["tool"]),
+        (id: "Multitool", name: "Мультитул", sprite: Some("Objects/Tools/multitool.rsi#icon"), inhand: Some("Objects/Tools/multitool.rsi#inhand-right"), size: (1, 1), tags: ["tool"]),
+        (id: "Shovel", name: "Лопата", sprite: Some("Objects/Tools/shovel.rsi#icon"), inhand: Some("Objects/Tools/shovel.rsi#inhand-right"), size: (2, 1), tags: ["tool"]),
+        (id: "Flashlight", name: "Фонарик", sprite: Some("Objects/Tools/flashlight.rsi#flashlight"), inhand: Some("Objects/Tools/flashlight.rsi#inhand-right"), size: (1, 2), tags: ["tool", "light"]),
+        (id: "CableCoil", name: "Моток кабеля", sprite: Some("Objects/Tools/cable-coils.rsi#coil-30"), inhand: Some("Objects/Tools/cable-coils.rsi#coillv-inhand-right"), size: (1, 1), tags: ["material", "wiring"]),
+        (id: "ToolboxRed", name: "Ящик для инструментов", sprite: Some("Objects/Tools/Toolboxes/toolbox_red.rsi#icon"), size: (2, 2), tags: ["storage"]),
+        // ----------------------------------------------------------- материалы
+        (id: "SteelSheet", name: "Стальной лист", sprite: Some("Objects/Materials/Sheets/metal.rsi#steel"), inhand: Some("Objects/Materials/Sheets/metal.rsi#steel-inhand-right"), size: (1, 1), tags: ["material", "metal"]),
+        (id: "GlassSheet", name: "Лист стекла", sprite: Some("Objects/Materials/Sheets/glass.rsi#glass"), inhand: Some("Objects/Materials/Sheets/glass.rsi#glass-inhand-right"), size: (1, 1), tags: ["material", "glass"]),
+        (id: "PlasteelSheet", name: "Лист пластали", sprite: Some("Objects/Materials/Sheets/metal.rsi#plasteel"), size: (1, 1), tags: ["material", "metal"]),
+        (id: "BrassSheet", name: "Лист латуни", sprite: Some("Objects/Materials/Sheets/metal.rsi#brass"), size: (1, 1), tags: ["material", "metal"]),
+        (id: "TitaniumSheet", name: "Лист титана", sprite: Some("Objects/Materials/Sheets/metal.rsi#titanium"), size: (1, 1), tags: ["material", "metal"]),
+        (id: "PlasmaSheet", name: "Лист плазмы", sprite: Some("Objects/Materials/Sheets/other.rsi#plasma"), size: (1, 1), tags: ["material", "plasma"]),
+        (id: "UraniumSheet", name: "Лист урана", sprite: Some("Objects/Materials/Sheets/other.rsi#uranium"), size: (1, 1), tags: ["material", "uranium"]),
+        (id: "MetalRod", name: "Металлический прут", sprite: Some("Objects/Materials/parts.rsi#rods"), size: (1, 1), tags: ["material", "metal"]),
+        (id: "IronOre", name: "Железная руда", sprite: Some("Objects/Materials/ore.rsi#iron"), size: (1, 1), tags: ["material", "ore"]),
+        (id: "IronIngot", name: "Железный слиток", sprite: Some("Objects/Materials/ingots.rsi#iron"), size: (1, 1), tags: ["material", "metal"]),
+        // ---------------------------------------------------------- медицина
+        (id: "Medkit", name: "Аптечка", sprite: Some("Objects/Specific/Medical/firstaidkits.rsi#advkit"), size: (2, 2), tags: ["medical"]),
+        // ------------------------------------------------------------- еда
+        (id: "Bread", name: "Батон", sprite: Some("Objects/Consumable/Food/Baked/bread.rsi#baguette"), size: (2, 1), tags: ["food"]),
+        (id: "Cola", name: "Банка колы", sprite: Some("Objects/Consumable/Drinks/cola.rsi#icon"), inhand: Some("Objects/Consumable/Drinks/cola.rsi#icon"), size: (1, 1), tags: ["drink"]),
+        (id: "Beer", name: "Бутылка пива", sprite: Some("Objects/Consumable/Drinks/beer.rsi#icon"), size: (1, 1), tags: ["drink"]),
+        (id: "WaterBottle", name: "Бутылка воды", sprite: Some("Objects/Consumable/Drinks/waterbottle.rsi#icon"), size: (1, 1), tags: ["drink"]),
+        (id: "Cigarette", name: "Сигарета", sprite: Some("Objects/Consumable/Smokeables/Cigarettes/cigarette.rsi#unlit"), size: (1, 1), tags: ["smoke"]),
+        // ------------------------------------------------------------ оружие
+        (id: "KitchenKnife", name: "Кухонный нож", sprite: Some("Objects/Weapons/Melee/kitchen_knife.rsi#icon"), inhand: Some("Objects/Weapons/Melee/kitchen_knife.rsi#inhand-right"), size: (1, 1), tags: ["weapon", "sharp"]),
+        (id: "CombatKnife", name: "Боевой нож", sprite: Some("Objects/Weapons/Melee/combat_knife.rsi#icon"), inhand: Some("Objects/Weapons/Melee/combat_knife.rsi#inhand-right"), size: (1, 1), tags: ["weapon", "sharp"]),
+        // -------------------------------------------------------------- прочее
+        (id: "Backpack", name: "Рюкзак", sprite: Some("Clothing/Back/Backpacks/backpack.rsi#icon"), size: (2, 2), tags: ["storage"]),
+        (id: "Paper", name: "Бумага", sprite: Some("Objects/Misc/bureaucracy.rsi#paper"), size: (1, 1), tags: ["paper"]),
+        (id: "Pen", name: "Ручка", sprite: Some("Objects/Misc/pens.rsi#pen"), size: (1, 1), tags: ["paper"]),
+    ],
+)

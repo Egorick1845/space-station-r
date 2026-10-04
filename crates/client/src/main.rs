@@ -20,6 +20,8 @@ use ssr_core::{GAME_NAME, PlayerPosition};
 mod audio;
 mod console;
 mod containers;
+mod content;
+mod crafting;
 mod doors;
 mod humanoid;
 mod inventory_ui;
@@ -98,6 +100,7 @@ fn main() {
     app.init_resource::<windows::WindowPositions>();
     app.init_resource::<settings::Settings>();
     app.init_resource::<doors::DeniedDoors>();
+    app.init_resource::<crafting::CraftingState>();
     // FPS-диагностика нужна строке FPS в углу (включается в настройках).
     app.add_plugins(bevy::diagnostic::FrameTimeDiagnosticsPlugin::default());
     // RsiRegistry строится сразу после DefaultPlugins: нужен и игроку (обезьяна),
@@ -118,6 +121,7 @@ fn main() {
             install_default_font,
             settings::load_settings,
             settings::apply_saved_window_mode,
+            content::load_content,
             settings::spawn_fps_text,
             audio::load_sounds,
         ),
@@ -158,6 +162,9 @@ fn main() {
             console::toggle_console,
             console::console_input,
             console::update_console_text,
+            crafting::toggle_crafting,
+            crafting::render_crafting,
+            crafting::craft_click,
         )
             .run_if(in_game),
     );
@@ -192,6 +199,7 @@ fn main() {
             inventory_ui::inventory_test_mode,
             inventory_ui::build_test_mode,
             inventory_ui::attack_test_mode,
+            crafting::craft_test_mode,
         )
             .run_if(in_game),
     );

@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Версия протокола. Несовпадение при рукопожатии = отказ соединения (проверка в T1.2).
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Порт игрового сервера по умолчанию (T1.2).
 pub const DEFAULT_SERVER_PORT: u16 = 7777;
@@ -49,6 +49,8 @@ pub enum ClientMessage {
     },
     /// Переключить активную руку (SS14-модель, T3.3+).
     SwitchHand,
+    /// Скрафтить предмет по рецепту из `assets/prototypes/recipes.ron` (T5.2).
+    Craft { recipe: String },
     /// Взять предмет из рюкзака в активную руку.
     TakeInHand {
         /// Слот рюкзака.
