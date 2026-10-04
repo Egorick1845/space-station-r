@@ -13,3 +13,5 @@ serde_json = { workspace = true }
 zip = { workspace = true }
 ron = { workspace = true }
 thiserror = { workspace = true }
+serde_yaml_ng = { workspace = true }
+walkdir = { workspace = true }
