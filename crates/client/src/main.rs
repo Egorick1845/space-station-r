@@ -900,9 +900,12 @@ pub fn fit_world_viewport(
     let Projection::Orthographic(orthographic) = &mut **camera else {
         return;
     };
-    let scale = (window.resolution.width() / 1920.0)
-        .max(window.resolution.height() / 1080.0)
-        .max(1.0);
+    // ВАЖНО: в Bevy `scale` — это «зум-аут» (больше значение = больше мира в
+    // кадре). Ограничиваем видимую область сверху: масштаб не больше 1 и не
+    // больше отношения, при котором в кадр влезает 1920×1080 единиц.
+    let scale = (1920.0 / window.resolution.width())
+        .min(1080.0 / window.resolution.height())
+        .min(1.0);
     if (orthographic.scale - scale).abs() > f32::EPSILON {
         orthographic.scale = scale;
         tracing::info!(scale, "world viewport scale updated");

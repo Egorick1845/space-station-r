@@ -393,6 +393,7 @@ pub fn sync_worn_clothes(
     body_owners: Query<Entity, With<crate::Player>>,
     parts: Query<&HumanoidPart>,
     children_of: Query<&Children>,
+    facings: Query<&Facing>,
     worn: Query<(Entity, &WornLayer)>,
     mut last: Local<std::collections::HashMap<Entity, WornSignature>>,
 ) {
@@ -439,6 +440,8 @@ pub fn sync_worn_clothes(
                 commands.entity(layer).despawn();
             }
         }
+        // Направление владельца — чтобы слои появились уже повёрнутыми.
+        let facing = facings.get(visual).map(|facing| facing.0).unwrap_or(0);
         let mut spawned = 0;
         let helmet = clothing
             .get(ssr_core::clothing::ClothingSlot::Head)
@@ -454,7 +457,7 @@ pub fn sync_worn_clothes(
                 let mut component = Sprite::from_image(sprite.image.clone());
                 component.texture_atlas = Some(TextureAtlas {
                     layout: sprite.layout.clone(),
-                    index: sprite.index(0, 0),
+                    index: sprite.index(facing.min(3), 0),
                 });
                 component.color = Color::srgb_u8(hair.color[0], hair.color[1], hair.color[2]);
                 commands.entity(visual).with_children(|parent| {

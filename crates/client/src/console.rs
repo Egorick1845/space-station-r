@@ -184,11 +184,51 @@ fn run_command(command: &str, console: &mut Console, cmd: &mut ConsoleCommands) 
         console.push_line("отправлено на сервер…");
         return;
     }
+    // Внешность: hair/beard/haircolor/sex — отправляем серверу (протокол v10).
+    if matches!(name, "hair" | "beard" | "haircolor" | "sex") {
+        let mut message = ClientMessage::SetAppearance {
+            sex: None,
+            hair: None,
+            beard: None,
+            hair_color: None,
+        };
+        if let ClientMessage::SetAppearance {
+            sex,
+            hair,
+            beard,
+            hair_color,
+        } = &mut message
+        {
+            match name {
+                "hair" => *hair = Some(argument.to_string()),
+                "beard" => *beard = Some(argument.to_string()),
+                "sex" => *sex = Some(argument.to_string()),
+                "haircolor" => {
+                    let parts: Vec<u8> = command
+                        .split_whitespace()
+                        .skip(1)
+                        .filter_map(|value| value.parse().ok())
+                        .collect();
+                    if parts.len() == 3 {
+                        *hair_color = Some([parts[0], parts[1], parts[2]]);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for mut sender in cmd.senders.iter_mut() {
+            sender.send::<GameChannel>(message.clone());
+        }
+        console.push_line(format!("внешность: {command}"));
+        return;
+    }
     match name {
         "help" => {
             console.push("Команды: help, clear, volume <0..1>, fps <on|off>,");
             console.push("  fullscreen <on|off>, pos, players, quit");
             console.push("Админ (сервер): tp <x> <y>, spawn <предмет> [n], kick <имя>, heal");
+            console.push("Внешность: hair <стиль>, beard <стиль|пусто>, sex <male|female>,");
+            console.push("  haircolor <r> <g> <b>");
         }
         "clear" => console.lines.clear(),
         "volume" => match argument.parse::<f32>() {

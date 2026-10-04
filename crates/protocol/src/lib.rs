@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Версия протокола. Несовпадение при рукопожатии = отказ соединения (проверка в T1.2).
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// Порт игрового сервера по умолчанию (T1.2).
 pub const DEFAULT_SERVER_PORT: u16 = 7777;
@@ -69,6 +69,18 @@ pub enum ClientMessage {
     DropItem { item: u64 },
     /// Надеть предмет: `slot` — целевой слот (одежда, карман, разгрузка).
     Equip { item: u64, slot: String },
+    /// Сменить внешность (что передано — то и меняется; выдаётся на спавне
+    /// случайно, а игрок может поправить: SS14 даёт это в лобби).
+    SetAppearance {
+        /// Пол (`male` / `female` / `unsexed`).
+        sex: Option<String>,
+        /// Стиль причёски (состояние `human_hair.rsi`).
+        hair: Option<String>,
+        /// Стиль бороды (состояние `human_facial_hair.rsi`), пусто — сбрить.
+        beard: Option<String>,
+        /// Цвет волос и бороды.
+        hair_color: Option<[u8; 3]>,
+    },
     /// Снять одежду из слота (имя слота как в каталоге: `jumpsuit`, `shoes`).
     Unequip { slot: String },
     /// Переключить боевой режим: обычные клики начинают бить, а не использовать.

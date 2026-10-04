@@ -2146,6 +2146,47 @@ fn handle_client_messages(
                         tracing::info!(item, "item dropped from inventory to floor");
                     }
                 }
+                ClientMessage::SetAppearance {
+                    sex,
+                    hair,
+                    beard,
+                    hair_color,
+                } => {
+                    let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {
+                        continue;
+                    };
+                    let player = entry.player;
+                    if let Some(sex) = sex
+                        && let Some(sex) = Sex::from_id(&sex)
+                    {
+                        commands.entity(player).insert(sex);
+                    }
+                    if let Some(hair) = hair {
+                        if HAIR_STYLES.contains(&hair.as_str()) {
+                            let color = hair_color.unwrap_or([0x6b, 0x4a, 0x2f]);
+                            commands.entity(player).insert(Hair {
+                                style: hair.clone(),
+                                color,
+                            });
+                            tracing::info!(%hair, "appearance: hair set");
+                        } else {
+                            tracing::warn!(%hair, "appearance: unknown hair style");
+                        }
+                    }
+                    if let Some(beard) = beard {
+                        if beard.is_empty() {
+                            commands.entity(player).remove::<FacialHair>();
+                        } else if FACIAL_HAIR_STYLES.contains(&beard.as_str()) {
+                            let color = hair_color.unwrap_or([0x6b, 0x4a, 0x2f]);
+                            commands.entity(player).insert(FacialHair {
+                                style: beard,
+                                color,
+                            });
+                        } else {
+                            tracing::warn!(%beard, "appearance: unknown beard style");
+                        }
+                    }
+                }
                 ClientMessage::Equip { item, slot } => {
                     let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {
                         continue;

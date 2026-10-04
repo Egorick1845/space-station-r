@@ -27,9 +27,9 @@ const FALLOFF: f32 = 6.8;
 /// Высота источника над полом (`LIGHTING_HEIGHT = 1.0` в шейдере).
 const LIGHTING_HEIGHT: f32 = 1.0;
 /// Полуразмер окна карты света в тайлах.
-const LIGHT_RADIUS_TILES: i32 = 40;
+const LIGHT_RADIUS_TILES: i32 = 34;
 /// Как часто пересобираем карту (сек): в движке — каждый кадр в рендерере.
-const LIGHT_PERIOD: f32 = 0.1;
+const LIGHT_PERIOD: f32 = 0.25;
 /// Слой тёмного оверлея: выше тумана (0.85), ниже тел (0.9).
 const LIGHT_Z: f32 = 0.86;
 /// Слой оттенка света — сразу над тьмой.
