@@ -20,8 +20,9 @@ use ssr_core::tiles::{CHUNK_TILES, TILE_PX, TileChunkData, TileType};
 use crate::inventory_ui::OwnPlayerEntity;
 
 /// Постоянный свет станции: `MapLight.ambientLightColor: '#151515FF'`
-/// (cluster.yml) — без ламп станция почти чёрная, но силуэты видны.
-const AMBIENT: f32 = 0x15 as f32 / 255.0;
+/// (cluster.yml). В движке это ~8% серого, но карта света там УМНОЖАЕТСЯ, а у нас
+/// это слой тьмы: берём меньше, чтобы тени были темнее, а свет ламп — заметнее.
+const AMBIENT: f32 = 0.06;
 /// Затухание из `SharedPointLightComponent.Falloff`.
 const FALLOFF: f32 = 6.8;
 /// Высота источника над полом (`LIGHTING_HEIGHT = 1.0` в шейдере).
@@ -30,12 +31,12 @@ const LIGHTING_HEIGHT: f32 = 1.0;
 const LIGHT_RADIUS_TILES: i32 = 34;
 /// Как часто пересобираем карту (сек): в движке — каждый кадр в рендерере.
 const LIGHT_PERIOD: f32 = 0.25;
-/// Слой тёмного оверлея: выше тумана (0.85), ниже тел (0.9).
-const LIGHT_Z: f32 = 0.86;
-/// Слой оттенка света — сразу над тьмой.
-const GLOW_Z: f32 = 0.87;
+/// Слой тёмного оверлея — выше всех мировых спрайтов (см. FOG_Z).
+const LIGHT_Z: f32 = 2.01;
+/// Слой оттенка света — сразу над тьмой (ниже интерфейса).
+const GLOW_Z: f32 = 2.02;
 /// Насколько сильно цвет лампы подкрашивает освещённые тайлы.
-const GLOW_ALPHA: f32 = 0.35;
+const GLOW_ALPHA: f32 = 0.55;
 /// Юнитов на тайл.
 const TILE_UNITS: f32 = TILE_PX as f32;
 
@@ -268,19 +269,30 @@ pub fn update_lighting(
         }
     }
 
-    // 4) размытие 3×3 — как `light.blur` в движке (мягкие края).
+    // 4) размытие 3×3 — как `light.blur` в движке (мягкие края). Через стены
+    // размытие не пускаем: иначе свет «перетекает» сквозь них (жалоба владельца).
     let mut blurred = values.clone();
     for ly in 1..side - 1 {
         for lx in 1..side - 1 {
+            let index = (ly * side + lx) as usize;
+            if grid[index] == TileType::Wall {
+                continue;
+            }
             let mut sum = 0.0f32;
+            let mut count = 0.0f32;
             for dy in -1i32..=1 {
                 for dx in -1i32..=1 {
                     let x = (lx as i32 + dx) as u32;
                     let y = (ly as i32 + dy) as u32;
-                    sum += values[(y * side + x) as usize];
+                    let neighbor = (y * side + x) as usize;
+                    if grid[neighbor] == TileType::Wall {
+                        continue;
+                    }
+                    sum += values[neighbor];
+                    count += 1.0;
                 }
             }
-            blurred[(ly * side + lx) as usize] = sum / 9.0;
+            blurred[index] = sum / count.max(1.0);
         }
     }
 

@@ -338,10 +338,14 @@ pub fn update_facing(
 }
 
 /// Отпечаток внешности: что надето и какая причёска.
+/// Отпечаток внешности: что надето, причёска, борода и НАПРАВЛЕНИЕ владельца —
+/// при повороте слои пересобираются заново, поэтому одежда гарантированно смотрит
+/// туда же, куда и тело (была жалоба, что одежда «поворачивается отдельно»).
 type WornSignature = (
     Vec<(ssr_core::clothing::ClothingSlot, u64)>,
     Option<(String, [u8; 3])>,
     Option<(String, [u8; 3])>,
+    u32,
 );
 
 /// Слой надетой одежды (для пересборки при смене одежды).
@@ -398,10 +402,15 @@ pub fn sync_worn_clothes(
     mut last: Local<std::collections::HashMap<Entity, WornSignature>>,
 ) {
     for (entity, clothing, hair, beard) in clothings.iter() {
+        let facing = facings
+            .get(entity)
+            .map(|facing| facing.0)
+            .unwrap_or_default();
         let signature = (
             clothing.slots.clone(),
             hair.map(|hair| (hair.style.clone(), hair.color)),
             beard.map(|beard| (beard.style.clone(), beard.color)),
+            facing,
         );
         if last.get(&entity) == Some(&signature) {
             continue;
