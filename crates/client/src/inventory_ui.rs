@@ -754,21 +754,9 @@ pub fn render_hands_panel(
                 true,
                 own_state.active == 1,
             );
-            // Слоты экипировки (`SecondHotbar` в SS14): id, belt, back.
-            let clothing = own
-                .0
-                .and_then(|entity| clothings.get(entity).ok())
-                .cloned()
-                .unwrap_or_default();
-            // В SS14 это два контейнера: SecondHotbar слева (id/belt/back),
-            // MainHotbar справа (карманы и разгрузка).
-            for slot in [
-                ssr_core::clothing::ClothingSlot::Id,
-                ssr_core::clothing::ClothingSlot::Belt,
-                ssr_core::clothing::ClothingSlot::Back,
-            ] {
-                equip_slot(bar, &theme, &sprites, slot, &clothing);
-            }
+            // MainHotbar (`MainHotbar` в SS14): карманы и разгрузка справа.
+            // id/belt/back уже отрисованы слева выше — второй раз их не строим
+            // (был дубликат справа).
             for slot in [
                 ssr_core::clothing::ClothingSlot::SuitStorage,
                 ssr_core::clothing::ClothingSlot::Pocket1,
