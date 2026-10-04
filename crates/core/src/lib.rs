@@ -36,7 +36,15 @@ pub fn assets_root() -> std::path::PathBuf {
 }
 
 /// Скорость игрока, пикселей в секунду (сервер применяет ввод по ADR-3).
-pub const PLAYER_MOVE_SPEED: f32 = 300.0;
+/// Базовая скорость — спринт как в SS14: 4.5 м/с × 32 px/м. Ходьба —
+/// 2.5 м/с (Shift), спринт включён по умолчанию (`DefaultSprinting`).
+pub const PLAYER_MOVE_SPEED: f32 = 144.0;
+/// Скорость ходьбы (Shift в SS14 включает ходьбу): 2.5 м/с.
+pub const PLAYER_WALK_SPEED: f32 = 80.0;
+/// Разгон Quake-модели из `SharedMoverController`: accel 20 м/с² × 32 px/м.
+pub const PLAYER_ACCEL: f32 = 20.0 * 32.0;
+/// Торможение без ввода: friction 25/с.
+pub const PLAYER_FRICTION_IDLE: f32 = 25.0;
 
 /// Размер тайла в юнитах мира: 1 тайл = 1 юнит сетки (ADR-8, IMP-1),
 /// спрайты 32 px. Все мировые координаты в юнитах, тайл — минимальная единица.

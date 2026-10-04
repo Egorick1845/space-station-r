@@ -1550,6 +1550,7 @@ pub fn mech_test_mode(
 /// Esc закрывает все открытые окна (владелец: «сделай, чтобы все окна могли
 /// закрываться на esc»): меню, окно персонажа и рюкзак, крафт. Чат при этом
 /// обрабатывается своей системой (сначала снимает фокус) — здесь он пропускается.
+#[allow(clippy::too_many_arguments)]
 pub fn close_windows_on_escape(
     keys: Res<ButtonInput<KeyCode>>,
     console: Res<Console>,

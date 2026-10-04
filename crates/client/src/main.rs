@@ -26,7 +26,6 @@ mod containers;
 mod content;
 mod crafting;
 mod doors;
-mod fov;
 mod hud;
 mod humanoid;
 mod inventory_ui;
@@ -85,7 +84,7 @@ const DEV_PLAYER_NAME: &str = "SSR-dev";
 
 /// Длительность серверного тика: интерполяция проигрывает путь между двумя
 /// последними серверными позициями ровно за это время (без рывков).
-const NET_TICK_SECS: f32 = 1.0 / NET_TPS as f32;
+pub(crate) const NET_TICK_SECS: f32 = 1.0 / NET_TPS as f32;
 
 fn main() {
     // SSR_BOT=<имя> — headless-бот для нагрузочного теста (T6.1).
@@ -174,7 +173,6 @@ fn main() {
         (
             setup_camera,
             startup_map,
-            fov::setup_fog,
             lighting::setup_lighting,
             install_default_font,
             settings::load_settings,
@@ -195,7 +193,6 @@ fn main() {
             tiles::render_map_chunks,
             tiles::despawn_orphan_chunks,
             camera_follow_player,
-            fov::update_fog,
             lighting::update_lighting,
             doors::spawn_door_visuals,
             doors::update_door_visuals,
@@ -233,6 +230,7 @@ fn main() {
             inventory_ui::resolve_own_player,
             inventory_ui::spawn_remote_players,
             inventory_ui::sync_remote_players,
+            inventory_ui::remote_player_interp,
             inventory_ui::sync_inhand_items,
             inventory_ui::render_inventory_panel,
             inventory_ui::render_hands_panel,
@@ -567,6 +565,7 @@ fn send_input(
     state.elapsed = 0.0;
     state.last = movement;
     // Бег (Shift) и боевой режим (F) — в том же сообщении ввода.
+    // В SS14 спринт по умолчанию, Shift включает ХОДЬБУ (DefaultSprinting).
     let running = input.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight])
         || std::env::var_os("SSR_RUN_TEST").is_some();
     let combat = hud_state.combat;
@@ -728,7 +727,7 @@ fn apply_player_state(
             (interp.elapsed / NET_TICK_SECS).clamp(0.0, 1.0),
         );
         interp.target = target;
-        interp.elapsed = -NET_TICK_SECS;
+        interp.elapsed = 0.0;
     }
     interp.elapsed += time.delta_secs();
     let alpha = (interp.elapsed / NET_TICK_SECS).clamp(0.0, 1.0);
@@ -904,24 +903,52 @@ fn screenshot_test_mode(mut commands: Commands, time: Res<Time>, mut state: Loca
 /// Ограничивает видимую область мира как `ScalingViewport` в SS14: на большом
 /// окне масштаб увеличивается, чтобы в кадр попадало не больше ~1920×1080
 /// единиц (60×34 тайла), иначе на широком мониторе видно лишнее.
+/// Видимая область мира как в SS14: фиксированный виртуальный кадр
+/// **21×15 тайлов** (`ViewportUIController.ViewportSize = 672×480 px` при
+/// 32 px/тайл). Окно получает кадр letterbox'ом по центру с целочисленным
+/// масштабом (`ScalingViewport` + snap из `MainViewport.CalcSnappingFactor`).
 pub fn fit_world_viewport(
     windows: Query<&Window>,
-    mut camera: Single<&mut Projection, With<Camera2d>>,
+    mut camera: Single<(&mut Camera, &mut Projection), With<Camera2d>>,
 ) {
+    const VIRTUAL_W: f32 = 672.0; // 21 тайл × 32
+    const VIRTUAL_H: f32 = 480.0; // 15 тайлов × 32
     let Ok(window) = windows.single() else {
         return;
     };
-    let Projection::Orthographic(orthographic) = &mut **camera else {
+    let (camera, projection) = &mut *camera;
+    let logical_w = window.width();
+    let logical_h = window.height();
+    let scale_factor = window.scale_factor();
+    // Точный letterbox-масштаб и snap к целому (допуск 64 px, как в SS14).
+    let s = (logical_w / VIRTUAL_W).min(logical_h / VIRTUAL_H);
+    let snapped = if s >= 1.0 {
+        let nearest = s.round().max(1.0);
+        if (s - nearest).abs() * VIRTUAL_W <= 64.0 {
+            nearest
+        } else {
+            s
+        }
+    } else {
+        s
+    };
+    let view_w = VIRTUAL_W * snapped;
+    let view_h = VIRTUAL_H * snapped;
+    let offset_x = ((logical_w - view_w) / 2.0).max(0.0);
+    let offset_y = ((logical_h - view_h) / 2.0).max(0.0);
+    let physical = |value: f32| (value * scale_factor).round() as u32;
+    camera.viewport = Some(bevy::camera::Viewport {
+        physical_position: UVec2::new(physical(offset_x), physical(offset_y)),
+        physical_size: UVec2::new(physical(view_w), physical(view_h)),
+        depth: 0.0..1.0,
+    });
+    // Орто-масштаб такой, что во вьюпорте видно ровно 672×480 единиц мира.
+    let Projection::Orthographic(orthographic) = &mut **projection else {
         return;
     };
-    // ВАЖНО: в Bevy `scale` — это «зум-аут» (больше значение = больше мира в
-    // кадре). Ограничиваем видимую область сверху: масштаб не больше 1 и не
-    // больше отношения, при котором в кадр влезает 1920×1080 единиц.
-    let scale = (1920.0 / window.resolution.width())
-        .min(1080.0 / window.resolution.height())
-        .min(1.0);
+    let scale = 1.0 / snapped;
     if (orthographic.scale - scale).abs() > f32::EPSILON {
         orthographic.scale = scale;
-        tracing::info!(scale, "world viewport scale updated");
+        tracing::info!(scale, snapped, "world viewport updated (21x15)");
     }
 }

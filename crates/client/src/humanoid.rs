@@ -475,7 +475,7 @@ pub fn sync_worn_clothes(
                         WornLayer { owner: visual },
                         component,
                         // Между шеей (1.21) и шлемом (1.22): шлем перекрывает волосы.
-                        Transform::from_xyz(0.0, 0.0, 1.212),
+                        Transform::from_xyz(0.0, 0.0, 0.212),
                     ));
                 });
                 spawned += 1;
@@ -498,7 +498,10 @@ pub fn sync_worn_clothes(
                     HumanoidPart { owner: visual, key },
                     WornLayer { owner: visual },
                     component,
-                    Transform::from_xyz(0.0, 0.0, slot.layer_z()),
+                    // Абсолютный z = корень моба (1.0) + этот сдвиг: в SS14 слои
+                    // относительны к мобу, а тьма/туман живут на 2.01 — одежда обязана
+                    // быть ниже них, иначе «просвечивает» из тёмных зон.
+                    Transform::from_xyz(0.0, 0.0, slot.layer_z() - 1.0),
                 ));
                 spawned += 1;
             }

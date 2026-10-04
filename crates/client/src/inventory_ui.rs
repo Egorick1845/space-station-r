@@ -46,6 +46,16 @@ const TILE_UNITS: f32 = 32.0;
 /// Время до авто-переноса в тестовом режиме SSR_INV_TEST.
 const INV_TEST_DELAY: f32 = 5.0;
 
+/// Интерполяция удалённого игрока: тот же prev/target за тик сети, что у себя —
+/// без неё чужие персонажи дёргаются на частоте тиков (20 Гц).
+#[derive(Component, Default)]
+pub struct RemoteInterp {
+    prev: Vec2,
+    target: Vec2,
+    elapsed: f32,
+    started: bool,
+}
+
 /// Клиентская сущность своего игрока (резолвится раз в кадр из Welcome+маппинга).
 #[derive(Resource, Default)]
 pub struct OwnPlayerEntity(pub Option<Entity>);
@@ -157,6 +167,7 @@ pub fn spawn_remote_players(
         }
         commands.spawn((
             RemotePlayerVisual { player: entity },
+            RemoteInterp::default(),
             crate::humanoid::Facing(0),
             // Родителю нужна Visibility, иначе части тела-дети не видны (B0004).
             Visibility::default(),
@@ -175,11 +186,11 @@ pub fn sync_remote_players(
     mut visuals: Query<(
         Entity,
         &RemotePlayerVisual,
-        &mut Transform,
+        &mut RemoteInterp,
         &mut crate::humanoid::Facing,
     )>,
 ) {
-    for (visual_entity, visual, mut transform, mut facing) in visuals.iter_mut() {
+    for (visual_entity, visual, mut interp, mut facing) in visuals.iter_mut() {
         // Дубль своего игрока (успел появиться до маппинга) — убираем.
         if Some(visual.player) == own.0 {
             commands.entity(visual_entity).despawn();
@@ -189,8 +200,19 @@ pub fn sync_remote_players(
             commands.entity(visual_entity).despawn();
             continue;
         };
-        let (x, y) = (position.0[0], position.0[1]);
-        let delta = Vec2::new(x - transform.translation.x, y - transform.translation.y);
+        let target = Vec2::from_array(position.0);
+        if !interp.started {
+            interp.prev = target;
+            interp.target = target;
+            interp.started = true;
+        } else if target != interp.target {
+            // Новый снимок: продолжаем от текущей отрисованной точки.
+            let alpha = (interp.elapsed / crate::NET_TICK_SECS).clamp(0.0, 1.0);
+            interp.prev = interp.prev.lerp(interp.target, alpha);
+            interp.target = target;
+            interp.elapsed = 0.0;
+        }
+        let delta = interp.target - interp.prev;
         if delta.length() >= 0.5 {
             facing.0 = if delta.x.abs() > delta.y.abs() {
                 if delta.x > 0.0 { 2 } else { 3 }
@@ -200,8 +222,6 @@ pub fn sync_remote_players(
                 0
             };
         }
-        transform.translation.x = x;
-        transform.translation.y = y;
     }
 }
 
@@ -2078,3 +2098,21 @@ const CHARACTER_SLOT_ORDER: [ssr_core::clothing::ClothingSlot; 9] = [
     ssr_core::clothing::ClothingSlot::Ears,
     ssr_core::clothing::ClothingSlot::Shoes,
 ];
+
+/// Проигрывает путь удалённого игрока ровно за тик сети — чужие персонажи
+/// двигаются так же плавно, как свой (SS14 интерполирует все трансформы).
+pub fn remote_player_interp(
+    time: Res<Time>,
+    mut visuals: Query<(&RemotePlayerVisual, &mut RemoteInterp, &mut Transform)>,
+) {
+    for (_, mut interp, mut transform) in visuals.iter_mut() {
+        if !interp.started {
+            continue;
+        }
+        interp.elapsed += time.delta_secs();
+        let alpha = (interp.elapsed / crate::NET_TICK_SECS).clamp(0.0, 1.0);
+        let position = interp.prev.lerp(interp.target, alpha);
+        transform.translation.x = position.x;
+        transform.translation.y = position.y;
+    }
+}

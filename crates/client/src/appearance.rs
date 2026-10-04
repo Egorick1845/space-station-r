@@ -22,6 +22,16 @@ pub const HAIR_COLORS: [[u8; 3]; 6] = [
     [0x4a, 0x7a, 0x40],
 ];
 
+/// Отпечаток окна внешности для сравнения при перерисовке.
+type AppearanceSignature = (bool, usize, usize, u8, usize);
+/// Клики по стрелкам окна внешности.
+type AppearanceClicks<'w, 's> = Query<
+    'w,
+    's,
+    (&'static Interaction, &'static AppearanceStep),
+    (Changed<Interaction>, With<Button>),
+>;
+
 /// Состояние окна внешности.
 #[derive(Resource, Default)]
 pub struct AppearanceUi {
@@ -70,7 +80,7 @@ pub fn render_appearance_menu(
     state: Res<AppearanceUi>,
     theme: Res<crate::ui_theme::UiTheme>,
     root: Query<Entity, With<crate::hud::HudMenuRoot>>,
-    mut last: Local<Option<(bool, usize, usize, u8, usize)>>,
+    mut last: Local<Option<AppearanceSignature>>,
 ) {
     let signature = (
         state.open,
@@ -179,7 +189,7 @@ pub fn render_appearance_menu(
 /// Нажатие стрелки: меняем выбор и отправляем внешность на сервер.
 pub fn appearance_click(
     mut state: ResMut<AppearanceUi>,
-    clicks: Query<(&Interaction, &AppearanceStep), (Changed<Interaction>, With<Button>)>,
+    clicks: AppearanceClicks,
     mut senders: Query<&mut MessageSender<ClientMessage>, With<Connected>>,
 ) {
     for (interaction, step) in clicks.iter() {

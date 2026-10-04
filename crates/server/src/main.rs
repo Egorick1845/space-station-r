@@ -25,13 +25,13 @@ use ssr_core::inventory::{
     Container, Hands, Health, HeldBy, Inventory, Item, ItemPosition, SLOT_ANY,
 };
 use ssr_core::mechanics::{FACIAL_HAIR_STYLES, FacialHair, HAIR_STYLES, Hair, Sex};
-use ssr_core::mechanics::{Ghost, KNOCKDOWN_SECS, KnockedDown, RUN_SPEED_MULT};
+use ssr_core::mechanics::{Ghost, KNOCKDOWN_SECS, KnockedDown};
 use ssr_core::power::{Cable, Consumer, Generator, Light, Powered};
 use ssr_core::roles::{Access, PlayerRole, RoleSet};
 use ssr_core::tiles::{MapFile, TileChunkData, TileType};
 use ssr_core::{
-    CHUNK_UNITS, Door, INTERACT_RANGE, PLAYER_MOVE_SPEED, PlayerPosition, Species, TILE_SIZE,
-    chunk_coords,
+    CHUNK_UNITS, Door, INTERACT_RANGE, PLAYER_ACCEL, PLAYER_FRICTION_IDLE, PLAYER_MOVE_SPEED,
+    PLAYER_WALK_SPEED, PlayerPosition, Species, TILE_SIZE, chunk_coords,
 };
 use ssr_protocol::net::GameChannel;
 use ssr_protocol::{
@@ -2547,20 +2547,53 @@ fn handle_client_messages(
 
 /// Ввод игрока превращается в скорость физического тела (ADR-3: физика на сервере).
 /// Физический шаг двигает тело, стены останавливают его коллизией (T2.2).
-fn movement(mut players: Query<(&PlayerInput, &mut LinearVelocity, Option<&KnockedDown>)>) {
-    for (input, mut velocity, knocked) in players.iter_mut() {
+/// Скорость движения, накопленная по Quake-модели (как `MoverController` в SS14):
+/// серверная часть сглаживания — без неё позиция меняется скачком за тик.
+#[derive(Component, Default)]
+struct MoveVel(Vec2);
+
+/// Движение по модели SS14 (`SharedMoverController`): friction → accelerate.
+/// Спринт включён по умолчанию (4.5 м/с), Shift = ходьба 2.5 м/с; разгон
+/// 20 м/с², торможение почти мгновенное (25/с). Это убирает рывки на сервере,
+/// клиентская интерполяция сглаживает оставшееся.
+fn movement(
+    time: Res<Time>,
+    mut players: Query<(
+        &PlayerInput,
+        &mut LinearVelocity,
+        &mut MoveVel,
+        Option<&KnockedDown>,
+    )>,
+) {
+    let dt = time.delta_secs().min(0.1);
+    for (input, mut velocity, mut move_vel, knocked) in players.iter_mut() {
         // Лежачего не двигаем (падение/стан, T-мех).
         if knocked.is_some() {
+            move_vel.0 = Vector::ZERO;
             velocity.0 = Vector::ZERO;
             continue;
         }
-        // Бег: Shift даёт 1.6× скорости (как «бег» в SS14).
-        let speed = if input.running {
-            PLAYER_MOVE_SPEED * RUN_SPEED_MULT
+        let wish = Vec2::from_array(input.direction).normalize_or_zero();
+        // В SS14 спринт по умолчанию: Shift включает ХОДЬБУ, а не бег.
+        let wish_speed = if input.running {
+            PLAYER_WALK_SPEED
         } else {
             PLAYER_MOVE_SPEED
         };
-        velocity.0 = Vec2::from_array(input.direction).normalize_or_zero() * speed;
+        // Quake: friction (при движении клампится до accel = 20/с), затем accelerate.
+        let friction = if wish != Vec2::ZERO {
+            PLAYER_ACCEL / 32.0 // 20/с, как min(friction, accel) в SS14
+        } else {
+            PLAYER_FRICTION_IDLE
+        };
+        move_vel.0 *= (1.0 - dt * friction).max(0.0);
+        if wish != Vec2::ZERO {
+            let add_speed = wish_speed - move_vel.0.dot(wish);
+            // accel(20 м/с²) * dt * wishSpeed(м/с) → в юнитах/с.
+            let accel_speed = (PLAYER_ACCEL / 32.0 * dt * wish_speed).min(add_speed.max(0.0));
+            move_vel.0 += wish * accel_speed;
+        }
+        velocity.0 = move_vel.0;
     }
 }
 

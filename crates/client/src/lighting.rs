@@ -1,13 +1,23 @@
-//! Освещение по модели SS14 (изучено по `Clyde.LightRendering.cs` и
-//! `light_shared.swsl`): карта света строится из постоянного света карты
-//! (`MapLightComponent.ambientLightColor`, у станции `#151515` ≈ 8%) и точек
-//! света (`PointLight`: `radius`, `energy`, `color`), стены перекрывают свет,
-//! карта размывается (`light.blur`). Итог рисуется тёмным оверлеем поверх мира.
+//! Освещение и туман войны по модели SS14 — ЕДИНЫМ слоем, как в движке.
 //!
-//! Отличия от движка (осознанные, документируются): карта считается на CPU по
-//! тайлам, а не в полярной shadow map с VSM/PCF на GPU; мягкость даёт размытие
-//! всей карты, а не PCF-выборка по `softness`; двери свет пока не перекрывают
-//! (у нас они сущности, а не тайлы).
+//! В SS14 итоговый пиксель спрайта = `COLOR * LIGHT`, где карта света LIGHT =
+//! ambient карты (`MapLight.ambientLightColor`, у станции `#151515` ≈ 0.082) плюс
+//! АДДИТИВНЫЕ точки света с затуханием `(1-s²)²/(1+6.8·s)·energy`, умноженная на
+//! окклюзию тумана войны (fov-lighting.swsl: `light *= occlusion`). Стены у ламп
+//! подсвечиваются «просачиванием» (wall bleed), UI свет не трогает.
+//!
+//! У нас вместо умножения каждого спрайта — один оверлей тьмы поверх мира
+//! (ниже интерфейса): `alpha = 1 − свет × видимость`. Математически это то же
+//! затемнение `world × light`, и оно же вбирает туман войны — отдельного слоя
+//! тумана больше нет (раньше было ДВА чёрных слоя с двойной работой).
+//!
+//! Расчёт: окно карты фиксировано 33×33 тайла (вьюпорт 21×15 + поля), BFS от
+//! ламп по нестенным клеткам (без «спиц» от лучей, работает у настенных ламп),
+//! BFS от игрока для видимости, размытие 3×3 по полу и одностороннее
+//! «просачивание» света в стены. Пересчёт — только при изменениях (тайл игрока,
+//! лампы, двери, чанки), поэтому карта больше не считается каждый кадр.
+
+use std::collections::HashMap;
 
 use bevy::asset::RenderAssetUsages;
 use bevy::prelude::*;
@@ -19,284 +29,369 @@ use ssr_core::tiles::{CHUNK_TILES, TILE_PX, TileChunkData, TileType};
 
 use crate::inventory_ui::OwnPlayerEntity;
 
-/// Постоянный свет станции: `MapLight.ambientLightColor: '#151515FF'`
-/// (cluster.yml). В движке это ~8% серого, но карта света там УМНОЖАЕТСЯ, а у нас
-/// это слой тьмы: берём меньше, чтобы тени были темнее, а свет ламп — заметнее.
-const AMBIENT: f32 = 0.06;
+/// Постоянный свет станции (`MapLight.ambientLightColor: '#151515FF'` → 0.082
+/// в линейном пространстве).
+const AMBIENT: f32 = 0.082;
 /// Затухание из `SharedPointLightComponent.Falloff`.
 const FALLOFF: f32 = 6.8;
 /// Высота источника над полом (`LIGHTING_HEIGHT = 1.0` в шейдере).
 const LIGHTING_HEIGHT: f32 = 1.0;
-/// Полуразмер окна карты света в тайлах.
-const LIGHT_RADIUS_TILES: i32 = 26;
-/// Как часто пересобираем карту (сек): в движке — каждый кадр в рендерере.
-const LIGHT_PERIOD: f32 = 0.25;
-/// Лучей на лампу (точность формы теней) и шаг луча в долях тайла.
-const LIGHT_RAYS: usize = 96;
-const RAY_STEP: f32 = 0.5;
-
-/// Слой тёмного оверлея — выше всех мировых спрайтов (см. FOG_Z).
-const LIGHT_Z: f32 = 2.01;
-/// Слой оттенка света — сразу над тьмой (ниже интерфейса).
-const GLOW_Z: f32 = 2.02;
-/// Насколько сильно цвет лампы подкрашивает освещённые тайлы.
+/// Полуразмер окна карты в тайлах: вьюпорт 21×15, диагональ ≈ 13, плюс поля.
+const WINDOW_RADIUS: i32 = 16;
+/// Сторона окна (квадрат, нечётная — центр совпадает с тайлом игрока).
+const WINDOW_SIDE: u32 = (WINDOW_RADIUS * 2 + 1) as u32;
+/// Как часто карта может пересчитываться при изменениях (сек).
+const REBUILD_PERIOD: f32 = 0.15;
+/// Слой тьмы — выше ВСЕХ мировых спрайтов (двери 1.5, тела до 1.23), ниже UI:
+/// в SS14 свет умножается на спрайты, а у нас оверлей обязан их накрыть.
+const DARK_Z: f32 = 2.01;
+/// Слой тёплого оттенка ламп — ПОД тьмой: она (с туманом) сама маскирует
+/// свечение за стенами и в невидимой зоне.
+const GLOW_Z: f32 = 2.00;
+/// Сила тёплого оттенка на освещённых клетках.
 const GLOW_ALPHA: f32 = 0.55;
 /// Юнитов на тайл.
 const TILE_UNITS: f32 = TILE_PX as f32;
 
-/// Карта света: картинка по тайлам и её спрайт.
+/// Карта света: слой тьмы и слой тёплого оттенка.
 #[derive(Resource)]
 pub struct LightMap {
     image: Handle<Image>,
     sprite: Entity,
-    /// Слой оттенка: цвет лампы с альфой по вкладу света (в SS14 цвет лампы
-    /// умножается на свет; у нас — тёплая подсветка поверх слоя тьмы).
     glow_image: Handle<Image>,
     glow_sprite: Entity,
+    /// Пересчёт уже был — дальше только при изменениях.
     ready: bool,
 }
 
-/// Создаёт картинку и спрайт карты света.
+/// Отпечаток мира: при изменении карта пересобирается.
+#[derive(Default, PartialEq)]
+pub(crate) struct WorldState {
+    player_tile: (i32, i32),
+    lamps: Vec<(i32, i32, u8, u8)>, // тайл, радиус, яркость×100
+    closed_doors: Vec<(i32, i32)>,
+    chunks: u64, // хеш набора чанков (репликация карты могла подгрузить новый)
+}
+
+/// Создаёт картинки карты света и спрайты.
 pub fn setup_lighting(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
-    let side = ((LIGHT_RADIUS_TILES * 2 + 1) as u32).max(1);
-    let image = Image::new(
+    let size = (WINDOW_SIDE * WINDOW_SIDE * 4) as usize;
+    let mut dark = Image::new(
         Extent3d {
-            width: side,
-            height: side,
+            width: WINDOW_SIDE,
+            height: WINDOW_SIDE,
             depth_or_array_layers: 1,
         },
         TextureDimension::D2,
-        vec![255; (side * side * 4) as usize],
+        vec![0; size],
         TextureFormat::Rgba8UnormSrgb,
         RenderAssetUsages::default(),
     );
-    let handle = images.add(image);
+    // Карта растягивается на тайлы — линейная фильтрация даёт мягкие края
+    // (в SS14 карта света семплируется билинейно).
+    dark.sampler = bevy::image::ImageSampler::linear();
     let glow = Image::new(
         Extent3d {
-            width: side,
-            height: side,
+            width: WINDOW_SIDE,
+            height: WINDOW_SIDE,
             depth_or_array_layers: 1,
         },
         TextureDimension::D2,
-        vec![0; (side * side * 4) as usize],
+        vec![0; size],
         TextureFormat::Rgba8UnormSrgb,
         RenderAssetUsages::default(),
     );
-    let glow_handle = images.add(glow);
-    // Тексель = тайл, но карта размывается — берём линейную фильтрацию.
+    let image = images.add(dark);
+    let glow_image = images.add(glow);
     let sprite = commands
         .spawn((
-            Sprite::from_image(handle.clone()),
-            Transform::from_xyz(0.0, 0.0, LIGHT_Z).with_scale(Vec3::splat(TILE_UNITS)),
+            Sprite::from_image(image.clone()),
+            Transform::from_xyz(0.0, 0.0, DARK_Z).with_scale(Vec3::splat(TILE_UNITS)),
         ))
         .id();
     let glow_sprite = commands
         .spawn((
-            Sprite::from_image(glow_handle.clone()),
+            Sprite::from_image(glow_image.clone()),
             Transform::from_xyz(0.0, 0.0, GLOW_Z).with_scale(Vec3::splat(TILE_UNITS)),
         ))
         .id();
     commands.insert_resource(LightMap {
-        image: handle,
+        image,
         sprite,
-        glow_image: glow_handle,
+        glow_image,
         glow_sprite,
         ready: false,
     });
 }
 
-/// Тайл по мировым координатам из реплицированных чанков (стена = блок света).
-fn tile_at(chunks: &Query<&TileChunkData>, tx: i32, ty: i32) -> TileType {
-    let size = CHUNK_TILES as i32;
-    let coords = (tx.div_euclid(size), ty.div_euclid(size));
-    for chunk in chunks.iter() {
-        if chunk.coords == coords {
-            return chunk.get_local((tx - coords.0 * size) as u32, (ty - coords.1 * size) as u32);
-        }
-    }
-    TileType::Wall
-}
-
-/// Виден ли тайл из точки (обход по сетке, стены перекрывают — как окклюдеры).
-fn visible_in(grid: &[TileType], side: u32, from: (i32, i32), to: (i32, i32)) -> bool {
-    let (dx, dy) = (to.0 - from.0, to.1 - from.1);
-    let steps = dx.abs().max(dy.abs());
-    if steps <= 1 {
-        return true;
-    }
-    for step in 1..steps {
-        let t = step as f32 / steps as f32;
-        let tx = (from.0 as f32 + dx as f32 * t).round() as i32;
-        let ty = (from.1 as f32 + dy as f32 * t).round() as i32;
-        if tx < 0 || ty < 0 || tx >= side as i32 || ty >= side as i32 {
-            return false;
-        }
-        if grid[(ty as u32 * side + tx as u32) as usize] == TileType::Wall {
-            return false;
-        }
-    }
-    true
-}
-
-/// Затухание света из `light_shared.swsl`:
-/// `s = clamp(sqrt(dist² + 1)/radius)`, `val = (1-s²)² / (1 + falloff*s)`,
-/// затем `val *= energy`.
-fn attenuation(dist_tiles: f32, radius: f32) -> f32 {
+/// Затухание света из `light_shared.swsl`: `s = clamp(sqrt(d²+1)/radius)`,
+/// `val = (1-s²)² / (1 + falloff·s)`.
+fn attenuation(dist: f32, radius: f32) -> f32 {
     if radius <= 0.0 {
         return 0.0;
     }
-    let squared = dist_tiles * dist_tiles + LIGHTING_HEIGHT;
-    let s = (squared.sqrt() / radius).clamp(0.0, 1.0);
+    let s = ((dist * dist + LIGHTING_HEIGHT).sqrt() / radius).clamp(0.0, 1.0);
     let s2 = s * s;
     ((1.0 - s2) * (1.0 - s2) / (1.0 + FALLOFF * s)).clamp(0.0, 1.0)
 }
 
-/// Пересчитывает карту света: ambient + лампы, стены перекрывают, размытие.
+/// Пересобирает объединённую карту «свет × туман» при изменениях мира.
 #[allow(clippy::too_many_arguments)]
 pub fn update_lighting(
     time: Res<Time>,
-    mut next_update: Local<f32>,
+    mut next_rebuild: Local<f32>,
+    mut state: Local<WorldState>,
     own: Res<OwnPlayerEntity>,
     positions: Query<&PlayerPosition>,
     chunks: Query<&TileChunkData>,
     lamps: Query<(&Light, &ItemPosition, Option<&Powered>)>,
     doors: Query<&ssr_core::Door>,
-    light_map: Option<Res<LightMap>>,
+    light_map: Option<ResMut<LightMap>>,
     mut images: ResMut<Assets<Image>>,
     mut transforms: Query<&mut Transform>,
 ) {
-    let Some(map) = light_map else {
+    let Some(mut map) = light_map else {
         return;
     };
-    *next_update += time.delta_secs();
-    if map.ready && *next_update < LIGHT_PERIOD {
-        return;
-    }
-    let Some(own_position) = own.0.and_then(|entity| positions.get(entity).ok()) else {
+    let Some(player_position) = own.0.and_then(|entity| positions.get(entity).ok()) else {
         return;
     };
     let player_tile = (
-        (own_position.0[0] / TILE_UNITS).floor() as i32,
-        (own_position.0[1] / TILE_UNITS).floor() as i32,
-    );
-    *next_update = 0.0;
-
-    let side = ((LIGHT_RADIUS_TILES * 2 + 1) as u32).max(1);
-    let origin = (
-        player_tile.0 - LIGHT_RADIUS_TILES,
-        player_tile.1 - LIGHT_RADIUS_TILES,
+        (player_position.0[0] / TILE_UNITS).floor() as i32,
+        (player_position.0[1] / TILE_UNITS).floor() as i32,
     );
 
-    // 1) локальная карта тайлов: стены блокируют свет. Закрытая дверь — тоже
-    // окклюдер (в SS14 `Door.Occludes` + `Occluder`, при открытии выключается).
-    let mut grid = vec![TileType::Wall; (side * side) as usize];
+    // Спрайты центрируем каждый кадр по игроку (дёшево), карту — по изменениям.
+    let center_x = (player_tile.0 as f32 + 0.5) * TILE_UNITS;
+    let center_y = (player_tile.1 as f32 + 0.5) * TILE_UNITS;
+    for sprite in [map.sprite, map.glow_sprite] {
+        if let Ok(mut transform) = transforms.get_mut(sprite) {
+            transform.translation.x = center_x;
+            transform.translation.y = center_y;
+        }
+    }
+
+    // Отпечаток мира: если ничего не изменилось — пересчёта нет.
+    let lamp_state: Vec<(i32, i32, u8, u8)> = lamps
+        .iter()
+        .filter(|(_, _, powered)| !powered.is_some_and(|powered| !powered.0))
+        .map(|(light, position, _)| {
+            (
+                (position.0[0] / TILE_UNITS).floor() as i32,
+                (position.0[1] / TILE_UNITS).floor() as i32,
+                light.radius.round().clamp(1.0, 30.0) as u8,
+                (light.energy * 100.0).clamp(0.0, 255.0) as u8,
+            )
+        })
+        .collect();
+    let closed_doors: Vec<(i32, i32)> = doors
+        .iter()
+        .filter(|door| !door.open)
+        .map(|door| {
+            (
+                (door.position[0] / TILE_UNITS).floor() as i32,
+                (door.position[1] / TILE_UNITS).floor() as i32,
+            )
+        })
+        .collect();
+    let mut chunk_hash: u64 = 0;
+    for chunk in chunks.iter() {
+        chunk_hash = chunk_hash
+            .wrapping_mul(33)
+            .wrapping_add(chunk.coords.0 as u64 ^ chunk.coords.1 as u64);
+    }
+    let signature = WorldState {
+        player_tile,
+        lamps: lamp_state.clone(),
+        closed_doors: closed_doors.clone(),
+        chunks: chunk_hash,
+    };
+    *next_rebuild += time.delta_secs();
+    let changed = *state != signature;
+    if !changed || (map.ready && *next_rebuild < REBUILD_PERIOD) {
+        return;
+    }
+    *next_rebuild = 0.0;
+    *state = signature;
+    map.ready = true;
+
+    // Чанки — в хеш-таблицу: раньше каждый тайл сканировал все чанки линейно.
+    let mut chunk_map: HashMap<(i32, i32), &TileChunkData> = HashMap::new();
+    let size_i = CHUNK_TILES as i32;
+    for chunk in chunks.iter() {
+        chunk_map.insert((chunk.coords.0, chunk.coords.1), chunk);
+    }
+    let tile_at = |tx: i32, ty: i32| -> TileType {
+        let coords = (tx.div_euclid(size_i), ty.div_euclid(size_i));
+        chunk_map
+            .get(&coords)
+            .map(|chunk| {
+                chunk.get_local(
+                    (tx - coords.0 * size_i) as u32,
+                    (ty - coords.1 * size_i) as u32,
+                )
+            })
+            .unwrap_or(TileType::Wall)
+    };
+
+    let origin = (player_tile.0 - WINDOW_RADIUS, player_tile.1 - WINDOW_RADIUS);
+    let side = WINDOW_SIDE;
+    let wall = |tx: i32, ty: i32| -> bool {
+        let (lx, ly) = (tx - origin.0, ty - origin.1);
+        if lx < 0 || ly < 0 || lx >= side as i32 || ly >= side as i32 {
+            return true;
+        }
+        tile_at(tx, ty) == TileType::Wall
+    };
+    let mut grid = vec![false; (side * side) as usize];
     for ly in 0..side {
         for lx in 0..side {
-            grid[(ly * side + lx) as usize] =
-                tile_at(&chunks, origin.0 + lx as i32, origin.1 + ly as i32);
+            grid[(ly * side + lx) as usize] = wall(origin.0 + lx as i32, origin.1 + ly as i32);
         }
     }
-    for door in doors.iter() {
-        if door.open {
-            continue;
-        }
-        let tx = (door.position[0] / TILE_UNITS).floor() as i32 - origin.0;
-        let ty = (door.position[1] / TILE_UNITS).floor() as i32 - origin.1;
-        if tx >= 0 && ty >= 0 && tx < side as i32 && ty < side as i32 {
-            grid[(ty as u32 * side + tx as u32) as usize] = TileType::Wall;
+    for (tx, ty) in &closed_doors {
+        let (lx, ly) = (tx - origin.0, ty - origin.1);
+        if lx >= 0 && ly >= 0 && lx < side as i32 && ly < side as i32 {
+            grid[(ly as u32 * side + lx as u32) as usize] = true;
         }
     }
 
-    // 2) источники света в окне: лампы реплицируются с позицией и питанием.
-    let mut lights: Vec<(i32, i32, f32, f32, [f32; 3])> = Vec::new();
-    for (light, position, powered) in lamps.iter() {
-        // Без питания лампа не светит (в SS14 гасит `PoweredLightSystem`).
-        if powered.is_some_and(|powered| !powered.0) {
-            continue;
+    // 1) Видимость (туман войны): BFS от тайла игрока по нестенным клеткам;
+    //    стены, примыкающие к видимой зоне, сами видны (лицевая грань).
+    let mut fov = vec![0.0f32; (side * side) as usize];
+    {
+        let center = (WINDOW_RADIUS, WINDOW_RADIUS);
+        let mut queue = std::collections::VecDeque::new();
+        let index = (center.1 as u32 * side + center.0 as u32) as usize;
+        if !grid[index] {
+            fov[index] = 1.0;
+            queue.push_back(center);
         }
-        let tx = (position.0[0] / TILE_UNITS).floor() as i32;
-        let ty = (position.0[1] / TILE_UNITS).floor() as i32;
-        if (tx - origin.0).abs() > LIGHT_RADIUS_TILES + light.radius as i32
-            || (ty - origin.1).abs() > LIGHT_RADIUS_TILES + light.radius as i32
-        {
-            continue;
-        }
-        let color = [
-            light.color[0] as f32 / 255.0,
-            light.color[1] as f32 / 255.0,
-            light.color[2] as f32 / 255.0,
-        ];
-        lights.push((tx, ty, light.radius, light.energy, color));
-    }
-
-    // 3) Свет: лучи ОТ каждой лампы (как полярная shadow map в SS14) — луч
-    //    шагает до стены и подсвечивает пройденные клетки. Раньше видимость
-    //    проверялась для каждой клетки из каждой лампы: это была основная
-    //    тяжесть, отсюда «свет слишком тяжёлый».
-    let mut values = vec![AMBIENT; (side * side) as usize];
-    let mut tint = vec![[0.0f32; 3]; (side * side) as usize];
-    for (tx, ty, radius, energy, color) in &lights {
-        let local = (tx - origin.0, ty - origin.1);
-        let radius = *radius;
-        let energy = *energy;
-        let center = (local.0 as f32 + 0.5, local.1 as f32 + 0.5);
-        for ray in 0..LIGHT_RAYS {
-            let angle = std::f32::consts::TAU * (ray as f32) / (LIGHT_RAYS as f32);
-            let (dx, dy) = (angle.cos(), angle.sin());
-            let mut distance = 0.0f32;
-            while distance <= radius {
-                let fx = center.0 + dx * distance;
-                let fy = center.1 + dy * distance;
-                let lx = fx.floor() as i32;
-                let ly = fy.floor() as i32;
-                if lx < 0 || ly < 0 || lx >= side as i32 || ly >= side as i32 {
-                    break;
+        while let Some((cx, cy)) = queue.pop_front() {
+            for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                let (nx, ny) = (cx + dx, cy + dy);
+                if nx < 0 || ny < 0 || nx >= side as i32 || ny >= side as i32 {
+                    continue;
                 }
-                let index = (ly as u32 * side + lx as u32) as usize;
-                if grid[index] == TileType::Wall {
-                    break; // стена или закрытая дверь — дальше света нет
+                let neighbor = (ny as u32 * side + nx as u32) as usize;
+                if grid[neighbor] {
+                    // Стена у видимой зоны — видна, но не проходима.
+                    fov[neighbor] = 1.0;
+                    continue;
                 }
-                let contribution = attenuation(distance, radius) * energy;
-                if contribution > 0.001 {
-                    values[index] = (values[index] + contribution * 0.3).min(1.0);
-                    for channel in 0..3 {
-                        tint[index][channel] += color[channel] * contribution;
-                    }
+                if fov[neighbor] == 0.0 {
+                    fov[neighbor] = 1.0;
+                    queue.push_back((nx, ny));
                 }
-                distance += RAY_STEP;
             }
         }
     }
 
-    // 4) размытие 3×3 — как `light.blur` в движке (мягкие края). Через стены
-    // размытие не пускаем: иначе свет «перетекает» сквозь них (жалоба владельца).
-    let mut blurred = values.clone();
+    // 2) Свет: ambient + BFS от каждой лампы по нестенным клеткам.
+    //    Складываем вклады аддитивно (как SrcAlpha+One в SS14).
+    let mut light = vec![AMBIENT; (side * side) as usize];
+    let mut tint = vec![[0.0f32; 3]; (side * side) as usize];
+    for (lamp_x, lamp_y, radius, energy) in &lamp_state {
+        let (lx, ly) = (lamp_x - origin.0, lamp_y - origin.1);
+        let radius = *radius as f32;
+        let energy = *energy as f32 / 100.0;
+        if lx < 0 || ly < 0 || lx >= side as i32 || ly >= side as i32 {
+            continue;
+        }
+        let start = (lx, ly);
+        let start_index = (ly as u32 * side + lx as u32) as usize;
+        if grid[start_index] {
+            continue; // лампа внутри стены (как отключённая в SS14)
+        }
+        let mut queue = std::collections::VecDeque::new();
+        let mut visited = vec![false; (side * side) as usize];
+        visited[start_index] = true;
+        queue.push_back(start);
+        while let Some((cx, cy)) = queue.pop_front() {
+            for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                let (nx, ny) = (cx + dx, cy + dy);
+                if nx < 0 || ny < 0 || nx >= side as i32 || ny >= side as i32 {
+                    continue;
+                }
+                let index = (ny as u32 * side + nx as u32) as usize;
+                if grid[index] || visited[index] {
+                    continue;
+                }
+                visited[index] = true;
+                let distance = (((nx - lx) as f32).powi(2) + ((ny - ly) as f32).powi(2)).sqrt();
+                if distance > radius {
+                    continue;
+                }
+                let value = attenuation(distance, radius) * energy;
+                if value < 0.001 {
+                    continue;
+                }
+                light[index] += value;
+                // Цвет лампы (тёплый #FFE4CE) накапливается тем же вкладом.
+                let color = lamp_color(*lamp_x, *lamp_y);
+                for channel in 0..3 {
+                    tint[index][channel] += color[channel] * value;
+                }
+                queue.push_back((nx, ny));
+            }
+        }
+    }
+
+    // 3) Wall bleed: стены берут максимум света соседей (свет «просачивается»
+    //    в стену, но не сквозь неё — как wall-bleed-blur + wall-merge в SS14).
+    let mut bleed = light.clone();
     for ly in 1..side - 1 {
         for lx in 1..side - 1 {
             let index = (ly * side + lx) as usize;
-            if grid[index] == TileType::Wall {
+            if !grid[index] {
+                continue;
+            }
+            let mut best = light[index];
+            for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                let neighbor = ((ly as i32 + dy) as u32 * side + (lx as i32 + dx) as u32) as usize;
+                best = best.max(light[neighbor]);
+            }
+            bleed[index] = best;
+        }
+    }
+    let light = bleed;
+
+    // 4) Мягкие края: размытие 3×3 по полу (стены и туман не перетекают).
+    let mut blurred = light.clone();
+    let mut blurred_tint = tint.clone();
+    for ly in 1..side - 1 {
+        for lx in 1..side - 1 {
+            let index = (ly * side + lx) as usize;
+            if grid[index] {
                 continue;
             }
             let mut sum = 0.0f32;
             let mut count = 0.0f32;
+            let mut rgb = [0.0f32; 3];
             for dy in -1i32..=1 {
                 for dx in -1i32..=1 {
                     let x = (lx as i32 + dx) as u32;
                     let y = (ly as i32 + dy) as u32;
                     let neighbor = (y * side + x) as usize;
-                    if grid[neighbor] == TileType::Wall {
+                    if grid[neighbor] {
                         continue;
                     }
-                    sum += values[neighbor];
+                    sum += light[neighbor];
+                    for channel in 0..3 {
+                        rgb[channel] += tint[neighbor][channel];
+                    }
                     count += 1.0;
                 }
             }
-            blurred[index] = sum / count.max(1.0);
+            blurred[index] = sum / count.max(1.0f32);
+            for channel in 0..3 {
+                blurred_tint[index][channel] = rgb[channel] / count.max(1.0f32);
+            }
         }
     }
 
-    // 5) пишем тёмный оверлей: alpha = 1 - свет. Блок ограничивает заимствование
-    // `images`, чтобы ниже взять вторую картинку (слой оттенка).
+    // 5) Пишем слои: тьма alpha = 1 − свет×видимость (это и есть light×fov
+    //    одним оверлеем), оттенок — под тьмой, она его маскирует.
     {
         let Some(mut image) = images.get_mut(&map.image) else {
             return;
@@ -304,43 +399,46 @@ pub fn update_lighting(
         let Some(data) = image.data.as_mut() else {
             return;
         };
+        data.fill(0);
         for ly in 0..side {
             for lx in 0..side {
-                let light_value = blurred[(ly * side + lx) as usize];
+                let index = (ly * side + lx) as usize;
+                let visible = fov[index];
+                let luminance = blurred[index];
+                let occlusion = 1.0 - luminance * visible;
                 let row = side - 1 - ly;
-                let index = ((row * side + lx) * 4) as usize;
-                data[index] = 0;
-                data[index + 1] = 0;
-                data[index + 2] = 0;
-                data[index + 3] = ((1.0 - light_value) * 255.0) as u8;
+                let target = ((row * side + lx) * 4) as usize;
+                data[target + 3] = (occlusion.clamp(0.0, 1.0) * 255.0) as u8;
             }
         }
     }
     if let Some(mut glow_image) = images.get_mut(&map.glow_image)
         && let Some(glow_data) = glow_image.data.as_mut()
     {
+        glow_data.fill(0);
         for ly in 0..side {
             for lx in 0..side {
                 let index = (ly * side + lx) as usize;
+                let contribution = (blurred[index] - AMBIENT).max(0.0);
+                if contribution < 0.001 {
+                    continue;
+                }
+                let rgb = blurred_tint[index];
+                let norm = rgb[0].max(rgb[1]).max(rgb[2]).max(0.001);
                 let row = side - 1 - ly;
                 let target = ((row * side + lx) * 4) as usize;
-                let contribution = (blurred[index] - AMBIENT).max(0.0);
-                let rgb = tint[index];
-                let norm = rgb[0].max(rgb[1]).max(rgb[2]).max(0.001);
                 glow_data[target] = ((rgb[0] / norm) * 255.0) as u8;
                 glow_data[target + 1] = ((rgb[1] / norm) * 255.0) as u8;
                 glow_data[target + 2] = ((rgb[2] / norm) * 255.0) as u8;
-                glow_data[target + 3] = ((contribution * GLOW_ALPHA).min(1.0) * 255.0) as u8;
+                glow_data[target + 3] =
+                    ((contribution * fov[index] * GLOW_ALPHA).min(1.0) * 255.0) as u8;
             }
         }
     }
-    if let Ok(mut transform) = transforms.get_mut(map.sprite) {
-        transform.translation.x = (origin.0 as f32 + side as f32 / 2.0) * TILE_UNITS;
-        transform.translation.y = (origin.1 as f32 + side as f32 / 2.0) * TILE_UNITS;
-    }
-    if let Ok(mut glow_transform) = transforms.get_mut(map.glow_sprite) {
-        glow_transform.translation.x = (origin.0 as f32 + side as f32 / 2.0) * TILE_UNITS;
-        glow_transform.translation.y = (origin.1 as f32 + side as f32 / 2.0) * TILE_UNITS;
-    }
-    tracing::debug!(lamps = lights.len(), ambient = AMBIENT, "light map rebuilt");
+    tracing::info!(lamps = lamp_state.len(), ?player_tile, "light map rebuilt");
+}
+
+/// Цвет лампы: у нас все лампы тёплые как коридорные в SS14 (`#FFE4CE`).
+fn lamp_color(_tx: i32, _ty: i32) -> [f32; 3] {
+    [1.0, 0.7758, 0.6172] // #FFE4CE в линейном пространстве
 }
