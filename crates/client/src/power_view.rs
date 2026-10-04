@@ -8,8 +8,9 @@
 use bevy::prelude::*;
 use ssr_core::inventory::ItemPosition;
 use ssr_core::power::{
-    CABLE_EAST, CABLE_NORTH, CABLE_SOUTH, CABLE_WEST, Cable, Generator, Light, Powered,
+    CABLE_EAST, CABLE_NORTH, CABLE_SOUTH, CABLE_WEST, Cable, Generator, Light, Powered, cable_state,
 };
+use ssr_core::tiles::{CHUNK_TILES, TileChunkData, TileType};
 
 use crate::rsi::RsiRegistry;
 
@@ -44,6 +45,7 @@ pub struct GeneratorVisual {
 pub fn spawn_power_visuals(
     mut commands: Commands,
     registry: Res<RsiRegistry>,
+    chunks: Query<&TileChunkData>,
     cables: Query<&ItemPosition, Added<Cable>>,
     generators: Query<(Entity, &ItemPosition), Added<Generator>>,
     lights: Query<(Entity, &ItemPosition), Added<Light>>,
@@ -57,10 +59,20 @@ pub fn spawn_power_visuals(
             layout: sprite.layout.clone(),
             index: 0,
         });
+        // Под полом с покрытием провод не видно (T4.4+).
+        let covered = matches!(
+            tile_under(&chunks, position.0[0], position.0[1]),
+            TileType::Floor
+        );
         commands.spawn((
             CableVisual,
             ItemPosition(position.0),
             component,
+            if covered {
+                Visibility::Hidden
+            } else {
+                Visibility::Inherited
+            },
             // Под игроком и дверями, поверх тайлов.
             Transform::from_xyz(position.0[0], position.0[1], 0.2),
         ));
@@ -121,29 +133,31 @@ pub fn spawn_power_visuals(
     }
 }
 
-/// Пересчитывает маску соединений кабелей (стейт `lvcable_N`).
+/// Обновляет кабели: маску соединений (стейт `lvcable_N`) и видимость.
+/// Под полом с покрытием провода не видны — только на техполе и в космосе.
 pub fn update_cables(
-    time: Res<Time>,
     registry: Res<RsiRegistry>,
-    mut next_step: Local<f32>,
-    mut last_tiles: Local<Vec<(i32, i32)>>,
+    chunks: Query<&TileChunkData>,
     cables: Query<&ItemPosition, With<Cable>>,
-    mut visuals: Query<(&ItemPosition, &mut Sprite), With<CableVisual>>,
+    mut visuals: Query<(&ItemPosition, &mut Sprite, &mut Visibility), With<CableVisual>>,
 ) {
-    // Пересчёт не каждый кадр: набор кабелей меняется редко.
-    *next_step += time.delta_secs();
-    if *next_step < 0.5 {
-        return;
-    }
-    *next_step = 0.0;
-
     let tiles: Vec<(i32, i32)> = cables.iter().map(tile_of).collect();
-    if tiles == *last_tiles {
-        return;
-    }
-    *last_tiles = tiles.clone();
 
-    for (position, mut sprite) in visuals.iter_mut() {
+    for (position, mut sprite, mut visibility) in visuals.iter_mut() {
+        // Видимость по покрытию тайла.
+        let covered = matches!(
+            tile_under(&chunks, position.0[0], position.0[1]),
+            TileType::Floor
+        );
+        let target = if covered {
+            Visibility::Hidden
+        } else {
+            Visibility::Inherited
+        };
+        if *visibility != target {
+            *visibility = target;
+        }
+
         let tile = tile_of(position);
         let mut mask = 0u8;
         if tiles.contains(&(tile.0, tile.1 + 1)) {
@@ -158,7 +172,7 @@ pub fn update_cables(
         if tiles.contains(&(tile.0 - 1, tile.1)) {
             mask |= CABLE_WEST;
         }
-        let Some(state) = registry.get(&format!("{CABLE_PREFIX}{mask}")) else {
+        let Some(state) = registry.get(&format!("{CABLE_PREFIX}{}", cable_state(mask))) else {
             continue;
         };
         if sprite.image != state.image {
@@ -167,8 +181,33 @@ pub fn update_cables(
                 layout: state.layout.clone(),
                 index: 0,
             });
+            tracing::info!(
+                mask,
+                state = cable_state(mask),
+                tile = ?tile,
+                visible = !covered,
+                "cable state updated"
+            );
         }
     }
+}
+
+/// Тайл мира под точкой (для скрытия кабелей под покрытием).
+fn tile_under(chunks: &Query<&TileChunkData>, x: f32, y: f32) -> TileType {
+    let tiles = CHUNK_TILES as i32;
+    let tx = (x / TILE_UNITS).floor() as i32;
+    let ty = (y / TILE_UNITS).floor() as i32;
+    let coords = (tx.div_euclid(tiles), ty.div_euclid(tiles));
+    let local = (
+        (tx - coords.0 * tiles) as u32,
+        (ty - coords.1 * tiles) as u32,
+    );
+    for chunk in chunks.iter() {
+        if chunk.coords == coords {
+            return chunk.get_local(local.0, local.1);
+        }
+    }
+    TileType::Space
 }
 
 /// Тайловые координаты позиции.

@@ -6,13 +6,27 @@
 //! cargo run -p ssr-core --bin gen-map -- assets/maps/test.ron
 //! ```
 
-use ssr_core::tiles::{DoorAccess, MapFile, MapLayout, gen_test_map};
+use ssr_core::tiles::{DoorAccess, MapFile, MapLayout, TileType, gen_test_map};
 
 fn main() {
     let out = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "assets/maps/test.ron".to_string());
-    let chunks = gen_test_map();
+    let mut chunks = gen_test_map();
+    // Коридор электрики — техпол (плиты без покрытия): на нём видно кабели,
+    // под обычным полом провод скрыт (T4.4+).
+    for chunk in chunks.iter_mut() {
+        for ly in 0..ssr_core::tiles::CHUNK_TILES {
+            for lx in 0..ssr_core::tiles::CHUNK_TILES {
+                let tx = chunk.coords.x * ssr_core::tiles::CHUNK_TILES as i32 + lx as i32;
+                let ty = chunk.coords.y * ssr_core::tiles::CHUNK_TILES as i32 + ly as i32;
+                let corridor = (0..=4).contains(&tx) && ty == 1 || tx == 4 && (0..=2).contains(&ty);
+                if corridor && chunk.get_local(lx, ly) == TileType::Floor {
+                    chunk.set_local(lx, ly, TileType::Plating);
+                }
+            }
+        }
+    }
     // Точки спавна (T2.4): стартовый зал, достаточно далеко друг от друга,
     // чтобы коллайдеры игроков (r=16) не пересекались при спавне.
     let spawn_points = vec![(16.0, 16.0), (80.0, 16.0), (16.0, 80.0), (80.0, 80.0)];

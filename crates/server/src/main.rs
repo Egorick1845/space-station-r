@@ -572,7 +572,7 @@ fn init_atmosphere(
                 let index = ty as usize * width + tx as usize;
                 let tile = chunk.tiles[ly * size as usize + lx];
                 tiles[index] = tile;
-                if tile == TileType::Floor {
+                if tile.is_walkable() {
                     gas[index] = Gas::STATION;
                 }
             }
@@ -638,7 +638,7 @@ fn simulate_atmosphere(
     for y in 0..height as i32 {
         for x in 0..width as i32 {
             let index = y as usize * width + x as usize;
-            if atmospheres.tiles[index] != TileType::Floor {
+            if !atmospheres.tiles[index].is_walkable() {
                 continue; // стены и космос газ не держат
             }
             // Пары (восток, север) — каждая пара обрабатывается один раз.
@@ -647,7 +647,7 @@ fn simulate_atmosphere(
                     atmospheres.index(atmospheres.min.0 + x + dx, atmospheres.min.1 + y + dy);
                 let (pressure_b, oxygen_b, exchange) = match index_b {
                     // Сосед-пол: обмен с переносом газа (с сохранением).
-                    Some(b) if atmospheres.tiles[b] == TileType::Floor => {
+                    Some(b) if atmospheres.tiles[b].is_walkable() => {
                         (current[b].pressure, current[b].oxygen, true)
                     }
                     // Стена газ не пропускает и не впитывает: пары нет вовсе.
@@ -932,7 +932,7 @@ fn vacuum_test(
     for dx in -3..=3 {
         for dy in -3..=3 {
             if let Some(index) = atmospheres.index(center.0 + dx, center.1 + dy)
-                && atmospheres.tiles[index] == TileType::Floor
+                && atmospheres.tiles[index].is_walkable()
             {
                 atmospheres.gas[index] = Gas::VACUUM;
                 cleared += 1;
@@ -1813,7 +1813,7 @@ fn process_actions(
                             c.tiles[ly * ssr_core::tiles::CHUNK_TILES as usize + lx]
                         });
                     if let (Some(item), Some(tile)) = (hand_item, tile) {
-                        if item_name == "SteelSheet" && tile == TileType::Floor {
+                        if item_name == "SteelSheet" && tile.is_walkable() {
                             options.push(ActionOption {
                                 label: "Построить стену".into(),
                                 action: ActionKind::UseItem { item, tx, ty },
@@ -2003,7 +2003,7 @@ fn process_actions(
                     .unwrap_or_default();
 
                 if item_name == "SteelSheet" {
-                    if chunk.tiles[cell] != TileType::Floor {
+                    if !chunk.tiles[cell].is_walkable() {
                         tracing::warn!(tx, ty, "build: tile is not empty floor");
                         continue;
                     }
@@ -2032,7 +2032,8 @@ fn process_actions(
                         tracing::warn!(tx, ty, "deconstruct: tile is not a wall");
                         continue;
                     }
-                    chunk.tiles[cell] = TileType::Floor;
+                    // Разбор стены открывает техпол: на нём видно проводку.
+                    chunk.tiles[cell] = TileType::Plating;
                     if let Ok(mut inventory) = inventories.get_mut(player) {
                         let sheet = commands
                             .spawn((

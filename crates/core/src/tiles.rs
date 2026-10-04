@@ -17,8 +17,10 @@ pub enum TileType {
     /// Открытый космос: нет спрайта, нет коллизии.
     #[default]
     Space,
-    /// Пол: ходибельный.
+    /// Пол с покрытием: ходибельный, кабели под ним скрыты (T4.4+).
     Floor,
+    /// Технический пол (плиты без покрытия): кабели видны, ходибельный.
+    Plating,
     /// Стена: блокирует проход (коллизии — T2.2).
     Wall,
 }
@@ -29,8 +31,14 @@ impl TileType {
         match self {
             TileType::Space => "space",
             TileType::Floor => "floor",
+            TileType::Plating => "plating",
             TileType::Wall => "wall",
         }
+    }
+
+    /// Ходибельный тайл (пол или техпол).
+    pub fn is_walkable(self) -> bool {
+        matches!(self, TileType::Floor | TileType::Plating)
     }
 }
 
@@ -118,11 +126,13 @@ impl TileChunk {
     }
 }
 
-/// Символ тайла в файле карты: ' ' — космос, '.' — пол, '#' — стена.
+/// Символ тайла в файле карты: ' ' — космос, '.' — пол, '=' — техпол,
+/// '#' — стена.
 fn tile_to_char(tile: TileType) -> char {
     match tile {
         TileType::Space => ' ',
         TileType::Floor => '.',
+        TileType::Plating => '=',
         TileType::Wall => '#',
     }
 }
@@ -131,6 +141,7 @@ fn tile_from_char(c: char) -> Result<TileType, String> {
     match c {
         ' ' => Ok(TileType::Space),
         '.' => Ok(TileType::Floor),
+        '=' => Ok(TileType::Plating),
         '#' => Ok(TileType::Wall),
         other => Err(format!("unknown tile char {other:?}")),
     }
@@ -384,8 +395,10 @@ mod tests {
             .expect("repo root")
             .join("assets/prototypes/tiles.ron");
         let protos = TilePrototypes::load(&path).expect("parse tiles.ron");
-        assert_eq!(protos.tiles.len(), 3);
+        assert_eq!(protos.tiles.len(), 4);
         assert!(protos.get(TileType::Floor).sprite.is_some());
+        assert!(protos.get(TileType::Plating).sprite.is_some());
+        assert!(!protos.get(TileType::Plating).solid);
         assert!(protos.get(TileType::Wall).solid);
         assert!(protos.get(TileType::Space).sprite.is_none());
     }

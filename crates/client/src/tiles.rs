@@ -174,7 +174,7 @@ pub fn compose_chunk(
                         blit_tile(&mut canvas, sprite, 0, px, py);
                     }
                 }
-                TileType::Floor => {
+                TileType::Floor | TileType::Plating => {
                     let proto: &TileProto = visuals.protos.get(tile);
                     if proto.sprite.is_none() {
                         continue;

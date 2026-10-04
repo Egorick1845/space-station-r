@@ -40,16 +40,48 @@ pub const DOOR_DRAW_KW: f32 = 4.0;
 /// Потребление лампы, кВт.
 pub const LIGHT_DRAW_KW: f32 = 1.0;
 
-/// Бит направления в маске кабеля (T4.4): индексы соответствуют
-/// `lvcable_0..15` из `Structures/Power/Cables/lv_cable.rsi`.
+/// Бит направления в маске кабеля (T4.4). Нумерация удобна для логики
+/// (N/E/S/W), но у стейтов `lvcable_N` другой порядок битов: N=1, S=2, E=4,
+/// W=8 — для отрисовки используем [`cable_state`].
 pub const CABLE_NORTH: u8 = 1;
 pub const CABLE_EAST: u8 = 2;
 pub const CABLE_SOUTH: u8 = 4;
 pub const CABLE_WEST: u8 = 8;
 
+/// Индекс стейта `lvcable_N` по маске соединений.
+/// Проверено по картинкам: `lvcable_1` — рука N, `lvcable_2` — S,
+/// `lvcable_4` — E, `lvcable_8` — W, `lvcable_5` — NE, `lvcable_3` — NS.
+pub fn cable_state(mask: u8) -> u8 {
+    let north = mask & CABLE_NORTH;
+    let south = (mask & CABLE_SOUTH) >> 1;
+    let east = (mask & CABLE_EAST) << 1;
+    let west = mask & CABLE_WEST;
+    north | south | east | west
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cable_state_orders_bits_like_rsi() {
+        // Прямая вертикаль: N+S (маска 5) → стейт 3 (lvcable_3, руки NS).
+        assert_eq!(cable_state(CABLE_NORTH | CABLE_SOUTH), 3);
+        // Прямая горизонталь: E+W (маска 10) → стейт 12 (lvcable_12, EW).
+        assert_eq!(cable_state(CABLE_EAST | CABLE_WEST), 12);
+        // Угол N+E → стейт 5 (lvcable_5, NE).
+        assert_eq!(cable_state(CABLE_NORTH | CABLE_EAST), 5);
+        // Одиночные направления.
+        assert_eq!(cable_state(CABLE_NORTH), 1);
+        assert_eq!(cable_state(CABLE_SOUTH), 2);
+        assert_eq!(cable_state(CABLE_EAST), 4);
+        assert_eq!(cable_state(CABLE_WEST), 8);
+        // Полный крест.
+        assert_eq!(
+            cable_state(CABLE_NORTH | CABLE_EAST | CABLE_SOUTH | CABLE_WEST),
+            15
+        );
+    }
 
     #[test]
     fn cable_mask_bits() {
