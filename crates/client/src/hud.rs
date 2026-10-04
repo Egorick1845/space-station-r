@@ -244,12 +244,15 @@ pub fn spawn_hud(
         return;
     }
     // Верхняя панель: иконка + подпись горячей клавиши (порядок — TOP_ICONS).
-    let top: [(&str, HudAction, usize); 5] = [
+    // Верхняя панель — меню-кнопки (в SS14 их 10: гайд, персонаж, эмоции,
+    // крафт, действия, админ, песочница, AHelp). У нас есть что открыть:
+    // настройки (Esc), крафт (G — как OpenCraftingMenu в движке), спавн (F5),
+    // админка (F7). Бой и осмотр — это ДЕЙСТВИЯ, они в левой колонке.
+    let top: [(&str, HudAction, usize); 4] = [
         ("Esc", HudAction::OpenSettings, 0),
+        ("G", HudAction::ToggleCraft, 4),
         ("F5", HudAction::ToggleSpawn, 7),
         ("F7", HudAction::ToggleAdmin, 6),
-        ("C", HudAction::ToggleCraft, 4),
-        ("F", HudAction::ToggleCombat, 5),
     ];
     commands
         .spawn((
@@ -304,12 +307,13 @@ pub fn spawn_hud(
     // Колонка действий (ActionsBar): слот 64×64 с фоном SlotBackground,
     // иконка действия заполняет слот (32 px при масштабе ×2), подпись клавиши —
     // в левом верхнем углу (ActionButton.cs: Margin(5,0,0,0), цвет whiteText).
-    // Крафт берёт молоток из иконок верхней панели, бой — иконки Actions.
-    let actions: [(&str, HudAction, usize); 4] = [
-        ("E", HudAction::Examine, 0),
-        ("Q", HudAction::Drop, 1),
-        ("C", HudAction::ToggleCraft, 4),
-        ("F", HudAction::ToggleCombat, 2),
+    // Колонка действий (ActionsBar): слоты 64×64, в углу — клавиша СЛОТА
+    // (в SS14 это цифры 1..0, `TriggerAction(index)`), иконка — действие.
+    // Порядок: как в движке, боевой режим первым (priority -100).
+    let actions: [(&str, HudAction, usize); 3] = [
+        ("1", HudAction::ToggleCombat, 2),
+        ("2", HudAction::Examine, 0),
+        ("3", HudAction::Drop, 1),
     ];
     commands
         .spawn((
@@ -325,15 +329,11 @@ pub fn spawn_hud(
         ))
         .with_children(|column| {
             for (key, action, icon_index) in actions {
-                let icon = if action == HudAction::ToggleCraft {
-                    theme.icons.get(icon_index).cloned().unwrap_or_default()
-                } else {
-                    theme
-                        .action_icons
-                        .get(icon_index)
-                        .cloned()
-                        .unwrap_or_default()
-                };
+                let icon = theme
+                    .action_icons
+                    .get(icon_index)
+                    .cloned()
+                    .unwrap_or_default();
                 column
                     .spawn((
                         action,
@@ -586,12 +586,43 @@ pub fn hud_hotkeys(
             );
         }
     }
-    // 1/2 — выбрать руку напрямую (как хотбар в SS14).
-    for (key, index) in [(KeyCode::Digit1, 0u8), (KeyCode::Digit2, 1u8)] {
-        if keys.just_pressed(key) {
-            for mut sender in senders.iter_mut() {
-                sender.send::<GameChannel>(ClientMessage::TakeInHand { slot: index });
+    // Цифры запускают действия колонки — как `TriggerAction(index)` по HotbarN
+    // в SS14 (выбор руки там на X, у нас тоже).
+    for (key, action) in [
+        (KeyCode::Digit1, HudAction::ToggleCombat),
+        (KeyCode::Digit2, HudAction::Examine),
+        (KeyCode::Digit3, HudAction::Drop),
+    ] {
+        if !keys.just_pressed(key) {
+            continue;
+        }
+        match action {
+            HudAction::ToggleCombat => {
+                state.combat = !state.combat;
+                for mut sender in senders.iter_mut() {
+                    sender.send::<GameChannel>(ClientMessage::SetCombat {
+                        combat: state.combat,
+                    });
+                }
+                tracing::info!(combat = state.combat, "action: combat toggled by hotkey");
             }
+            HudAction::Drop => {
+                for mut sender in senders.iter_mut() {
+                    sender.send::<GameChannel>(ClientMessage::DropHand);
+                }
+            }
+            HudAction::Examine => tracing::info!("осмотр: наведите курсор и нажмите E"),
+            _ => {}
+        }
+    }
+    // G — окно крафта (в SS14 `OpenCraftingMenu` = G).
+    if keys.just_pressed(KeyCode::KeyG) {
+        crafting.open = !crafting.open;
+    }
+    // I — окно персонажа со слотами одежды (в SS14 `OpenInventoryMenu` = I).
+    if keys.just_pressed(KeyCode::KeyI) {
+        for mut ui in uis.iter_mut() {
+            ui.character_open = !ui.character_open;
         }
     }
     if keys.just_pressed(KeyCode::KeyC) {

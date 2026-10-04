@@ -1943,6 +1943,7 @@ pub fn render_character_panel(
     ui: Res<InventoryUi>,
     own: Res<OwnPlayerEntity>,
     clothings: Query<&ssr_core::clothing::Clothing>,
+    positions: Res<windows::WindowPositions>,
     root: Query<Entity, With<CharacterPanel>>,
     mut last: Local<Option<CharacterSignature>>,
 ) {
@@ -1965,6 +1966,17 @@ pub fn render_character_panel(
         return;
     }
     // (слот, колонка, строка) — из uiWindowPos шаблона инвентаря человека.
+    let cell = ui::SLOT_SIZE;
+    let mut node = Node {
+        position_type: PositionType::Absolute,
+        left: px(5),
+        bottom: px(5),
+        width: px(cell * 3.0),
+        flex_direction: FlexDirection::Column,
+        align_items: AlignItems::End,
+        ..default()
+    };
+    windows::apply_saved_position(windows::WindowKind::Character, &mut node, &positions);
     let layout: [(Slot, u8, u8); 9] = [
         (Slot::Shoes, 1, 0),
         (Slot::Jumpsuit, 0, 1),
@@ -1976,22 +1988,13 @@ pub fn render_character_panel(
         (Slot::Eyes, 0, 3),
         (Slot::Head, 1, 3),
     ];
-    let cell = ui::SLOT_SIZE;
     commands
         .spawn((
             CharacterPanel,
-            windows::WindowKind::Inventory,
+            windows::WindowKind::Character,
             windows::WindowDrag::default(),
             Interaction::default(),
-            Node {
-                position_type: PositionType::Absolute,
-                left: px(5),
-                bottom: px(5),
-                width: px(cell * 3.0),
-                flex_direction: FlexDirection::Column,
-                align_items: AlignItems::End,
-                ..default()
-            },
+            node,
         ))
         .with_children(|window| {
             // Сетка слотов: три колонки по uiWindowPos шаблона человека.

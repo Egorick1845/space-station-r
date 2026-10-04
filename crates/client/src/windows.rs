@@ -10,6 +10,9 @@ use bevy::prelude::*;
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
 pub enum WindowKind {
     Inventory,
+    /// Окно персонажа со слотами одежды (`InventoryGui`) — своя позиция, иначе
+    /// перетаскивание одного окна уводило и второе.
+    Character,
     Hands,
     Container,
 }
@@ -18,6 +21,7 @@ pub enum WindowKind {
 #[derive(Resource, Default)]
 pub struct WindowPositions {
     inventory: Option<Vec2>,
+    character: Option<Vec2>,
     hands: Option<Vec2>,
     container: Option<Vec2>,
 }
@@ -26,6 +30,7 @@ impl WindowPositions {
     pub fn get(&self, kind: WindowKind) -> Option<Vec2> {
         match kind {
             WindowKind::Inventory => self.inventory,
+            WindowKind::Character => self.character,
             WindowKind::Hands => self.hands,
             WindowKind::Container => self.container,
         }
@@ -34,6 +39,7 @@ impl WindowPositions {
     pub fn set(&mut self, kind: WindowKind, pos: Vec2) {
         match kind {
             WindowKind::Inventory => self.inventory = Some(pos),
+            WindowKind::Character => self.character = Some(pos),
             WindowKind::Hands => self.hands = Some(pos),
             WindowKind::Container => self.container = Some(pos),
         }
