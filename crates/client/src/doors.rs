@@ -371,6 +371,9 @@ pub fn hover_outline(
     sprites: crate::inventory_ui::ItemSprites,
     mut commands: Commands,
     outlines: Query<Entity, With<ItemOutline>>,
+    mut images: ResMut<Assets<Image>>,
+    layouts: Res<Assets<TextureAtlasLayout>>,
+    mut masks: Local<std::collections::HashMap<String, Handle<Image>>>,
     mut gizmos: Gizmos,
 ) {
     for entity in outlines.iter() {
@@ -383,7 +386,7 @@ pub fn hover_outline(
     let cursor_point = if std::env::var_os("SSR_HOVER_TEST").is_some() {
         items
             .iter()
-            .next()
+            .find(|(_, _, held)| held.player == 0)
             .map(|(_, position, _)| Vec2::from_array(position.0))
     } else {
         window.cursor_position().and_then(|cursor| {
@@ -404,7 +407,11 @@ pub fn hover_outline(
             );
         }
     }
-    // Предмет: контур по силуэту — копии спрайта со смещением под самим спрайтом.
+    // Предмет: контур по силуэту. Спрайт нельзя просто тонировать — цвет
+    // умножается на арт, и тёмные пиксели остаются тёмными («обводка слишком
+    // тёмная»). Поэтому строим БЕЛУЮ маску клетки спрайта (RGB = белый,
+    // альфа исходная) и красим её в жёлтый — плоский силуэт, как шейдер
+    // SelectionOutline в SS14.
     let hovered = items.iter().find(|(_, position, held)| {
         held.player == 0 && Vec2::from_array(position.0).distance(world) <= 24.0
     });
@@ -414,15 +421,20 @@ pub fn hover_outline(
     let Some(sprite) = sprites.icon_by_name(&item.name) else {
         return;
     };
+    let index = sprite.index(0, 0);
+    let key = format!("{}#{index}", item.name);
+    if !masks.contains_key(&key) {
+        let Some(mask) = build_mask(&mut images, &layouts, sprite, index) else {
+            return;
+        };
+        masks.insert(key.clone(), mask);
+    }
+    let Some(mask) = masks.get(&key).cloned() else {
+        return;
+    };
     let base = Sprite {
-        image: sprite.image.clone(),
-        texture_atlas: Some(TextureAtlas {
-            layout: sprite.layout.clone(),
-            index: sprite.index(0, 0),
-        }),
-        // Тот же жёлтый, что у рамки шлюза (владелец: «обводка предметов пусть
-        // будет жёлтой как вокруг шлюза»).
-        color: Color::srgba(1.0, 0.9, 0.35, 0.9),
+        image: mask,
+        color: OUTLINE_COLOR,
         ..default()
     };
     commands
@@ -437,6 +449,51 @@ pub fn hover_outline(
             }
         });
 }
+
+/// Строит белую маску клетки спрайта: RGB = белый, альфа исходная. Нужна,
+/// чтобы обводка была плоским цветом, а не «арт × цвет».
+fn build_mask(
+    images: &mut Assets<Image>,
+    layouts: &Assets<TextureAtlasLayout>,
+    sprite: &crate::rsi::RsiSprite,
+    index: usize,
+) -> Option<Handle<Image>> {
+    let source = images.get(&sprite.image)?;
+    let data = source.data.as_ref()?.to_vec();
+    let width = source.width() as usize;
+    let atlas = layouts.get(&sprite.layout)?;
+    let rect = atlas.textures.get(index)?;
+    let (x0, y0) = (rect.min.x as usize, rect.min.y as usize);
+    let (w, h) = (rect.width() as usize, rect.height() as usize);
+    let mut mask = vec![0u8; w * h * 4];
+    for y in 0..h {
+        for x in 0..w {
+            let source_index = ((y0 + y) * width + (x0 + x)) * 4;
+            let alpha = data.get(source_index + 3).copied().unwrap_or(0);
+            let target = (y * w + x) * 4;
+            mask[target] = 255;
+            mask[target + 1] = 255;
+            mask[target + 2] = 255;
+            mask[target + 3] = alpha;
+        }
+    }
+    let mut image = Image::new(
+        bevy::render::render_resource::Extent3d {
+            width: w as u32,
+            height: h as u32,
+            depth_or_array_layers: 1,
+        },
+        bevy::render::render_resource::TextureDimension::D2,
+        mask,
+        bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
+        bevy::asset::RenderAssetUsages::default(),
+    );
+    image.sampler = bevy::image::ImageSampler::nearest();
+    Some(images.add(image))
+}
+
+/// Цвет контура — тот же жёлтый, что у рамки шлюза (плоский, без умножения).
+const OUTLINE_COLOR: Color = Color::srgb(1.0, 0.9, 0.35);
 
 /// Слой контура: под самим предметом (он на 0.45).
 const OUTLINE_Z: f32 = 0.44;
