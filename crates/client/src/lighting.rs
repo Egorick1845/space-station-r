@@ -32,6 +32,10 @@ const LIGHT_RADIUS_TILES: i32 = 40;
 const LIGHT_PERIOD: f32 = 0.1;
 /// Слой тёмного оверлея: выше тумана (0.85), ниже тел (0.9).
 const LIGHT_Z: f32 = 0.86;
+/// Слой оттенка света — сразу над тьмой.
+const GLOW_Z: f32 = 0.87;
+/// Насколько сильно цвет лампы подкрашивает освещённые тайлы.
+const GLOW_ALPHA: f32 = 0.35;
 /// Юнитов на тайл.
 const TILE_UNITS: f32 = TILE_PX as f32;
 
@@ -40,6 +44,10 @@ const TILE_UNITS: f32 = TILE_PX as f32;
 pub struct LightMap {
     image: Handle<Image>,
     sprite: Entity,
+    /// Слой оттенка: цвет лампы с альфой по вкладу света (в SS14 цвет лампы
+    /// умножается на свет; у нас — тёплая подсветка поверх слоя тьмы).
+    glow_image: Handle<Image>,
+    glow_sprite: Entity,
     ready: bool,
 }
 
@@ -58,6 +66,18 @@ pub fn setup_lighting(mut commands: Commands, mut images: ResMut<Assets<Image>>)
         RenderAssetUsages::default(),
     );
     let handle = images.add(image);
+    let glow = Image::new(
+        Extent3d {
+            width: side,
+            height: side,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        vec![0; (side * side * 4) as usize],
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    );
+    let glow_handle = images.add(glow);
     // Тексель = тайл, но карта размывается — берём линейную фильтрацию.
     let sprite = commands
         .spawn((
@@ -65,9 +85,17 @@ pub fn setup_lighting(mut commands: Commands, mut images: ResMut<Assets<Image>>)
             Transform::from_xyz(0.0, 0.0, LIGHT_Z).with_scale(Vec3::splat(TILE_UNITS)),
         ))
         .id();
+    let glow_sprite = commands
+        .spawn((
+            Sprite::from_image(glow_handle.clone()),
+            Transform::from_xyz(0.0, 0.0, GLOW_Z).with_scale(Vec3::splat(TILE_UNITS)),
+        ))
+        .id();
     commands.insert_resource(LightMap {
         image: handle,
         sprite,
+        glow_image: glow_handle,
+        glow_sprite,
         ready: false,
     });
 }
@@ -175,7 +203,7 @@ pub fn update_lighting(
     }
 
     // 2) источники света в окне: лампы реплицируются с позицией и питанием.
-    let mut lights: Vec<(i32, i32, f32, f32)> = Vec::new();
+    let mut lights: Vec<(i32, i32, f32, f32, [f32; 3])> = Vec::new();
     for (light, position, powered) in lamps.iter() {
         // Без питания лампа не светит (в SS14 гасит `PoweredLightSystem`).
         if powered.is_some_and(|powered| !powered.0) {
@@ -188,11 +216,18 @@ pub fn update_lighting(
         {
             continue;
         }
-        lights.push((tx, ty, light.radius, light.energy));
+        let color = [
+            light.color[0] as f32 / 255.0,
+            light.color[1] as f32 / 255.0,
+            light.color[2] as f32 / 255.0,
+        ];
+        lights.push((tx, ty, light.radius, light.energy, color));
     }
 
     // 3) свет по тайлам: ambient плюс вклад ламп с учётом перекрытия стенами.
     let mut values = vec![AMBIENT; (side * side) as usize];
+    // Цвет лампы, накопленный по тайлам (для слоя оттенка).
+    let mut tint = vec![[0.0f32; 3]; (side * side) as usize];
     for ly in 0..side {
         for lx in 0..side {
             let center = (side as i32 / 2, side as i32 / 2);
@@ -202,7 +237,7 @@ pub fn update_lighting(
                 values[index] = AMBIENT * 0.6;
                 continue;
             }
-            for (tx, ty, radius, energy) in &lights {
+            for (tx, ty, radius, energy, color) in &lights {
                 // Позиция лампы в локальной сетке.
                 let lx_local = tx - origin.0;
                 let ly_local = ty - origin.1;
@@ -222,7 +257,11 @@ pub fn update_lighting(
                 if distance > *radius {
                     continue;
                 }
-                values[index] += attenuation(distance, *radius) * energy;
+                let contribution = attenuation(distance, *radius) * energy;
+                values[index] += contribution;
+                for channel in 0..3 {
+                    tint[index][channel] += color[channel] * contribution;
+                }
             }
             let _ = center;
             values[index] = values[index].min(1.0);
@@ -245,27 +284,52 @@ pub fn update_lighting(
         }
     }
 
-    // 5) пишем тёмный оверлей: alpha = 1 - свет.
-    let Some(mut image) = images.get_mut(&map.image) else {
-        return;
-    };
-    let Some(data) = image.data.as_mut() else {
-        return;
-    };
-    for ly in 0..side {
-        for lx in 0..side {
-            let light_value = blurred[(ly * side + lx) as usize];
-            let row = side - 1 - ly;
-            let index = ((row * side + lx) * 4) as usize;
-            data[index] = 0;
-            data[index + 1] = 0;
-            data[index + 2] = 0;
-            data[index + 3] = ((1.0 - light_value) * 255.0) as u8;
+    // 5) пишем тёмный оверлей: alpha = 1 - свет. Блок ограничивает заимствование
+    // `images`, чтобы ниже взять вторую картинку (слой оттенка).
+    {
+        let Some(mut image) = images.get_mut(&map.image) else {
+            return;
+        };
+        let Some(data) = image.data.as_mut() else {
+            return;
+        };
+        for ly in 0..side {
+            for lx in 0..side {
+                let light_value = blurred[(ly * side + lx) as usize];
+                let row = side - 1 - ly;
+                let index = ((row * side + lx) * 4) as usize;
+                data[index] = 0;
+                data[index + 1] = 0;
+                data[index + 2] = 0;
+                data[index + 3] = ((1.0 - light_value) * 255.0) as u8;
+            }
+        }
+    }
+    if let Some(mut glow_image) = images.get_mut(&map.glow_image)
+        && let Some(glow_data) = glow_image.data.as_mut()
+    {
+        for ly in 0..side {
+            for lx in 0..side {
+                let index = (ly * side + lx) as usize;
+                let row = side - 1 - ly;
+                let target = ((row * side + lx) * 4) as usize;
+                let contribution = (blurred[index] - AMBIENT).max(0.0);
+                let rgb = tint[index];
+                let norm = rgb[0].max(rgb[1]).max(rgb[2]).max(0.001);
+                glow_data[target] = ((rgb[0] / norm) * 255.0) as u8;
+                glow_data[target + 1] = ((rgb[1] / norm) * 255.0) as u8;
+                glow_data[target + 2] = ((rgb[2] / norm) * 255.0) as u8;
+                glow_data[target + 3] = ((contribution * GLOW_ALPHA).min(1.0) * 255.0) as u8;
+            }
         }
     }
     if let Ok(mut transform) = transforms.get_mut(map.sprite) {
         transform.translation.x = (origin.0 as f32 + side as f32 / 2.0) * TILE_UNITS;
         transform.translation.y = (origin.1 as f32 + side as f32 / 2.0) * TILE_UNITS;
+    }
+    if let Ok(mut glow_transform) = transforms.get_mut(map.glow_sprite) {
+        glow_transform.translation.x = (origin.0 as f32 + side as f32 / 2.0) * TILE_UNITS;
+        glow_transform.translation.y = (origin.1 as f32 + side as f32 / 2.0) * TILE_UNITS;
     }
     tracing::debug!(lamps = lights.len(), ambient = AMBIENT, "light map rebuilt");
 }
