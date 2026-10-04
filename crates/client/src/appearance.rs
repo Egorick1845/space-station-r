@@ -207,7 +207,7 @@ pub fn render_appearance_menu(
     state: Res<AppearanceUi>,
     theme: Res<crate::ui_theme::UiTheme>,
     registry: Res<crate::rsi::RsiRegistry>,
-    root: Query<Entity, With<crate::hud::HudMenuRoot>>,
+    root: Query<Entity, With<crate::hud::AppearanceRoot>>,
     mut last: Local<Option<AppearanceSignature>>,
 ) {
     let signature = (
@@ -270,7 +270,7 @@ pub fn render_appearance_menu(
         .cloned()
         .collect();
 
-    crate::hud::menu_panel(
+    let window = crate::hud::menu_panel(
         &mut commands,
         &theme,
         "Внешность",
@@ -444,6 +444,7 @@ pub fn render_appearance_menu(
             ));
         },
     );
+    commands.entity(window).insert(crate::hud::AppearanceRoot);
 }
 
 /// Список стилей: строки «иконка состояния RSI + имя», выбранная подсвечена.

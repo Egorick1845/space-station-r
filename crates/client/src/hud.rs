@@ -83,6 +83,22 @@ pub struct HudRoot;
 #[derive(Component)]
 pub struct HudMenuRoot;
 
+/// Корень окна «Панель спавна сущностей» (F5).
+#[derive(Component)]
+pub struct SpawnMenuRoot;
+
+/// Корень окна «Телепорт призрака».
+#[derive(Component)]
+pub struct WarpMenuRoot;
+
+/// Корень админ-меню (F7).
+#[derive(Component)]
+pub struct AdminMenuRoot;
+
+/// Корень окна выбора внешности (P).
+#[derive(Component)]
+pub struct AppearanceRoot;
+
 /// Строка списка игроков в админ-меню.
 #[derive(Component, Clone, PartialEq)]
 pub struct AdminPlayerButton {
@@ -814,7 +830,9 @@ fn glass_field() -> (Node, BackgroundColor) {
 
 /// Каркас окна меню — как `DefaultWindow` в SS14: шапка `window_header`,
 /// заголовок цветом `NanoGold`, крестик `cross.svg` с модуляцией `#4B596A`
-/// и фон `window_background_bordered`.
+/// и фон `window_background_bordered`. Возвращает корень окна: вызывающий
+/// вешает на него СВОЙ маркер (`SpawnMenuRoot` и т.п.), чтобы окна не стирали
+/// друг друга при перерисовке (в SS14 они сосуществуют).
 pub(crate) fn menu_panel(
     commands: &mut Commands,
     theme: &crate::ui_theme::UiTheme,
@@ -823,8 +841,8 @@ pub(crate) fn menu_panel(
     top: f32,
     width: f32,
     build: impl FnOnce(&mut ChildSpawnerCommands),
-) {
-    commands
+) -> Entity {
+    let root = commands
         .spawn((
             HudMenuRoot,
             Node {
@@ -842,7 +860,9 @@ pub(crate) fn menu_panel(
             window_header(window, theme, title);
             let (node, background) = window_body();
             window.spawn((node, background)).with_children(build);
-        });
+        })
+        .id();
+    root
 }
 
 /// Сколько строк помещается в спавн-меню (SS14 прокручивает список, у нас
@@ -863,7 +883,7 @@ pub fn render_spawn_menu(
     content: Res<ClientContent>,
     registry: Res<crate::rsi::RsiRegistry>,
     theme: Res<crate::ui_theme::UiTheme>,
-    root: Query<Entity, With<HudMenuRoot>>,
+    root: Query<Entity, With<SpawnMenuRoot>>,
     mut last: Local<Option<SpawnMenuSignature>>,
 ) {
     use crate::ui_theme as ui;
@@ -915,6 +935,7 @@ pub fn render_spawn_menu(
     commands
         .spawn((
             HudMenuRoot,
+            SpawnMenuRoot,
             Node {
                 position_type: PositionType::Absolute,
                 left: px(10),
@@ -1194,7 +1215,7 @@ pub fn render_warp_menu(
     state: Res<HudState>,
     theme: Res<crate::ui_theme::UiTheme>,
     players: Query<(&PlayerName, &PlayerPosition)>,
-    root: Query<Entity, With<HudMenuRoot>>,
+    root: Query<Entity, With<WarpMenuRoot>>,
     mut last: Local<Option<(bool, String, usize)>>,
 ) {
     use crate::ui_theme as ui;
@@ -1227,6 +1248,7 @@ pub fn render_warp_menu(
     commands
         .spawn((
             HudMenuRoot,
+            WarpMenuRoot,
             Node {
                 position_type: PositionType::Absolute,
                 left: Val::Percent(50.0),
@@ -1297,7 +1319,7 @@ pub fn render_admin_menu(
     state: Res<HudState>,
     theme: Res<crate::ui_theme::UiTheme>,
     players: Query<(&PlayerName, &PlayerRole, &PlayerPosition)>,
-    root: Query<Entity, With<HudMenuRoot>>,
+    root: Query<Entity, With<AdminMenuRoot>>,
     mut last: Local<Option<(bool, usize, String)>>,
 ) {
     // Свой игрок исключается по имени (сервер прислал его в Connect).
@@ -1324,7 +1346,7 @@ pub fn render_admin_menu(
         return;
     }
     let _ = own_name;
-    menu_panel(
+    let admin_root = menu_panel(
         &mut commands,
         &theme,
         "Админ-меню",
@@ -1404,6 +1426,7 @@ pub fn render_admin_menu(
             }
         },
     );
+    commands.entity(admin_root).insert(AdminMenuRoot);
 }
 
 /// Набор текста в поиске спавн-меню (пока меню открыто).
