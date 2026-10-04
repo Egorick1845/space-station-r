@@ -27,8 +27,11 @@ pub struct Consumer {
 }
 
 /// Лампа (T4.4): потребитель со спрайтом света (отличает его от дверей).
-/// Параметры — как `PointLight` в SS14 (`base_lighting.yml`: коридорный
-/// светильник даёт `radius: 10`, `energy: 0.8`, цвет `#FFE4CE` — 5000K).
+/// Параметры — как `PointLight` в SS14 (`base_lighting.yml`): `radius: 10`,
+/// `energy: 0.8`. Цвет по умолчанию — холодный белый `#EEEEFF` (как у
+/// `AlwaysPoweredLightExterior` в сборке): владелец просил свет холоднее
+/// тёплого коридорного `#FFE4CE` (5000K), который давал жёлтый оттенок на
+/// стенах. Цвет едет из сущности, так что у отдельной лампы он свой.
 #[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 pub struct Light {
     /// Радиус света в тайлах (`PointLight.radius`).
@@ -44,7 +47,7 @@ impl Default for Light {
         Self {
             radius: 10.0,
             energy: 0.8,
-            color: [0xff, 0xe4, 0xce],
+            color: [0xee, 0xee, 0xff],
         }
     }
 }
