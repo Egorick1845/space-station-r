@@ -69,10 +69,6 @@ pub struct InvSlot(pub u8);
 #[derive(Component, Clone, Copy)]
 pub struct HandSlot(pub u8);
 
-/// Кнопка «Сменить руку».
-#[derive(Component)]
-pub struct SwitchHandButton;
-
 /// Корень панели рюкзака.
 #[derive(Component)]
 pub struct InventoryPanel;
@@ -524,25 +520,6 @@ pub fn render_hands_panel(
                     ));
                 }
             }
-            row.spawn((
-                SwitchHandButton,
-                Button,
-                Node {
-                    height: px(46),
-                    padding: UiRect::horizontal(px(10)),
-                    align_items: AlignItems::Center,
-                    justify_content: JustifyContent::Center,
-                    border: UiRect::all(px(2)),
-                    ..default()
-                },
-                BackgroundColor(Color::srgb(0.13, 0.13, 0.16)),
-                BorderColor::from(Color::srgb(0.30, 0.30, 0.35)),
-            ))
-            .with_child((
-                Text::new("Сменить руку"),
-                TextFont::from_font_size(12.0),
-                TextColor(Color::srgb(0.88, 0.88, 0.90)),
-            ));
         });
 }
 
@@ -743,7 +720,6 @@ pub fn inventory_slot_click(
 /// Клик по рукам: активная рука с предметом — убрать в рюкзак, иначе — переключить.
 pub fn hands_ui_click(
     hands_slots: HandClicks,
-    switch_buttons: Query<&Interaction, (Changed<Interaction>, With<SwitchHandButton>)>,
     own: Res<OwnPlayerEntity>,
     hands: Query<&Hands>,
     mut senders: Query<&mut MessageSender<ClientMessage>, With<Connected>>,
@@ -767,14 +743,6 @@ pub fn hands_ui_click(
             for mut sender in senders.iter_mut() {
                 sender.send::<GameChannel>(ClientMessage::SwitchHand);
             }
-        }
-    }
-    for interaction in switch_buttons.iter() {
-        if *interaction != Interaction::Pressed {
-            continue;
-        }
-        for mut sender in senders.iter_mut() {
-            sender.send::<GameChannel>(ClientMessage::SwitchHand);
         }
     }
 }
