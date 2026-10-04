@@ -134,6 +134,9 @@ pub struct UiTheme {
     pub slot_id: Handle<Image>,
     /// `Slots/suit_storage` — слот разгрузки.
     pub slot_suit_storage: Handle<Image>,
+    /// Слоты окна персонажа: [голова, комбинезон, куртка, перчатки, шея, маска,
+    /// очки, уши, обувь] — текстуры `Slots/*` из сборки.
+    pub character_slots: Vec<Handle<Image>>,
     /// `SlotBackground` — фон слота действия (`ActionButton` в SS14).
     pub slot_background: Handle<Image>,
 
@@ -174,6 +177,19 @@ pub const STORAGE_PIECES: [&str; 9] = [
     "sprites/ss14/Interface/Default/Storage/piece_topRight.png",
     "sprites/ss14/Interface/Default/Storage/piece_bottomLeft.png",
     "sprites/ss14/Interface/Default/Storage/piece_bottomRight.png",
+];
+
+/// Текстуры слотов окна персонажа (порядок — как в [`UiTheme::character_slots`]).
+pub const CHARACTER_SLOTS: [&str; 9] = [
+    "sprites/ss14/Interface/Default/Slots/head.png",
+    "sprites/ss14/Interface/Default/Slots/uniform.png",
+    "sprites/ss14/Interface/Default/Slots/suit.png",
+    "sprites/ss14/Interface/Default/Slots/gloves.png",
+    "sprites/ss14/Interface/Default/Slots/neck.png",
+    "sprites/ss14/Interface/Default/Slots/mask.png",
+    "sprites/ss14/Interface/Default/Slots/glasses.png",
+    "sprites/ss14/Interface/Default/Slots/ears.png",
+    "sprites/ss14/Interface/Default/Slots/shoes.png",
 ];
 
 /// Сегменты сайдбара хранилища: [верх, середина, низ].
@@ -244,6 +260,7 @@ pub fn load_ui_theme(mut commands: Commands, assets: Res<AssetServer>) {
         slot_pocket: load("sprites/ss14/Interface/Default/Slots/pocket.png"),
         slot_id: load("sprites/ss14/Interface/Default/Slots/id.png"),
         slot_suit_storage: load("sprites/ss14/Interface/Default/Slots/suit_storage.png"),
+        character_slots: CHARACTER_SLOTS.iter().map(|path| load(path)).collect(),
         slot_background: load("sprites/ss14/Interface/Default/SlotBackground.png"),
         status_left: load("sprites/ss14/Interface/Default/item_status_left.png"),
         status_right: load("sprites/ss14/Interface/Default/item_status_right.png"),

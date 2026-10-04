@@ -376,12 +376,18 @@ pub struct DragGhost;
 /// Открыто ли окно рюкзака (кнопка-сумка в панели рук открывает/закрывает).
 #[derive(Resource)]
 pub struct InventoryUi {
+    /// Окно рюкзака (хранилище; открывается по V, как `OpenBackpack` в SS14).
     pub open: bool,
+    /// Окно персонажа со слотами одежды (`InventoryGui`).
+    pub character_open: bool,
 }
 
 impl Default for InventoryUi {
     fn default() -> Self {
-        Self { open: true }
+        Self {
+            open: true,
+            character_open: false,
+        }
     }
 }
 
@@ -420,8 +426,15 @@ pub fn panel_buttons_click(mut ui: ResMut<InventoryUi>, mut clicks: PanelClicks)
         if *interaction != Interaction::Pressed {
             continue;
         }
-        ui.open = if close { false } else { !ui.open };
-        tracing::info!(open = ui.open, "backpack window toggled");
+        // Крестик закрывает окно, а кнопка `Slots/toggle` открывает окно
+        // персонажа со слотами одежды (как `InventoryButton` в SS14).
+        if close {
+            ui.open = false;
+            ui.character_open = false;
+        } else {
+            ui.character_open = !ui.character_open;
+        }
+        tracing::info!(character = ui.character_open, "character window toggled");
     }
 }
 
@@ -1664,6 +1677,7 @@ pub fn drag_release(
     mut senders: Query<&mut MessageSender<ClientMessage>, With<Connected>>,
     slots: BackpackSlots,
     container_slots: CrateSlots,
+    equip_targets: EquipSlotTargets,
     ui: Query<&Interaction, With<Button>>,
 ) {
     if !mouse.just_released(MouseButton::Left) || drag.item == 0 {
@@ -1689,6 +1703,20 @@ pub fn drag_release(
             });
         }
         tracing::info!(item, to_slot = slot.0, "drag: item moved in backpack");
+        return;
+    }
+    // Слот экипировки под курсором: надеваем перетаскиванием, как в SS14.
+    for (interaction, slot) in equip_targets.iter() {
+        if *interaction != Interaction::Hovered {
+            continue;
+        }
+        for mut sender in senders.iter_mut() {
+            sender.send::<GameChannel>(ClientMessage::Equip {
+                item,
+                slot: slot.0.id().to_string(),
+            });
+        }
+        tracing::info!(item, slot = slot.0.id(), "drag: item equipped");
         return;
     }
     // Клетка ящика под курсором.
@@ -1825,6 +1853,17 @@ fn equip_slot(
     });
 }
 
+/// Слоты экипировки под курсором (для перетаскивания).
+type EquipSlotTargets<'w, 's> = Query<
+    'w,
+    's,
+    (&'static Interaction, &'static EquipSlotButton),
+    (With<Button>, Without<InvSlot>),
+>;
+
+/// Отпечаток окна персонажа: открыто ли и что надето.
+type CharacterSignature = (bool, Vec<(ssr_core::clothing::ClothingSlot, u64)>);
+
 type EquipSlotClicks<'w, 's> = Query<
     'w,
     's,
@@ -1874,3 +1913,126 @@ pub fn equip_slot_click(
 /// Кнопка слота экипировки.
 #[derive(Component)]
 pub struct EquipSlotButton(pub ssr_core::clothing::ClothingSlot);
+
+/// Корень окна персонажа со слотами одежды (`InventoryGui` в SS14).
+#[derive(Component)]
+pub struct CharacterPanel;
+
+/// Рисует окно персонажа: девять слотов одежды в сетке 3 колонки — ровно как
+/// раскладывает `uiWindowPos` в `human_inventory_template.yml`
+/// (обувь 1,0; комбинезон 0,1; куртка 1,1; перчатки 2,1; шея 0,2; маска 1,2;
+/// уши 2,2; очки 0,3; голова 1,3).
+#[allow(clippy::too_many_arguments)]
+pub fn render_character_panel(
+    mut commands: Commands,
+    sprites: ItemSprites,
+    theme: Res<crate::ui_theme::UiTheme>,
+    ui: Res<InventoryUi>,
+    own: Res<OwnPlayerEntity>,
+    clothings: Query<&ssr_core::clothing::Clothing>,
+    root: Query<Entity, With<CharacterPanel>>,
+    mut last: Local<Option<CharacterSignature>>,
+) {
+    use crate::ui_theme as ui;
+    use ssr_core::clothing::ClothingSlot as Slot;
+    let clothing = own
+        .0
+        .and_then(|entity| clothings.get(entity).ok())
+        .cloned()
+        .unwrap_or_default();
+    let signature = (ui.character_open, clothing.slots.clone());
+    if last.as_ref() == Some(&signature) {
+        return;
+    }
+    *last = Some(signature);
+    for entity in root.iter() {
+        commands.entity(entity).despawn();
+    }
+    if !ui.character_open {
+        return;
+    }
+    // (слот, колонка, строка) — из uiWindowPos шаблона инвентаря человека.
+    let layout: [(Slot, u8, u8); 9] = [
+        (Slot::Shoes, 1, 0),
+        (Slot::Jumpsuit, 0, 1),
+        (Slot::OuterClothing, 1, 1),
+        (Slot::Gloves, 2, 1),
+        (Slot::Neck, 0, 2),
+        (Slot::Mask, 1, 2),
+        (Slot::Ears, 2, 2),
+        (Slot::Eyes, 0, 3),
+        (Slot::Head, 1, 3),
+    ];
+    let cell = ui::SLOT_SIZE;
+    commands
+        .spawn((
+            CharacterPanel,
+            windows::WindowKind::Inventory,
+            windows::WindowDrag::default(),
+            Interaction::default(),
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(10),
+                top: px(50.0),
+                width: px(cell * 3.0),
+                height: px(cell * 4.0),
+                ..default()
+            },
+            BackgroundColor(ui::GLASS_PANEL),
+        ))
+        .with_children(|window| {
+            for (slot, column, row) in layout {
+                let index = CHARACTER_SLOT_ORDER
+                    .iter()
+                    .position(|candidate| *candidate == slot)
+                    .unwrap_or(0);
+                let texture = theme
+                    .character_slots
+                    .get(index)
+                    .cloned()
+                    .unwrap_or_default();
+                let item = clothing.get(slot);
+                window
+                    .spawn((
+                        EquipSlotButton(slot),
+                        Button,
+                        ImageNode::new(texture),
+                        Node {
+                            position_type: PositionType::Absolute,
+                            left: px(column as f32 * cell),
+                            top: px(row as f32 * cell),
+                            width: px(cell),
+                            height: px(cell),
+                            align_items: AlignItems::Center,
+                            justify_content: JustifyContent::Center,
+                            ..default()
+                        },
+                    ))
+                    .with_children(|cell_node| {
+                        if let Some(sprite) = item.and_then(|bits| sprites.icon(bits)) {
+                            cell_node.spawn((
+                                icon_node(sprite),
+                                Node {
+                                    width: px(cell),
+                                    height: px(cell),
+                                    ..default()
+                                },
+                            ));
+                        }
+                    });
+            }
+        });
+}
+
+/// Порядок текстур в [`crate::ui_theme::CHARACTER_SLOTS`].
+const CHARACTER_SLOT_ORDER: [ssr_core::clothing::ClothingSlot; 9] = [
+    ssr_core::clothing::ClothingSlot::Head,
+    ssr_core::clothing::ClothingSlot::Jumpsuit,
+    ssr_core::clothing::ClothingSlot::OuterClothing,
+    ssr_core::clothing::ClothingSlot::Gloves,
+    ssr_core::clothing::ClothingSlot::Neck,
+    ssr_core::clothing::ClothingSlot::Mask,
+    ssr_core::clothing::ClothingSlot::Eyes,
+    ssr_core::clothing::ClothingSlot::Ears,
+    ssr_core::clothing::ClothingSlot::Shoes,
+];

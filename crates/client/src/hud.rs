@@ -554,6 +554,7 @@ pub fn hud_hotkeys(
     entity_map: Option<Res<ServerEntityMap>>,
     own: Res<OwnPlayerEntity>,
     hands: Query<&ssr_core::inventory::Hands>,
+    mut uis: Query<&mut crate::inventory_ui::InventoryUi>,
 ) {
     // Текст набирается в консоли или чате — горячие клавиши мира не работают.
     if console.open || chat.focused {
@@ -613,6 +614,12 @@ pub fn hud_hotkeys(
     }
     if keys.just_pressed(KeyCode::KeyC) {
         crafting.open = !crafting.open;
+    }
+    // V — окно рюкзака (в SS14 это клавиша `OpenBackpack`).
+    if keys.just_pressed(KeyCode::KeyV) {
+        for mut ui in uis.iter_mut() {
+            ui.open = !ui.open;
+        }
     }
 }
 
