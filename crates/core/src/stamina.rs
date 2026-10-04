@@ -208,8 +208,9 @@ mod tests {
         stamina.damage = CRIT_THRESHOLD;
         assert_eq!(
             stamina.alert_level(),
-            6,
-            "на крите — уровень 6 (максимальный)"
+            0,
+            "на крите остаток 0 → уровень 0 (RoundToLevels: actual <= 0 → 0); \
+             иконка stamina0 — самая тревожная, stamina6 — спокойная"
         );
     }
 }

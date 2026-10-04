@@ -80,6 +80,14 @@ fn polar_u(dx: f32, dy: f32) -> f32 {
     return (atan2(dy, -dx) / PI + 1.0) * 0.5;
 }
 
+// Дробный индекс бина полярной карты для направления (dx, dy) — ИНВЕРСИЯ
+// генерации: бин `b` смотрит под углом `b/bins*2*PI - PI` (0 — запад).
+// Читать `polar_u` из НАШИХ карт нельзя: это UV движка с швом на востоке,
+// из-за него полкарты вырождается в один бин (чёрные клинья «тумана войны»).
+fn polar_bin(dx: f32, dy: f32, bins: f32) -> f32 {
+    return (atan2(dy, dx) + PI) / (2.0 * PI) * bins - 0.5;
+}
+
 /// Ближайшее расстояние от точки `origin` до отрезка стены вдоль направления
 /// `dir` (единичного). `1e30`, если луч не пересекает отрезок.
 fn ray_wall(origin: vec2<f32>, dir: vec2<f32>, wall: vec4<f32>) -> f32 {
@@ -135,8 +143,8 @@ fn fov_map_cs(@builtin(global_invocation_id) id: vec3<u32>) {
 
 /// Момент из карты теней по углу (соответствует `occludeDepth` в движке).
 fn occlude_depth(rel: vec2<f32>, light_index: u32) -> vec2<f32> {
-    let u = clamp(polar_u(rel.x, rel.y), 0.0, 1.0);
-    let x = clamp(i32(u * f32(SHADOW_BINS)), 0, i32(SHADOW_BINS) - 1);
+    let u = clamp(polar_bin(rel.x, rel.y, f32(SHADOW_BINS)), -0.5, f32(SHADOW_BINS) - 0.5);
+    let x = clamp(i32(round(u)), 0, i32(SHADOW_BINS) - 1);
     return textureLoad(shadow_map_read, vec2<i32>(x, i32(light_index)), 0).xy;
 }
 
@@ -271,8 +279,8 @@ fn light_apply_fov_cs(@builtin(global_invocation_id) id: vec3<u32>) {
     let world = params.camera + uv * params.viewport;
     let rel = world - params.eye;
     let our_dist = length(rel);
-    let u = clamp(polar_u(rel.x, rel.y), 0.0, 1.0);
-    let bin = clamp(i32(u * f32(FOV_BINS)), 0, i32(FOV_BINS) - 1);
+    let u = polar_bin(rel.x, rel.y, f32(FOV_BINS));
+    let bin = clamp(i32(round(u)), 0, i32(FOV_BINS) - 1);
     let wall_dist = textureLoad(fov_read, vec2<i32>(bin, 0), 0).x;
     let occlusion = chebyshev(vec2<f32>(wall_dist, wall_dist * wall_dist + 0.25), our_dist);
     var color = textureLoad(src, vec2<i32>(i32(id.x), i32(id.y)), 0);

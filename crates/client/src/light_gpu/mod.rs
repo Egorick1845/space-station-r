@@ -277,3 +277,8 @@ mod tests {
         assert_eq!(std::mem::size_of::<GpuWallUniform>(), 16);
     }
 }
+
+// Проводка в рендер-мир (регистрация prepare-системы и цепочки проходов) —
+// следующий шаг PORT_PLAN 1.1; сейчас модуль компилируется, но не подключён.
+#[allow(dead_code)]
+pub mod prepare;

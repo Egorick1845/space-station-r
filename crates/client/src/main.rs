@@ -182,6 +182,15 @@ fn main() {
     app.add_systems(Startup, ui_theme::load_ui_theme);
     // Текстуры GPU-конвейера света (карты теней/FOV/света) — один раз на старте.
     app.add_systems(Startup, light_gpu::setup_light_gpu);
+    // WGSL-конвейер света как ассет (PORT_PLAN 1.1): грузим AssetServer'ом,
+    // prepare-система рендера берёт его через Extract.
+    {
+        let shader = app
+            .world()
+            .resource::<bevy::asset::AssetServer>()
+            .load("shaders/light.wgsl");
+        app.insert_resource(light_gpu::prepare::LightShader(shader));
+    }
     // FPS-диагностика нужна строке FPS в углу (включается в настройках).
     app.add_plugins(bevy::diagnostic::FrameTimeDiagnosticsPlugin::default());
     // RsiRegistry строится сразу после DefaultPlugins: нужен и игроку (обезьяна),

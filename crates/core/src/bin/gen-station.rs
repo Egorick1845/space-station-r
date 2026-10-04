@@ -136,10 +136,17 @@ fn main() {
         (87, 45),
     ];
 
-    // Электрика: генератор в техзоне, кабели к дверям и лампам.
+    // Электрика: генератор в техзоне, кабели к дверям и лампам. Провода под
+    // полом не видны (`power_view`: кабель рисуется только на техполе и в
+    // космосе), поэтому раскладка свободная — как в сборке, где светильники
+    // стоят по всей станции и «слепых зон» без лампы нет.
     let generator = (10, 12);
     let mut cables: Vec<(i32, i32)> = Vec::new();
     let mut lights: Vec<(i32, i32)> = Vec::new();
+
+    /// Шаг ламп: радиус света 10 тайлов (`PointLight.radius` коридорной лампы),
+    /// шаг 7 — между соседними лампами яркость не проваливается в темноту.
+    const LAMP_STEP: i32 = 7;
 
     // Магистраль по техзоне (видна — здесь техпол), затем подъём к каждой двери.
     for x in 10..=WIDTH - 6 {
@@ -165,21 +172,47 @@ fn main() {
         for y in 28..=33 {
             cables.push((dx, y));
         }
-        // Лампа в отсеке на линии кабеля.
-        lights.push((dx, 40));
-        for y in 34..=40 {
-            cables.push((dx, y));
-        }
     }
     // Ветка к двери техзоны.
     for y in 12..=23 {
         cables.push((48, y));
     }
-    // Лампы в техзоне (видимые провода).
-    let _ = &grid;
-    lights.push((30, 12));
-    lights.push((60, 12));
-    lights.push((80, 12));
+
+    // Магистраль коридора (по центру коридорной полосы) и лампы по ней.
+    for x in 6..=WIDTH - 6 {
+        cables.push((x, 29));
+    }
+    for x in (8..=WIDTH - 8).step_by(LAMP_STEP as usize) {
+        cables.push((x, 29));
+        lights.push((x, 29));
+    }
+
+    // Отсеки: две ламповых линии (север и юг от середины) — отсеки 22 тайла в
+    // высоту, одной линией их не залить; подъём от коридора идёт по колонне двери.
+    for (index, (x0, y0, x1, y1)) in rooms.iter().enumerate() {
+        let mid = (y0 + y1) / 2;
+        for x in x0 + 1..=x1 - 1 {
+            cables.push((x, mid - 6));
+            cables.push((x, mid + 6));
+        }
+        let door_x = doors[index].0;
+        for y in 29..=mid + 6 {
+            cables.push((door_x, y));
+        }
+        for y in [mid - 6, mid + 6] {
+            for x in (x0 + 2..=x1 - 2).step_by(LAMP_STEP as usize) {
+                if grid.get(x, y).is_walkable() {
+                    cables.push((x, y));
+                    lights.push((x, y));
+                }
+            }
+        }
+    }
+
+    // Лампы техзоны (видимые провода на техполе).
+    for x in (14..=WIDTH - 8).step_by(LAMP_STEP as usize) {
+        lights.push((x, 12));
+    }
 
     // Дедупликация кабелей и ламп.
     cables.sort();
@@ -222,7 +255,9 @@ fn main() {
         cables: cables.iter().map(|(tx, ty)| center(*tx, *ty)).collect(),
         generators: vec![{
             let (x, y) = center(generator.0, generator.1);
-            (x, y, 40.0)
+            // 200 кВт: лампы по всей станции (~1 кВт) + двери (4 кВт) с запасом
+            // (в сборке станция тоже питается от мощной сети, а не от 40 кВт).
+            (x, y, 200.0)
         }],
         lights: lights.iter().map(|(tx, ty)| center(*tx, *ty)).collect(),
     };
