@@ -23,6 +23,7 @@ use ssr_core::atmosphere::{ChunkAtmosphere, Gas};
 use ssr_core::inventory::{
     Container, Hands, Health, HeldBy, Inventory, Item, ItemPosition, SLOT_ANY,
 };
+use ssr_core::mechanics::{Ghost, KNOCKDOWN_SECS, KnockedDown, PlayerName, RUN_SPEED_MULT};
 use ssr_core::power::{Cable, Consumer, Generator, Light, Powered};
 use ssr_core::roles::{Access, PlayerRole, RoleSet};
 use ssr_core::tiles::{MapFile, TileChunkData, TileType};
@@ -135,6 +136,7 @@ fn main() {
             simulate_atmosphere,
             suffocation,
             auto_doors,
+            knockdown_tick,
             power_grid,
         ),
     );
@@ -150,6 +152,7 @@ fn main() {
             perf_logger,
         ),
     );
+    app.add_observer(teleport_to_player);
     app.add_observer(on_link_connected);
     app.add_observer(on_link_disconnected);
     // Регистрация реплицируемых компонентов — одинакова на сервере и клиенте (T1.3).
@@ -180,6 +183,10 @@ fn main() {
     app.component::<Consumer>().replicate();
     app.component::<Light>().replicate();
     app.component::<Powered>().replicate();
+    // Механики (T-мех): лежачий и призрак. Тот же порядок, что у клиента!
+    app.component::<KnockedDown>().replicate();
+    app.component::<Ghost>().replicate();
+    app.component::<PlayerName>().replicate();
     app.run();
 }
 
@@ -300,6 +307,38 @@ struct ServerContent<'w> {
     catalogs: Res<'w, ContentCatalog>,
     stats: ResMut<'w, NetStats>,
 }
+
+/// Запрос телепорта к другому игроку (админ-команда tpto, T-мех).
+#[derive(Event)]
+struct TeleportToPlayer {
+    player: Entity,
+    target: Entity,
+}
+
+/// Исполняет телепорт к игроку (позицию цели знает система с доступом к телам).
+fn teleport_to_player(
+    trigger: On<TeleportToPlayer>,
+    positions: Query<&PlayerPosition>,
+    mut bodies: Query<(&mut Position, &mut LinearVelocity)>,
+) {
+    let event = trigger.event();
+    let Ok(target_position) = positions.get(event.target) else {
+        return;
+    };
+    if let Ok((mut body, mut velocity)) = bodies.get_mut(event.player) {
+        body.0 = Vector::new(target_position.0[0], target_position.0[1]);
+        velocity.0 = Vector::ZERO;
+        tracing::info!(
+            player = ?event.player,
+            target = ?event.target,
+            "admin tpto applied"
+        );
+    }
+}
+
+/// Отложенный респавн: игрок лежит и ждёт возврата на спавн (механики).
+#[derive(Component, Default)]
+struct RespawnPending;
 
 /// Счётчики входящих сообщений (T6.1): сколько клиентских сообщений приняли.
 #[derive(Resource, Default)]
@@ -819,6 +858,7 @@ fn suffocation(
     mut next_tick: Local<f32>,
     players: Res<Players>,
     positions: Query<&PlayerPosition>,
+    ghosts: Query<&Ghost>,
     atmospheres: Res<Atmospheres>,
     mut damage_events: MessageWriter<DamageEvent>,
 ) {
@@ -828,6 +868,10 @@ fn suffocation(
     }
     *next_tick = 0.0;
     for entry in &players.entries {
+        // Призрак летает в вакууме без вреда (механики владельца).
+        if ghosts.get(entry.player).is_ok() {
+            continue;
+        }
         let Ok(position) = positions.get(entry.player) else {
             continue;
         };
@@ -848,6 +892,35 @@ fn suffocation(
             source: DamageSource::Environment { cause },
         });
         tracing::info!(player = ?entry.player, pressure = gas.pressure, oxygen = gas.oxygen, cause, "suffocation damage");
+    }
+}
+
+/// Тик лежачего состояния: игрок лежит KNOCKDOWN_SECS, затем встаёт и
+/// возвращается на точку спавна (падение после смерти, механики владельца).
+fn knockdown_tick(
+    time: Res<Time>,
+    mut commands: Commands,
+    mut knocked: Query<(Entity, &mut KnockedDown, Option<&RespawnPending>)>,
+    mut bodies: Query<&mut Position>,
+    map: Res<GameMap>,
+) {
+    for (entity, mut state, respawn) in knocked.iter_mut() {
+        if state.seconds <= 0.0 {
+            continue;
+        }
+        state.seconds -= time.delta_secs();
+        if state.seconds > 0.0 {
+            continue;
+        }
+        commands.entity(entity).remove::<KnockedDown>();
+        if respawn.is_some() {
+            let spawn = map.spawn_points.first().copied().unwrap_or((0.0, 0.0));
+            if let Ok(mut body) = bodies.get_mut(entity) {
+                body.0 = Vector::new(spawn.0, spawn.1);
+            }
+            commands.entity(entity).remove::<RespawnPending>();
+            tracing::info!(?entity, spawn = ?spawn, "player got up and respawned");
+        }
     }
 }
 
@@ -1210,7 +1283,17 @@ struct ActionQueue(Vec<(Entity, QueuedAction)>);
 /// Элемент очереди: выполнить действие или прислать список доступных (verbs).
 enum QueuedAction {
     Do(ActionKind),
-    RequestActions { entity: u64, tx: i32, ty: i32 },
+    RequestActions {
+        entity: u64,
+        tx: i32,
+        ty: i32,
+    },
+    /// Осмотр объекта или тайла (механики владельца): сервер отвечает описанием.
+    Examine {
+        entity: u64,
+        tx: i32,
+        ty: i32,
+    },
 }
 
 /// Источник урона (T4.1): кто и чем нанёс удар. Новые источники (среда,
@@ -1258,8 +1341,24 @@ impl ChunkRooms {
 
 /// Текущий ввод игрока; сервер применяет его каждый тик (ADR-3).
 /// Не реплицируется — это серверная деталь применения ввода.
-#[derive(Component, Default)]
-struct PlayerInput([f32; 2]);
+#[derive(Component)]
+struct PlayerInput {
+    direction: [f32; 2],
+    /// Бег (Shift): множитель скорости (T-мех).
+    running: bool,
+    /// Боевой режим: клики бьют, а не используют (T-мех).
+    combat: bool,
+}
+
+impl Default for PlayerInput {
+    fn default() -> Self {
+        Self {
+            direction: [0.0, 0.0],
+            running: false,
+            combat: false,
+        }
+    }
+}
 
 fn on_link_connected(trigger: On<Add, Connected>, mut commands: Commands) {
     // ReplicationSender — чтобы сервер слал компоненты этому клиенту (T1.3);
@@ -1289,6 +1388,83 @@ fn on_link_disconnected(
 /// Приём сообщений клиента (единственная точка чтения) + операции над руками
 /// (SS14-модель): переключить руку, взять из рюкзака, убрать в рюкзак. Всё
 /// исполняемое (атака, двери, применение предметов, verbs) уходит в очередь
+/// Описание объекта или тайла для осмотра (механики владельца).
+#[allow(clippy::too_many_arguments)]
+fn describe_target(
+    entity_bits: u64,
+    tx: i32,
+    ty: i32,
+    items: &Query<&Item>,
+    containers: &Query<&mut Container>,
+    container_positions: &Query<&ItemPosition>,
+    doors: &Query<&mut Door>,
+    atmospheres: &Atmospheres,
+    catalogs: &ContentCatalog,
+) -> String {
+    // Объект под курсором: предмет, ящик, дверь или генератор.
+    if entity_bits != 0
+        && let Some(entity) = Entity::try_from_bits(entity_bits)
+    {
+        if let Ok(item) = items.get(entity) {
+            let proto = catalogs.items.by_id(&item.name);
+            let name = proto
+                .map(|item| item.name.clone())
+                .unwrap_or_else(|| item.name.clone());
+            let tags = proto
+                .map(|item| item.tags.join(", "))
+                .filter(|tags| !tags.is_empty())
+                .map(|tags| format!(" [{tags}]"))
+                .unwrap_or_default();
+            return format!("{name}{tags}");
+        }
+        if let Ok(container) = containers.get(entity) {
+            let count = container_positions
+                .get(entity)
+                .map(|_| "с предметами")
+                .unwrap_or("");
+            return format!(
+                "{}: {} {count}",
+                container.name,
+                if container.open {
+                    "открыт"
+                } else {
+                    "закрыт"
+                }
+            );
+        }
+        if let Ok(door) = doors.get(entity) {
+            let access = door.access.clone().unwrap_or_else(|| "общий".to_string());
+            return format!(
+                "Дверь: {}, доступ: {access}",
+                if door.open {
+                    "открыта"
+                } else {
+                    "закрыта"
+                }
+            );
+        }
+    }
+    // Тайл: пол/техпол/стена, атмосфера, провода, игроки.
+    let text = match atmospheres.gas_at_tile(tx, ty) {
+        Some(gas)
+            if atmospheres
+                .gas_at_tile(tx, ty)
+                .map(|_| true)
+                .unwrap_or(false) =>
+        {
+            format!(
+                "Тайл ({tx}, {ty}): давление {:.0} кПа, O₂ {:.0}%",
+                gas.pressure,
+                gas.oxygen * 100.0
+            )
+        }
+        _ => format!("Тайл ({tx}, {ty}): вне карты"),
+    };
+    // Игроков на тайле показывает система с доступом к их позициям;
+    // здесь (в очереди действий) доступны только имена.
+    text
+}
+
 /// Выполняет админ-команду (T5.5) и возвращает текст ответа.
 /// Команды: `tp <x> <y>`, `spawn <предмет> [кол-во]`, `kick <имя> [причина]`,
 /// `heal`.
@@ -1385,7 +1561,42 @@ fn run_admin_command(
             commands.entity(player).insert(Health::default());
             "здоровье восстановлено".to_string()
         }
-        other => format!("неизвестная команда: {other} (tp/spawn/kick/heal)"),
+        "tpto" => {
+            // Телепорт к игроку по имени (админ-меню, T-мех).
+            let Some(target_name) = parts.next() else {
+                return "использование: tpto <имя>".to_string();
+            };
+            let Some(target) = players
+                .entries
+                .iter()
+                .find(|entry| entry.name == target_name)
+            else {
+                return format!("игрок не найден: {target_name}");
+            };
+            if target.player == player {
+                return "это вы и есть".to_string();
+            }
+            // Позицию цели берём из её PlayerPosition (реплицируется).
+            commands.trigger(TeleportToPlayer {
+                player,
+                target: target.player,
+            });
+            format!("телепорт к {target_name}")
+        }
+        "ghost" => {
+            // Призрак: летает сквозь стены, без коллизии (механики владельца).
+            commands
+                .entity(player)
+                .insert((Ghost, ColliderDisabled, KnockedDown { seconds: 0.0 }));
+            "режим призрака включён (полёт сквозь стены)".to_string()
+        }
+        "unghost" => {
+            commands
+                .entity(player)
+                .remove::<(Ghost, ColliderDisabled, KnockedDown)>();
+            "режим призрака выключен".to_string()
+        }
+        other => format!("неизвестная команда: {other} (tp/spawn/kick/heal/ghost/unghost)"),
     }
     .to_string()
 }
@@ -1445,13 +1656,37 @@ fn handle_client_messages(
                     tracing::info!(client = ?remote_id, name, "Player connected");
                     connected.push((link_entity, name));
                 }
-                ClientMessage::Input { movement } => {
+                ClientMessage::Examine { entity, tx, ty } => {
+                    let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {
+                        continue;
+                    };
+                    actions
+                        .0
+                        .push((entry.player, QueuedAction::Examine { entity, tx, ty }));
+                }
+                ClientMessage::SetCombat { combat } => {
+                    let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {
+                        continue;
+                    };
+                    if let Ok(mut input) = inputs.get_mut(entry.player) {
+                        input.combat = combat;
+                    }
+                }
+                ClientMessage::Input {
+                    movement,
+                    running,
+                    combat,
+                } => {
                     let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {
                         tracing::debug!(link = ?link_entity, "input before handshake");
                         continue;
                     };
                     match inputs.get_mut(entry.player) {
-                        Ok(mut input) => input.0 = movement,
+                        Ok(mut input) => {
+                            input.direction = movement;
+                            input.running = running;
+                            input.combat = combat;
+                        }
                         Err(e) => tracing::warn!(error = %e, "no PlayerInput"),
                     }
                 }
@@ -1930,9 +2165,20 @@ fn handle_client_messages(
 
 /// Ввод игрока превращается в скорость физического тела (ADR-3: физика на сервере).
 /// Физический шаг двигает тело, стены останавливают его коллизией (T2.2).
-fn movement(mut players: Query<(&PlayerInput, &mut LinearVelocity)>) {
-    for (input, mut velocity) in players.iter_mut() {
-        velocity.0 = Vec2::from_array(input.0).normalize_or_zero() * PLAYER_MOVE_SPEED;
+fn movement(mut players: Query<(&PlayerInput, &mut LinearVelocity, Option<&KnockedDown>)>) {
+    for (input, mut velocity, knocked) in players.iter_mut() {
+        // Лежачего не двигаем (падение/стан, T-мех).
+        if knocked.is_some() {
+            velocity.0 = Vector::ZERO;
+            continue;
+        }
+        // Бег: Shift даёт 1.6× скорости (как «бег» в SS14).
+        let speed = if input.running {
+            PLAYER_MOVE_SPEED * RUN_SPEED_MULT
+        } else {
+            PLAYER_MOVE_SPEED
+        };
+        velocity.0 = Vec2::from_array(input.direction).normalize_or_zero() * speed;
     }
 }
 
@@ -2059,6 +2305,8 @@ struct ActionQueries<'w, 's> {
     healths: Query<'w, 's, &'static Health>,
     access: Query<'w, 's, &'static Access>,
     powered: Query<'w, 's, &'static Powered>,
+    atmospheres: Res<'w, Atmospheres>,
+    catalogs: Res<'w, ContentCatalog>,
 }
 
 /// Доступ к двери (T4.2): дверь без ключа открыта всем, с ключом — только
@@ -2100,6 +2348,33 @@ fn process_actions(
     for (player, queued) in pending {
         let action = match queued {
             QueuedAction::Do(action) => action,
+            // Осмотр (механики владельца): описание объекта или тайла игроку.
+            QueuedAction::Examine { entity, tx, ty } => {
+                let text = describe_target(
+                    entity,
+                    tx,
+                    ty,
+                    &items,
+                    &containers,
+                    &container_positions,
+                    &doors,
+                    &world.atmospheres,
+                    &world.catalogs,
+                );
+                tracing::info!(?player, %text, "examine");
+                if let Some(link) = players
+                    .entries
+                    .iter()
+                    .find(|entry| entry.player == player)
+                    .map(|entry| entry.link)
+                    && let Ok(mut sender) = senders.get_mut(link)
+                {
+                    sender.send::<GameChannel>(ServerMessage::Event {
+                        kind: format!("examine:{text}"),
+                    });
+                }
+                continue;
+            }
             QueuedAction::RequestActions { entity, tx, ty } => {
                 let mut options: Vec<ActionOption> = Vec::new();
                 if entity != 0 {
@@ -2450,24 +2725,26 @@ fn apply_damage(
 
 /// Смерть (T4.1): Health обратно к максимуму, тело на точку спавна, лог.
 fn respawn_dead(
+    mut commands: Commands,
     mut death_events: MessageReader<DeathEvent>,
     mut healths: Query<&mut Health>,
-    mut bodies: Query<&mut Position>,
-    map: Res<GameMap>,
 ) {
     for event in death_events.read() {
         if let Ok(mut health) = healths.get_mut(event.target) {
             health.current = health.max;
         }
-        let spawn = map.spawn_points.first().copied().unwrap_or((0.0, 0.0));
-        if let Ok(mut body) = bodies.get_mut(event.target) {
-            body.0 = Vector::new(spawn.0, spawn.1);
-        }
+        // «Падение»: игрок лежит KNOCKDOWN_SECS, потом возвращается на спавн
+        // (телепорт — в knockdown_tick, чтобы было видно падение).
+        commands.entity(event.target).insert((
+            KnockedDown {
+                seconds: KNOCKDOWN_SECS,
+            },
+            RespawnPending,
+        ));
         tracing::info!(
             target = ?event.target,
             killer = ?event.killer,
-            spawn = ?spawn,
-            "player died and respawned"
+            "player died and fell down"
         );
     }
 }

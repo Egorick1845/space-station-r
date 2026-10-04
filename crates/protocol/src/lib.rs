@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Версия протокола. Несовпадение при рукопожатии = отказ соединения (проверка в T1.2).
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Порт игрового сервера по умолчанию (T1.2).
 pub const DEFAULT_SERVER_PORT: u16 = 7777;
@@ -32,6 +32,12 @@ pub enum ClientMessage {
     Input {
         /// Ввод по осям: `[x, y]` — x вправо, y вверх.
         movement: [f32; 2],
+        /// Бег: Shift удерживается (скорость выше, T-мех).
+        #[serde(default)]
+        running: bool,
+        /// Боевой режим включён (клики бьют, а не используют, T-мех).
+        #[serde(default)]
+        combat: bool,
     },
     /// Взаимодействие с сущностью (система взаимодействия — T3.1).
     Interact {
@@ -51,8 +57,12 @@ pub enum ClientMessage {
     SwitchHand,
     /// Скрафтить предмет по рецепту из `assets/prototypes/recipes.ron` (T5.2).
     Craft { recipe: String },
-    /// Админ-команда серверу (T5.5): tp/spawn/kick/heal — проверяет сервер.
+    /// Админ-команда серверу (T5.5): tp/spawn/kick/heal/ghost — проверяет сервер.
     Admin { command: String },
+    /// Осмотр объекта или тайла (T-мех): клиент получает описание в ответе.
+    Examine { entity: u64, tx: i32, ty: i32 },
+    /// Переключить боевой режим: обычные клики начинают бить, а не использовать.
+    SetCombat { combat: bool },
     /// Взять предмет из рюкзака в активную руку.
     TakeInHand {
         /// Слот рюкзака.
@@ -180,6 +190,8 @@ mod tests {
             },
             ClientMessage::Input {
                 movement: [0.5, -1.0],
+                running: true,
+                combat: false,
             },
             ClientMessage::Interact { entity: 42 },
         ];

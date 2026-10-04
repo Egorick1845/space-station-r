@@ -12,6 +12,7 @@ pub const GAME_NAME: &str = "Space Station R";
 pub mod atmosphere;
 pub mod inventory;
 pub mod items;
+pub mod mechanics;
 pub mod power;
 pub mod prototypes;
 pub mod recipes;

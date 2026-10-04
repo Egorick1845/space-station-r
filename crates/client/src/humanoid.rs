@@ -8,23 +8,27 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use ssr_core::Species;
+use ssr_core::mechanics::{Ghost, KnockedDown};
 
 use crate::inventory_ui::{OwnPlayerEntity, RemotePlayerVisual};
 use crate::rsi::RsiRegistry;
 
-/// Части тела снизу вверх (порядок отрисовки); z — слой внутри тайла.
+/// Части тела снизу вверх: порядок взят из движка (HumanoidVisualLayers):
+/// Chest, Groin, Head, Eyes, RArm, LArm, RHand, LHand, RLeg, LLeg, RFoot, LFoot —
+/// ноги и ступни рисуются ПОВЕРХ торса, поэтому контуры частей не режут тело.
+/// z — слой внутри тайла.
 const PARTS: &[(&str, f32)] = &[
-    ("l_leg", 0.00),
-    ("r_leg", 0.01),
-    ("l_foot", 0.02),
-    ("r_foot", 0.03),
-    ("groin_m", 0.04),
-    ("chest_m", 0.05),
-    ("l_arm", 0.06),
-    ("r_arm", 0.07),
-    ("l_hand", 0.08),
-    ("r_hand", 0.09),
-    ("head_m", 0.10),
+    ("chest_m", 0.00),
+    ("groin_m", 0.01),
+    ("head_m", 0.02),
+    ("r_arm", 0.03),
+    ("l_arm", 0.04),
+    ("r_hand", 0.05),
+    ("l_hand", 0.06),
+    ("r_leg", 0.07),
+    ("l_leg", 0.08),
+    ("r_foot", 0.09),
+    ("l_foot", 0.10),
 ];
 
 /// Направление взгляда (порядок движка: 0 юг, 1 север, 2 восток, 3 запад).
@@ -42,6 +46,10 @@ pub struct HumanoidPart {
 #[derive(Component, Clone, PartialEq)]
 pub struct BodySpecies(pub String);
 
+/// Слой призрака (заменяет тело в режиме призрака, механики владельца).
+#[derive(Component)]
+pub struct GhostLayer;
+
 /// Ключ спрайта части тела: `Mobs/Species/<раса>/parts.rsi#<часть>`.
 fn part_key(species: &str, part: &str) -> String {
     format!("sprites/ss14/Mobs/Species/{species}/parts.rsi#{part}")
@@ -49,6 +57,10 @@ fn part_key(species: &str, part: &str) -> String {
 
 /// Глаза — отдельный слой поверх головы (как `MobHumanoidEyes` в SS14).
 const EYES_KEY: &str = "sprites/ss14/Mobs/Customization/eyes.rsi#eyes";
+/// Ключ спрайта призрака.
+const GHOST_KEY: &str = "sprites/ss14/Mobs/Ghosts/ghost_human.rsi#animated";
+/// Псевдораса для тела-призрака.
+pub const GHOST_SPECIES: &str = "Ghost";
 /// Расы, которым глаза-человеческие не рисуем (своя голова/маска).
 const NO_EYES: &[&str] = &["Skeleton", "Diona", "Gingerbread"];
 
@@ -60,6 +72,21 @@ pub fn attach_body(
     owner: Entity,
     species: &str,
 ) -> usize {
+    // Призрак: вместо тела — один спрайт призрака (механики владельца).
+    if species == GHOST_SPECIES {
+        let Some(sprite) = registry.get(GHOST_KEY) else {
+            return 0;
+        };
+        let mut component = Sprite::from_image(sprite.image.clone());
+        component.texture_atlas = Some(TextureAtlas {
+            layout: sprite.layout.clone(),
+            index: sprite.index(0, 0),
+        });
+        commands.entity(owner).with_children(|parent| {
+            parent.spawn((GhostLayer, component, Transform::from_xyz(0.0, 0.0, 0.05)));
+        });
+        return PARTS.len();
+    }
     let mut attached = 0usize;
     commands.entity(owner).with_children(|parent| {
         for (part, z) in PARTS {
@@ -94,7 +121,7 @@ pub fn attach_body(
                     key: EYES_KEY.to_string(),
                 },
                 component,
-                Transform::from_xyz(0.0, 0.0, 0.11),
+                Transform::from_xyz(0.0, 0.0, 0.025),
             ));
             attached += 1;
         }
@@ -123,6 +150,7 @@ fn detach_body(commands: &mut Commands, children: &Query<&Children>, owner: Enti
 #[derive(SystemParam)]
 pub struct BodyQueries<'w, 's> {
     pub players: Query<'w, 's, Entity, With<crate::Player>>,
+    pub ghosts: Query<'w, 's, &'static Ghost>,
     pub visuals: Query<'w, 's, (Entity, &'static RemotePlayerVisual)>,
     pub bodies: Query<'w, 's, &'static BodySpecies>,
     pub children: Query<'w, 's, &'static Children>,
@@ -138,11 +166,16 @@ pub fn sync_bodies(
 ) {
     let BodyQueries {
         players,
+        ghosts,
         visuals,
         bodies,
         children,
     } = q;
     let species_of = |entity: Entity| {
+        // Призрак важнее расы: тело заменяется спрайтом призрака.
+        if ghosts.get(entity).is_ok() {
+            return GHOST_SPECIES.to_string();
+        }
         species
             .get(entity)
             .map(|s| s.id.clone())
@@ -217,6 +250,35 @@ pub fn debug_body(
             part = %part.key,
             "body part"
         );
+    }
+}
+
+/// Лежачий игрок: тело поворачивается на 90° (падение, механики владельца).
+pub fn update_knocked(
+    mut bodies: Query<(&KnockedDown, &mut Transform), With<crate::Player>>,
+    mut visuals: Query<(&RemotePlayerVisual, &mut Transform), Without<crate::Player>>,
+    knocked: Query<&KnockedDown>,
+) {
+    for (state, mut transform) in bodies.iter_mut() {
+        let target = if state.seconds > 0.0 {
+            Quat::from_rotation_z(std::f32::consts::FRAC_PI_2)
+        } else {
+            Quat::IDENTITY
+        };
+        if transform.rotation != target {
+            transform.rotation = target;
+            tracing::info!("body rotation updated (knocked={})", state.seconds > 0.0);
+        }
+    }
+    for (visual, mut transform) in visuals.iter_mut() {
+        let target = if knocked.get(visual.player).is_ok() {
+            Quat::from_rotation_z(std::f32::consts::FRAC_PI_2)
+        } else {
+            Quat::IDENTITY
+        };
+        if transform.rotation != target {
+            transform.rotation = target;
+        }
     }
 }
 

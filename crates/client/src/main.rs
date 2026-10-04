@@ -24,6 +24,7 @@ mod containers;
 mod content;
 mod crafting;
 mod doors;
+mod hud;
 mod humanoid;
 mod inventory_ui;
 mod lobby;
@@ -127,6 +128,7 @@ fn main() {
     app.init_resource::<settings::Settings>();
     app.init_resource::<doors::DeniedDoors>();
     app.init_resource::<crafting::CraftingState>();
+    app.init_resource::<hud::HudState>();
     app.init_resource::<audio::SoundRequests>();
     // Ленивая подгрузка RSI (T5.3): обрабатываем заявки из реестра каждый кадр.
     app.add_systems(Update, rsi::load_requested_rsi);
@@ -205,6 +207,7 @@ fn main() {
             inventory_ui::sync_inhand_items,
             humanoid::sync_bodies,
             humanoid::update_facing,
+            humanoid::update_knocked,
             humanoid::debug_body,
             inventory_ui::render_inventory_panel,
             inventory_ui::render_hands_panel,
@@ -217,6 +220,21 @@ fn main() {
             inventory_ui::hands_ui_click,
             inventory_ui::world_click,
             inventory_ui::action_menu_click,
+        )
+            .run_if(in_game),
+    );
+    // HUD (запросы владельца): верхняя панель, боковые кнопки, F5/F7-меню.
+    app.add_systems(
+        Update,
+        (
+            hud::spawn_hud,
+            hud::hud_hotkeys,
+            hud::hud_click,
+            hud::admin_player_click,
+            hud::render_spawn_menu,
+            hud::render_admin_menu,
+            hud::spawn_menu_input,
+            hud::mech_test_mode,
         )
             .run_if(in_game),
     );
@@ -241,6 +259,7 @@ fn main() {
         )
             .run_if(in_game),
     );
+    app.add_systems(Update, screenshot_test_mode);
     app.add_systems(
         Update,
         (
@@ -418,6 +437,7 @@ fn send_input(
     time: Res<Time>,
     player_entity: Res<PlayerEntity>,
     console: Res<console::Console>,
+    hud_state: Res<hud::HudState>,
     mut connected_elapsed: Local<f32>,
     mut state: Local<InputSendState>,
     connected: Query<(), With<Connected>>,
@@ -470,8 +490,16 @@ fn send_input(
     }
     state.elapsed = 0.0;
     state.last = movement;
+    // Бег (Shift) и боевой режим (F) — в том же сообщении ввода.
+    let running = input.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight])
+        || std::env::var_os("SSR_RUN_TEST").is_some();
+    let combat = hud_state.combat;
     for mut sender in senders.iter_mut() {
-        sender.send::<GameChannel>(ClientMessage::Input { movement });
+        sender.send::<GameChannel>(ClientMessage::Input {
+            movement,
+            running,
+            combat,
+        });
     }
 }
 
@@ -777,4 +805,36 @@ pub fn register_replication(app: &mut App) {
     app.component::<ssr_core::power::Consumer>().replicate();
     app.component::<ssr_core::power::Light>().replicate();
     app.component::<ssr_core::power::Powered>().replicate();
+    // Механики (лежачий, призрак, имя) — порядок как у сервера!
+    app.component::<ssr_core::mechanics::KnockedDown>()
+        .replicate();
+    app.component::<ssr_core::mechanics::Ghost>().replicate();
+    app.component::<ssr_core::mechanics::PlayerName>()
+        .replicate();
+}
+
+/// Тест-режим SSR_SCREENSHOT=<файл>: клиент сам сохраняет кадр окна (T6.3+).
+/// Внешние снимки окна (PrintWindow/CopyFromScreen) отдают устаревший кадр,
+/// если окно перекрыто — берём картинку прямо из рендера.
+fn screenshot_test_mode(mut commands: Commands, time: Res<Time>, mut state: Local<(f32, bool)>) {
+    let Ok(path) = std::env::var("SSR_SCREENSHOT") else {
+        return;
+    };
+    if state.1 {
+        return;
+    }
+    state.0 += time.delta_secs();
+    let delay: f32 = std::env::var("SSR_SCREENSHOT_DELAY")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(6.0);
+    if state.0 < delay {
+        return;
+    }
+    state.1 = true;
+    // Несколько кадров подряд: UI успевает отрисоваться к последнему.
+    commands
+        .spawn(bevy::render::view::screenshot::Screenshot::primary_window())
+        .observe(bevy::render::view::screenshot::save_to_disk(path.clone()));
+    tracing::info!(path, "screenshot requested");
 }

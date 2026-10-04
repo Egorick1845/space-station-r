@@ -174,6 +174,8 @@ pub fn load_requested_rsi(
 /// Структурные RSI, которые нужны в первом же кадре (комната, двери, ящики,
 /// проводка): остальное подгружается лениво по обращению (T5.3).
 pub const STARTUP_RSI: &[&str] = &[
+    // Призрак админа (полёт, механики владельца).
+    "Mobs/Ghosts/ghost_human.rsi",
     "Structures/Walls/solid.rsi",
     "Structures/Doors/Airlocks/Standard/basic.rsi",
     "Structures/Storage/Crates/generic.rsi",

@@ -163,6 +163,21 @@ pub fn toggle_settings_menu(
     }
 }
 
+/// Открывает меню настроек (кнопка HUD делает то же, что Esc).
+pub fn open_menu(
+    commands: &mut Commands,
+    settings: &Settings,
+    root: &Query<Entity, With<SettingsMenu>>,
+) {
+    let existing: Vec<Entity> = root.iter().collect();
+    for &entity in &existing {
+        commands.entity(entity).despawn();
+    }
+    if existing.is_empty() {
+        spawn_menu(commands, settings);
+    }
+}
+
 /// Строит окно настроек по центру экрана.
 fn spawn_menu(commands: &mut Commands, settings: &Settings) {
     let fullscreen = if settings.fullscreen {
@@ -193,11 +208,20 @@ fn spawn_menu(commands: &mut Commands, settings: &Settings) {
             BorderColor::from(Color::srgb(0.30, 0.30, 0.36)),
         ))
         .with_children(|panel| {
-            panel.spawn((
-                Text::new("Настройки"),
-                TextFont::from_font_size(18.0),
-                TextColor(Color::srgb(1.0, 0.75, 0.25)),
-            ));
+            panel
+                .spawn((
+                    Node {
+                        width: Val::Percent(100.0),
+                        padding: UiRect::axes(px(8), px(3)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgb(0.10, 0.10, 0.13)),
+                ))
+                .with_child((
+                    Text::new("Настройки"),
+                    TextFont::from_font_size(16.0),
+                    TextColor(Color::srgb(1.0, 0.75, 0.25)),
+                ));
             settings_row(
                 panel,
                 "Громкость",
@@ -262,12 +286,16 @@ fn settings_row(
     right: SettingsAction,
 ) {
     panel
-        .spawn(Node {
-            flex_direction: FlexDirection::Row,
-            align_items: AlignItems::Center,
-            column_gap: px(8),
-            ..default()
-        })
+        .spawn((
+            Node {
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                column_gap: px(8),
+                padding: UiRect::axes(px(6), px(2)),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.12, 0.12, 0.15, 0.7)),
+        ))
         .with_children(|row| {
             row.spawn((
                 Text::new(label.to_string()),

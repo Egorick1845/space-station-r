@@ -331,7 +331,7 @@ impl ItemSprites<'_, '_> {
 /// Размер клетки сетки и зазор (px) — общие для панелей рюкзака и ящика.
 pub const GRID_CELL: f32 = 36.0;
 /// Зазор между клетками сетки.
-pub const GRID_GAP: f32 = 3.0;
+pub const GRID_GAP: f32 = 1.0;
 
 /// Сетка инвентаря: относительный контейнер размером колонки×строки.
 pub fn grid_node() -> Node {
@@ -432,11 +432,21 @@ pub fn render_inventory_panel(
             BackgroundColor(Color::srgba(0.06, 0.06, 0.08, 0.72)),
         ))
         .with_children(|panel| {
-            panel.spawn((
-                Text::new("Рюкзак"),
-                TextFont::from_font_size(13.0),
-                TextColor(Color::srgb(0.88, 0.88, 0.90)),
-            ));
+            // Шапка окна как в SS14: тёмная полоса с названием.
+            panel
+                .spawn((
+                    Node {
+                        width: Val::Percent(100.0),
+                        padding: UiRect::axes(px(6), px(2)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgb(0.10, 0.10, 0.13)),
+                ))
+                .with_child((
+                    Text::new("Рюкзак"),
+                    TextFont::from_font_size(13.0),
+                    TextColor(Color::srgb(0.90, 0.90, 0.92)),
+                ));
             panel.spawn(grid_node()).with_children(|grid| {
                 // Пустые клетки (клик по ним — положить предмет из руки).
                 for index in 0..(INVENTORY_COLS * INVENTORY_ROWS) {

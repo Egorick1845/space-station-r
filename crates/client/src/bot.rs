@@ -144,7 +144,11 @@ fn bot_walk(
     state.4 = 0.0;
     stats.inputs += 1;
     for mut sender in senders.iter_mut() {
-        sender.send::<GameChannel>(ClientMessage::Input { movement: state.1 });
+        sender.send::<GameChannel>(ClientMessage::Input {
+            movement: state.1,
+            running: false,
+            combat: false,
+        });
     }
 }
 
