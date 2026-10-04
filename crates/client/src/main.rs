@@ -330,7 +330,7 @@ fn main() {
         (
             chat::spawn_chat,
             chat::render_chat,
-            chat::chat_input,
+            (chat::chat_input, chat::chat_channel_button),
             chat::chat_health_notices,
             chat::chat_test_mode,
             hud::spawn_hud,

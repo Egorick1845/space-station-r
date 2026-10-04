@@ -709,6 +709,15 @@ EntityStorageComponent.cs`), сеточного окна НЕТ (`StorageWindow`
   `notoFallback: true`); в bevy_text parley собран без фичи `system`, и
   `append_fallbacks(FallbackKey::new(Cyrl, None))` регистрируется (`true`), но
   рендер не меняется. Нужен свой стек шрифтов — отдельная задача.
+- **Каналы и префиксы как в `SharedChatSystem`**: `_` — LOOC, `[` — OOC; без
+  префикса сообщение уходит в канал, выбранный кнопкой-селектором (75 px,
+  `ChannelSelectorButton`, цвета `ChannelSelectColor`). Клик по кнопке
+  переключает OOC ⇄ LOOC.
+- **Коалесценция одинаковых сообщений** (`chat.coalesce_identical_messages` =
+  true, `ChatBox.OnMessageAdded`): одинаковые подряд строки того же канала
+  схлопываются, к тексту добавляется `×N` (в сборке —
+  `chat-system-repeated-message-counter`, размер `8 + min(N/6, 5)`).
+  Тест `identical_messages_coalesce_with_counter`.
 
 ### 8. Осталось по этому запросу
 
@@ -719,7 +728,7 @@ EntityStorageComponent.cs`), сеточного окна НЕТ (`StorageWindow`
   акценты, качество освещения/частиц, ширина вьюпорта) — у нас структура и
   6 реальных настроек.
 - Чат: нет ресайза (`ResizableChatBox`), попапов фильтра/селектора каналов,
-  подсветки слов, коалесценции одинаковых сообщений.
+  подсветки слов.
 - Шрифт Cozette: свой стек шрифтов (Cozette для латиницы + Noto для кириллицы).
 - Меню спавна: сущности спавнятся как предметы (`Item`), а не со своими
   компонентами (нужен конвертер компонентов, IMP.3/фаза 5).
