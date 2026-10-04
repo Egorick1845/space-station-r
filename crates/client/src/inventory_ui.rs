@@ -1032,37 +1032,6 @@ pub fn update_role_hud(
     }
 }
 
-/// Обновляет HUD здоровья из реплицированного Health (T4.1).
-pub fn update_health_hud(
-    own: Res<OwnPlayerEntity>,
-    healths: Query<&Health>,
-    mut texts: Query<(&mut Text, &mut TextColor), With<HealthHudText>>,
-) {
-    let Some(entity) = own.0 else {
-        return;
-    };
-    let Ok(health) = healths.get(entity) else {
-        return;
-    };
-    let value = format!("HP {}/{}", health.current, health.max);
-    let color = if health.current > 60 {
-        Color::srgb(0.55, 0.85, 0.55)
-    } else if health.current > 30 {
-        Color::srgb(0.92, 0.82, 0.35)
-    } else {
-        Color::srgb(0.92, 0.35, 0.32)
-    };
-    for (mut text, mut text_color) in &mut texts {
-        if text.0 != value {
-            text.0 = value.clone();
-            tracing::info!(hp = health.current, "own health changed");
-        }
-        if text_color.0 != color {
-            text_color.0 = color;
-        }
-    }
-}
-
 /// Меню действий: строится из ответа сервера, позиционируется у курсора.
 pub fn render_action_menu(
     mut commands: Commands,
