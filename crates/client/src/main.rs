@@ -928,44 +928,28 @@ pub fn fit_world_viewport(
     windows: Query<&Window>,
     mut camera: Single<(&mut Camera, &mut Projection), With<Camera2d>>,
 ) {
-    const VIRTUAL_W: f32 = 672.0; // 21 тайл × 32
+    // Высота кадра — 15 тайлов (480 единиц мира), как `ViewportUIController`
+    // в движке. Поля (letterbox) не оставляем: владелец просил, чтобы мир
+    // занимал экран целиком и никаких рамок не было ни на одном разрешении —
+    // по ширине видно больше тайлов при широком окне, это ожидаемо.
     const VIRTUAL_H: f32 = 480.0; // 15 тайлов × 32
     let Ok(window) = windows.single() else {
         return;
     };
     let (camera, projection) = &mut *camera;
-    let logical_w = window.width();
-    let logical_h = window.height();
-    let scale_factor = window.scale_factor();
-    // Точный letterbox-масштаб и snap к целому (допуск 64 px, как в SS14).
-    let s = (logical_w / VIRTUAL_W).min(logical_h / VIRTUAL_H);
-    let snapped = if s >= 1.0 {
-        let nearest = s.round().max(1.0);
-        if (s - nearest).abs() * VIRTUAL_W <= 64.0 {
-            nearest
-        } else {
-            s
-        }
-    } else {
-        s
-    };
-    let view_w = VIRTUAL_W * snapped;
-    let view_h = VIRTUAL_H * snapped;
-    let offset_x = ((logical_w - view_w) / 2.0).max(0.0);
-    let offset_y = ((logical_h - view_h) / 2.0).max(0.0);
-    let physical = |value: f32| (value * scale_factor).round() as u32;
-    camera.viewport = Some(bevy::camera::Viewport {
-        physical_position: UVec2::new(physical(offset_x), physical(offset_y)),
-        physical_size: UVec2::new(physical(view_w), physical(view_h)),
-        depth: 0.0..1.0,
-    });
-    // Орто-масштаб такой, что во вьюпорте видно ровно 672×480 единиц мира.
+    let logical_h = window.height().max(1.0);
+    // Вьюпорт — всё окно: камера рисует в него без отступов.
+    if camera.viewport.is_some() {
+        camera.viewport = None;
+        tracing::info!("world viewport: рамки убраны, мир на весь экран");
+    }
     let Projection::Orthographic(orthographic) = &mut **projection else {
         return;
     };
-    let scale = 1.0 / snapped;
-    if (orthographic.scale - scale).abs() > f32::EPSILON {
+    // Масштаб такой, что по высоте видно ровно 480 единиц мира (15 тайлов).
+    let scale = logical_h / VIRTUAL_H;
+    if (orthographic.scale - scale).abs() > 1e-4 {
         orthographic.scale = scale;
-        tracing::info!(scale, snapped, "world viewport updated (21x15)");
+        tracing::info!(scale, "world viewport updated (15 tiles tall, no letterbox)");
     }
 }
