@@ -126,6 +126,41 @@ pub fn setup_lighting(mut commands: Commands, mut images: ResMut<Assets<Image>>)
 
 /// Затухание света из `light_shared.swsl`: `s = clamp(sqrt(d²+1)/radius)`,
 /// `val = (1-s²)² / (1 + falloff·s)`.
+/// Видно ли тайл `to` из тайла `from`: суперпокрывающая линия Брезенхэма.
+/// Стена на пути перекрывает видимость (сам конечный тайл может быть стеной —
+/// его лицевая грань видна). Диагональный шаг требует свободных обеих
+/// ортогональных клеток — через стык двух стен под углом не видно, как и в
+/// геометрии окклюдеров движка.
+fn line_of_sight(from: (i32, i32), to: (i32, i32), solid: &impl Fn(i32, i32) -> bool) -> bool {
+    let (x0, y0) = from;
+    let (x1, y1) = to;
+    let (dx, dy) = ((x1 - x0).abs(), (y1 - y0).abs());
+    let (sx, sy) = (if x0 < x1 { 1 } else { -1 }, if y0 < y1 { 1 } else { -1 });
+    let mut err = dx - dy;
+    let (mut x, mut y) = (x0, y0);
+    while (x, y) != (x1, y1) {
+        let e2 = 2 * err;
+        if e2 > -dy && e2 < dx {
+            if solid(x + sx, y) || solid(x, y + sy) {
+                return false;
+            }
+            x += sx;
+            y += sy;
+            err += dx - dy;
+        } else if e2 > -dy {
+            x += sx;
+            err -= dy;
+        } else {
+            y += sy;
+            err += dx;
+        }
+        if (x, y) != (x1, y1) && solid(x, y) {
+            return false;
+        }
+    }
+    true
+}
+
 fn attenuation(dist: f32, radius: f32) -> f32 {
     if radius <= 0.0 {
         return 0.0;
@@ -256,32 +291,23 @@ pub fn update_lighting(
         }
     }
 
-    // 1) Видимость (туман войны): BFS от тайла игрока по нестенным клеткам;
-    //    стены, примыкающие к видимой зоне, сами видны (лицевая грань).
+    // 1) Видимость (туман войны): СТРОГАЯ прямая видимость из тайла игрока —
+    //    как теневой конус FOV в движке (`fov-lighting.swsl`): стена перекрывает
+    //    всё, что за ней. Раньше здесь была заливка BFS, и свет был виден за
+    //    углами стен — владелец: «не должно быть видно ничего за стеной».
     let mut fov = vec![0.0f32; (side * side) as usize];
     {
         let center = (WINDOW_RADIUS, WINDOW_RADIUS);
-        let mut queue = std::collections::VecDeque::new();
-        let index = (center.1 as u32 * side + center.0 as u32) as usize;
-        if !grid[index] {
-            fov[index] = 1.0;
-            queue.push_back(center);
-        }
-        while let Some((cx, cy)) = queue.pop_front() {
-            for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                let (nx, ny) = (cx + dx, cy + dy);
-                if nx < 0 || ny < 0 || nx >= side as i32 || ny >= side as i32 {
-                    continue;
-                }
-                let neighbor = (ny as u32 * side + nx as u32) as usize;
-                if grid[neighbor] {
-                    // Стена у видимой зоны — видна, но не проходима.
-                    fov[neighbor] = 1.0;
-                    continue;
-                }
-                if fov[neighbor] == 0.0 {
-                    fov[neighbor] = 1.0;
-                    queue.push_back((nx, ny));
+        let solid = |x: i32, y: i32| -> bool {
+            if x < 0 || y < 0 || x >= side as i32 || y >= side as i32 {
+                return true;
+            }
+            grid[(y as u32 * side + x as u32) as usize]
+        };
+        for ly in 0..side as i32 {
+            for lx in 0..side as i32 {
+                if line_of_sight(center, (lx, ly), &solid) {
+                    fov[(ly as u32 * side + lx as u32) as usize] = 1.0;
                 }
             }
         }
