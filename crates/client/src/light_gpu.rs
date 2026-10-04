@@ -119,3 +119,78 @@ fn light_texture() -> Image {
     image.sampler = bevy::image::ImageSampler::linear();
     image
 }
+
+/// Униформа конвейера — раскладка 1:1 с `Params` в `assets/shaders/light.wgsl`.
+///
+/// WGSL выравнивает `vec2<f32>` по 8 байт, поэтому после `tile` стоит явный
+/// паддинг, а порядок полей фиксирован. Тест `params_layout_matches_wgsl`
+/// держит размер и смещения: без него Rust и шейдер разошлись бы молча
+/// (шейдер читал бы чужие числа).
+#[repr(C)]
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LightParams {
+    pub tile: f32,
+    /// Выравнивание `camera` до 8 байт (правило раскладки WGSL).
+    pub _pad0: f32,
+    pub camera: [f32; 2],
+    pub light_count: u32,
+    pub wall_count: u32,
+    pub map_size: [f32; 2],
+    pub viewport: [f32; 2],
+    pub eye: [f32; 2],
+    pub fov_range: f32,
+    pub ambient: f32,
+    pub blur_radius: f32,
+    pub blur_boost: f32,
+    pub blur_dir: [f32; 2],
+}
+
+/// Источник света в раскладке `Light` из шейдера.
+#[repr(C)]
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct GpuLightUniform {
+    /// (x, y, radius, energy) — как `data` в WGSL.
+    pub data: [f32; 4],
+    /// (falloff, curve, 0, 0) — как `params`.
+    pub params: [f32; 4],
+    /// (r, g, b, 0) — как `color`.
+    pub color: [f32; 4],
+}
+
+/// Отрезок окклюдера в раскладке `Wall` из шейдера: (ax, ay, bx, by).
+#[repr(C)]
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct GpuWallUniform {
+    pub ab: [f32; 4],
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Раскладка униформы обязана совпадать с WGSL (`Params` в light.wgsl):
+    /// vec2 — по 8 байт, итого 72 байта.
+    #[test]
+    fn params_layout_matches_wgsl() {
+        assert_eq!(std::mem::size_of::<LightParams>(), 72, "размер Params");
+        assert_eq!(std::mem::offset_of!(LightParams, camera), 8);
+        assert_eq!(std::mem::offset_of!(LightParams, light_count), 16);
+        assert_eq!(std::mem::offset_of!(LightParams, wall_count), 20);
+        assert_eq!(std::mem::offset_of!(LightParams, map_size), 24);
+        assert_eq!(std::mem::offset_of!(LightParams, viewport), 32);
+        assert_eq!(std::mem::offset_of!(LightParams, eye), 40);
+        assert_eq!(std::mem::offset_of!(LightParams, fov_range), 48);
+        assert_eq!(std::mem::offset_of!(LightParams, blur_boost), 60);
+        assert_eq!(std::mem::offset_of!(LightParams, blur_dir), 64);
+    }
+
+    /// Источник и отрезок — массивы по 48 и 16 байт (`vec4<f32>` в WGSL).
+    #[test]
+    fn scene_uniforms_match_wgsl() {
+        assert_eq!(std::mem::size_of::<GpuLightUniform>(), 48);
+        assert_eq!(std::mem::size_of::<GpuWallUniform>(), 16);
+    }
+}
