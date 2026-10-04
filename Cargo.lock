@@ -8023,6 +8023,7 @@ dependencies = [
  "lightyear",
  "postcard",
  "serde",
+ "ssr-core",
 ]
 
 [[package]]

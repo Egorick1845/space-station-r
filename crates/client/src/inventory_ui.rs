@@ -701,8 +701,21 @@ pub fn render_hands_panel(
             node,
         ))
         .with_children(|bar| {
-            // Порядок как в HotbarGui.xaml: слот правой руки стоит на экране
-            // ЛЕВЕЕ левой, панели статуса — по краям (правая/левая).
+            // Порядок строго как в HotbarGui.xaml (слева направо):
+            // SecondHotbar (id, belt, back) → status → руки → status → MainHotbar
+            // (suitstorage, pocket1, pocket2). В руках правая стоит слева.
+            let clothing = own
+                .0
+                .and_then(|entity| clothings.get(entity).ok())
+                .cloned()
+                .unwrap_or_default();
+            for slot in [
+                ssr_core::clothing::ClothingSlot::Id,
+                ssr_core::clothing::ClothingSlot::Belt,
+                ssr_core::clothing::ClothingSlot::Back,
+            ] {
+                equip_slot(bar, &theme, &sprites, slot, &clothing);
+            }
             status_panel(
                 bar,
                 &theme,
@@ -1972,55 +1985,81 @@ pub fn render_character_panel(
             Interaction::default(),
             Node {
                 position_type: PositionType::Absolute,
-                left: px(10),
-                top: px(50.0),
+                left: px(5),
+                bottom: px(5),
                 width: px(cell * 3.0),
-                height: px(cell * 4.0),
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::End,
                 ..default()
             },
-            BackgroundColor(ui::GLASS_PANEL),
         ))
         .with_children(|window| {
-            for (slot, column, row) in layout {
-                let index = CHARACTER_SLOT_ORDER
-                    .iter()
-                    .position(|candidate| *candidate == slot)
-                    .unwrap_or(0);
-                let texture = theme
-                    .character_slots
-                    .get(index)
-                    .cloned()
-                    .unwrap_or_default();
-                let item = clothing.get(slot);
-                window
-                    .spawn((
-                        EquipSlotButton(slot),
-                        Button,
-                        ImageNode::new(texture),
-                        Node {
-                            position_type: PositionType::Absolute,
-                            left: px(column as f32 * cell),
-                            top: px(row as f32 * cell),
-                            width: px(cell),
-                            height: px(cell),
-                            align_items: AlignItems::Center,
-                            justify_content: JustifyContent::Center,
-                            ..default()
-                        },
-                    ))
-                    .with_children(|cell_node| {
-                        if let Some(sprite) = item.and_then(|bits| sprites.icon(bits)) {
-                            cell_node.spawn((
-                                icon_node(sprite),
-                                Node {
-                                    width: px(cell),
-                                    height: px(cell),
-                                    ..default()
-                                },
-                            ));
-                        }
-                    });
-            }
+            // Сетка слотов: три колонки по uiWindowPos шаблона человека.
+            window
+                .spawn((
+                    Node {
+                        width: px(cell * 3.0),
+                        height: px(cell * 4.0),
+                        ..default()
+                    },
+                    BackgroundColor(ui::GLASS_PANEL),
+                ))
+                .with_children(|grid| {
+                    for (slot, column, row) in layout {
+                        let index = CHARACTER_SLOT_ORDER
+                            .iter()
+                            .position(|candidate| *candidate == slot)
+                            .unwrap_or(0);
+                        let texture = theme
+                            .character_slots
+                            .get(index)
+                            .cloned()
+                            .unwrap_or_default();
+                        let item = clothing.get(slot);
+                        grid.spawn((
+                            EquipSlotButton(slot),
+                            Button,
+                            ImageNode::new(texture),
+                            Node {
+                                position_type: PositionType::Absolute,
+                                left: px(column as f32 * cell),
+                                top: px(row as f32 * cell),
+                                width: px(cell),
+                                height: px(cell),
+                                align_items: AlignItems::Center,
+                                justify_content: JustifyContent::Center,
+                                ..default()
+                            },
+                        ))
+                        .with_children(|cell_node| {
+                            if let Some(sprite) = item.and_then(|bits| sprites.icon(bits)) {
+                                cell_node.spawn((
+                                    icon_node(sprite),
+                                    Node {
+                                        width: px(cell),
+                                        height: px(cell),
+                                        ..default()
+                                    },
+                                ));
+                            }
+                        });
+                    }
+                });
+            window.spawn((
+                BackpackButton,
+                Button,
+                crate::hud::IconTint {
+                    normal: Color::WHITE,
+                    hovered: Color::srgb(0.92, 0.92, 0.96),
+                    pressed: Color::srgb(0.85, 0.85, 0.9),
+                },
+                ImageNode::new(theme.slot_toggle.clone()),
+                Node {
+                    width: px(cell),
+                    height: px(cell),
+                    ..default()
+                },
+            ));
         });
 }
 

@@ -373,27 +373,6 @@ pub fn spawn_hud(
                     });
             }
         });
-    // Кнопка окна инвентаря (`Slots/toggle`) — внизу слева, `BottomLeft` margin 5.
-    commands.spawn((
-        HudRoot,
-        crate::inventory_ui::BackpackButton,
-        Button,
-        crate::hud::IconTint {
-            normal: Color::WHITE,
-            hovered: Color::srgb(0.92, 0.92, 0.96),
-            pressed: Color::srgb(0.85, 0.85, 0.9),
-        },
-        ImageNode::new(theme.slot_toggle.clone()),
-        Node {
-            position_type: PositionType::Absolute,
-            left: px(5),
-            bottom: px(5),
-            width: px(64),
-            height: px(64),
-            ..default()
-        },
-    ));
-
     // Панель призрака: в SS14 стоит снизу по центру с отступом 80.
     commands
         .spawn((

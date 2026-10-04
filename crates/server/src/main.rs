@@ -19,13 +19,13 @@ use bevy::prelude::*;
 use lightyear::connection::server::Start;
 use lightyear::prelude::server::*;
 use lightyear::prelude::*;
-use ssr_core::atmosphere::{ChunkAtmosphere, Gas};
+use ssr_core::atmosphere::Gas;
 use ssr_core::clothing::{Clothing, ClothingSlot};
 use ssr_core::inventory::{
     Container, Hands, Health, HeldBy, Inventory, Item, ItemPosition, SLOT_ANY,
 };
 use ssr_core::mechanics::Sex;
-use ssr_core::mechanics::{Ghost, KNOCKDOWN_SECS, KnockedDown, PlayerName, RUN_SPEED_MULT};
+use ssr_core::mechanics::{Ghost, KNOCKDOWN_SECS, KnockedDown, RUN_SPEED_MULT};
 use ssr_core::power::{Cable, Consumer, Generator, Light, Powered};
 use ssr_core::roles::{Access, PlayerRole, RoleSet};
 use ssr_core::tiles::{MapFile, TileChunkData, TileType};
@@ -163,40 +163,9 @@ fn main() {
     app.add_observer(teleport_to_player);
     app.add_observer(on_link_connected);
     app.add_observer(on_link_disconnected);
-    // Регистрация реплицируемых компонентов — одинакова на сервере и клиенте (T1.3).
-    app.component::<PlayerPosition>().replicate();
-    // Чанки карты реплицируются с учётом интереса (T2.3).
-    app.component::<TileChunkData>().replicate();
-    // Двери: сервер-авторитарное состояние (T3.1).
-    app.component::<Door>().replicate();
-    // Инвентарь и предметы (T3.2). Порядок регистрации обязан совпадать с клиентом!
-    app.component::<Inventory>().replicate();
-    app.component::<Item>().replicate();
-    // Руки/здоровье/удержание (T3.3+). Тот же порядок, что у клиента!
-    app.component::<Hands>().replicate();
-    app.component::<Health>().replicate();
-    app.component::<HeldBy>().replicate();
-    // Контейнеры (T3.4). Тот же порядок, что у клиента!
-    app.component::<Container>().replicate();
-    app.component::<ItemPosition>().replicate();
-    app.component::<Clothing>().replicate();
-    app.component::<Sex>().replicate();
-    // Роли (T4.2). Тот же порядок, что у клиента!
-    app.component::<PlayerRole>().replicate();
-    // Расы (T5.3). Тот же порядок, что у клиента!
-    app.component::<Species>().replicate();
-    // Атмосфера (T4.3). Тот же порядок, что у клиента!
-    app.component::<ChunkAtmosphere>().replicate();
-    // Электрика (T4.4). Тот же порядок, что у клиента!
-    app.component::<Cable>().replicate();
-    app.component::<Generator>().replicate();
-    app.component::<Consumer>().replicate();
-    app.component::<Light>().replicate();
-    app.component::<Powered>().replicate();
-    // Механики (T-мех): лежачий и призрак. Тот же порядок, что у клиента!
-    app.component::<KnockedDown>().replicate();
-    app.component::<Ghost>().replicate();
-    app.component::<PlayerName>().replicate();
+    // Регистрация реплицируемых компонентов — общий список в ssr_protocol::net:
+    // порядок обязан совпадать с клиентом, иначе «Hit the end of buffer».
+    ssr_protocol::net::register_replication(&mut app);
     app.run();
 }
 

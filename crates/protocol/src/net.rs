@@ -8,6 +8,48 @@ use serde::{Deserialize, Serialize};
 
 use crate::{ClientMessage, ServerMessage};
 
+/// Регистрирует реплицируемые компоненты — И на сервере, И на клиенте.
+///
+/// Порядок `replicate()` в lightyear обязан совпадать на обеих сторонах: если
+/// компонент зарегистрирован только на сервере, клиент ловит
+/// `unable to apply update message ... Hit the end of buffer` и мир не грузится.
+/// Держать список в одном месте — единственный способ не разойтись (эту ошибку
+/// мы ловили трижды: Clothing, Sex и ранее).
+pub fn register_replication(app: &mut bevy_app::App) {
+    use ssr_core::atmosphere::ChunkAtmosphere;
+    use ssr_core::clothing::Clothing;
+    use ssr_core::inventory::{Container, Hands, Health, HeldBy, Inventory, Item, ItemPosition};
+    use ssr_core::mechanics::{Ghost, KnockedDown, PlayerName, Sex};
+    use ssr_core::power::{Cable, Consumer, Generator, Light, Powered};
+    use ssr_core::roles::PlayerRole;
+    use ssr_core::tiles::TileChunkData;
+    use ssr_core::{Door, PlayerPosition, Species};
+
+    app.component::<PlayerPosition>().replicate();
+    app.component::<TileChunkData>().replicate();
+    app.component::<Door>().replicate();
+    app.component::<Inventory>().replicate();
+    app.component::<Item>().replicate();
+    app.component::<Hands>().replicate();
+    app.component::<Health>().replicate();
+    app.component::<HeldBy>().replicate();
+    app.component::<Container>().replicate();
+    app.component::<ItemPosition>().replicate();
+    app.component::<Clothing>().replicate();
+    app.component::<Sex>().replicate();
+    app.component::<PlayerRole>().replicate();
+    app.component::<Species>().replicate();
+    app.component::<ChunkAtmosphere>().replicate();
+    app.component::<Cable>().replicate();
+    app.component::<Generator>().replicate();
+    app.component::<Consumer>().replicate();
+    app.component::<Light>().replicate();
+    app.component::<Powered>().replicate();
+    app.component::<KnockedDown>().replicate();
+    app.component::<Ghost>().replicate();
+    app.component::<PlayerName>().replicate();
+}
+
 /// Единственный канал игры: надёжный, упорядоченный (рукопожатие, ввод, дельты).
 pub struct GameChannel;
 

@@ -355,15 +355,14 @@ pub fn send_interact(
     Some(())
 }
 
-/// Обводка под курсором: у шлюзов и ящиков — рамка по тайлу, у предметов —
-/// контур по форме спрайта (как `SelectionOutline` в SS14: 8 копий спрайта
-/// со смещением на 1 px дают силуэт вместо квадрата).
+/// Обводка под курсором: у шлюзов — рамка по тайлу, у предметов — жёлтый контур
+/// по форме спрайта (как `SelectionOutline` в SS14: 8 копий спрайта со смещением
+/// на 1 px дают силуэт вместо квадрата). У ящиков обводки нет.
 #[allow(clippy::too_many_arguments)]
 pub fn hover_outline(
     windows: Query<&Window>,
     camera: Single<(&Camera, &GlobalTransform), With<Camera2d>>,
     doors: Query<&Door>,
-    containers: Query<&ssr_core::inventory::ItemPosition, With<ssr_core::inventory::Container>>,
     items: Query<(
         &ssr_core::inventory::Item,
         &ssr_core::inventory::ItemPosition,
@@ -405,16 +404,6 @@ pub fn hover_outline(
             );
         }
     }
-    for position in containers.iter() {
-        let point = Vec2::from_array(position.0);
-        if point.distance(world) <= 24.0 {
-            gizmos.rect_2d(
-                Isometry2d::from_translation(point),
-                Vec2::splat(DOOR_HALF * 2.0 + 4.0),
-                Color::srgb(1.0, 0.9, 0.35),
-            );
-        }
-    }
     // Предмет: контур по силуэту — копии спрайта со смещением под самим спрайтом.
     let hovered = items.iter().find(|(_, position, held)| {
         held.player == 0 && Vec2::from_array(position.0).distance(world) <= 24.0
@@ -431,7 +420,9 @@ pub fn hover_outline(
             layout: sprite.layout.clone(),
             index: sprite.index(0, 0),
         }),
-        color: Color::srgba(0.45, 1.0, 0.45, 0.85),
+        // Тот же жёлтый, что у рамки шлюза (владелец: «обводка предметов пусть
+        // будет жёлтой как вокруг шлюза»).
+        color: Color::srgba(1.0, 0.9, 0.35, 0.9),
         ..default()
     };
     commands

@@ -842,44 +842,12 @@ fn assets_file_path() -> String {
     "assets".into()
 }
 
-/// Регистрация реплицируемых компонентов клиента. Порядок обязан совпадать
-/// с сервером — иначе replicon паникует «FnsId should be registered first».
-/// Используется и обычным клиентом, и headless-ботом (T6.1).
+/// Регистрация реплицируемых компонентов — общий список (ssr_protocol::net).
+/// Так порядок не может разойтись с сервером: раньше он дублировался вручную,
+/// из-за чего мы трижды ловили «Hit the end of buffer». Используется и клиентом,
+/// и headless-ботом (T6.1).
 pub fn register_replication(app: &mut App) {
-    app.component::<PlayerPosition>().replicate();
-    app.component::<ssr_core::tiles::TileChunkData>()
-        .replicate();
-    app.component::<ssr_core::Door>().replicate();
-    app.component::<ssr_core::inventory::Inventory>()
-        .replicate();
-    app.component::<ssr_core::inventory::Item>().replicate();
-    app.component::<ssr_core::inventory::Hands>().replicate();
-    app.component::<ssr_core::inventory::Health>().replicate();
-    app.component::<ssr_core::inventory::HeldBy>().replicate();
-    app.component::<ssr_core::inventory::Container>()
-        .replicate();
-    app.component::<ssr_core::inventory::ItemPosition>()
-        .replicate();
-    // Одежда: порядок регистрации обязан совпадать с сервером (иначе репликация
-    // разъезжается и клиент ловит «Hit the end of buffer»).
-    app.component::<ssr_core::clothing::Clothing>().replicate();
-    // Пол: порядок регистрации совпадает с сервером (иначе «Hit the end of buffer»).
-    app.component::<ssr_core::mechanics::Sex>().replicate();
-    app.component::<ssr_core::roles::PlayerRole>().replicate();
-    app.component::<ssr_core::Species>().replicate();
-    app.component::<ssr_core::atmosphere::ChunkAtmosphere>()
-        .replicate();
-    app.component::<ssr_core::power::Cable>().replicate();
-    app.component::<ssr_core::power::Generator>().replicate();
-    app.component::<ssr_core::power::Consumer>().replicate();
-    app.component::<ssr_core::power::Light>().replicate();
-    app.component::<ssr_core::power::Powered>().replicate();
-    // Механики (лежачий, призрак, имя) — порядок как у сервера!
-    app.component::<ssr_core::mechanics::KnockedDown>()
-        .replicate();
-    app.component::<ssr_core::mechanics::Ghost>().replicate();
-    app.component::<ssr_core::mechanics::PlayerName>()
-        .replicate();
+    ssr_protocol::net::register_replication(app);
 }
 
 /// Тест-режим SSR_SCREENSHOT=<файл>: клиент сам сохраняет кадр окна (T6.3+).
