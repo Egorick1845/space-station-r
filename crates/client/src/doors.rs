@@ -419,14 +419,17 @@ pub fn hover_outline(
         return;
     };
     let Some(sprite) = sprites.icon_by_name(&item.name) else {
+        tracing::debug!(name = %item.name, "outline: no sprite");
         return;
     };
     let index = sprite.index(0, 0);
     let key = format!("{}#{index}", item.name);
     if !masks.contains_key(&key) {
         let Some(mask) = build_mask(&mut images, &layouts, sprite, index) else {
+            tracing::debug!(%key, "outline: mask build failed");
             return;
         };
+        tracing::debug!(%key, "outline: mask built");
         masks.insert(key.clone(), mask);
     }
     let Some(mask) = masks.get(&key).cloned() else {
