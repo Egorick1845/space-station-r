@@ -9,7 +9,7 @@ use lightyear::prelude::client::*;
 use lightyear::prelude::*;
 use ssr_core::PlayerPosition;
 use ssr_core::inventory::{
-    Container, Hands, Health, HeldBy, INVENTORY_COLS, INVENTORY_ROWS, Inventory, Item, SLOT_ANY,
+    Container, Hands, HeldBy, INVENTORY_COLS, INVENTORY_ROWS, Inventory, Item, SLOT_ANY,
 };
 use ssr_core::roles::PlayerRole;
 use ssr_protocol::net::GameChannel;
