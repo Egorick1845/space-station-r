@@ -679,6 +679,14 @@ pub fn render_alerts_column(
                 )
                 .and_then(|gas| ssr_core::atmosphere::pressure_alerts::alert_for(gas.pressure))
         });
+    // Тест-режим SSR_PRESSURE_TEST=1: рисует иконку давления принудительно —
+    // серверный вакуум-тест опустошает другую точку спавна, и без этого
+    // проверить саму иконку (RSI, состояние) нечем.
+    let pressure_alert = if std::env::var_os("SSR_PRESSURE_TEST").is_some() {
+        Some((false, 2))
+    } else {
+        pressure_alert
+    };
     let signature = (level_health, level_stamina, pressure_alert);
     if last.as_ref() == Some(&signature) {
         return;
