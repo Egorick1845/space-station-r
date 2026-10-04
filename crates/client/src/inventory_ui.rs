@@ -1256,6 +1256,37 @@ pub fn world_click(
         menu.options.clear();
     }
 
+    // Ctrl+ЛКМ по крупному предмету или ящику — тянуть его за собой
+    // (в SS14 это Ctrl+клик по объекту: `PullMessage` из Grab-интента).
+    if keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]) {
+        const HALF: f32 = ssr_core::tiles::TILE_PX as f32 / 2.0;
+        let target = items
+            .iter()
+            .find(|(_, _, position, held)| {
+                let point = Vec2::from_array(position.0);
+                held.player == 0
+                    && (point.x - world.x).abs() <= HALF
+                    && (point.y - world.y).abs() <= HALF
+            })
+            .map(|(entity, _, _, _)| entity)
+            .or_else(|| container_under_cursor(&containers, world));
+        if let Some(target) = target
+            && let Some(bits) = entity_map
+                .as_deref()
+                .and_then(|map| map.to_server().get(&target))
+                .copied()
+                .map(Entity::to_bits)
+        {
+            for mut sender in senders.iter_mut() {
+                sender.send::<GameChannel>(ClientMessage::PerformAction {
+                    action: ssr_protocol::ActionKind::Pull { target: bits },
+                });
+            }
+            tracing::info!(target = bits, "pull toggled (ctrl+click)");
+            return;
+        }
+    }
+
     let active_item = own_hands(&own, &hands).and_then(|h| h.active_item());
 
     // 1) Игрок под курсором: атака; с Ctrl — передать предмет из руки.

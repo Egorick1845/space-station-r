@@ -117,8 +117,107 @@ pub fn copy_entity_key(
     tracing::info!(item = %item.name, "copy: режим размещения копии");
 }
 
+/// Тест-режим SSR_PULL_TEST=1: тянет ящик за собой без ручного ввода —
+/// телепортируется к ближайшему ящику, шлёт верб «Тянуть», затем отходит
+/// телепортом на 2 тайла; ящик обязан подтянуться следом (сустав сборки).
+/// Критерий в логе: позиция ящика изменилась после отхода.
+pub fn pull_test_mode(
+    time: Res<Time>,
+    mut state: Local<(f32, u8, Option<[f32; 2]>)>,
+    mut senders: Query<&mut MessageSender<ClientMessage>, With<Connected>>,
+    entity_map: Option<Res<ServerEntityMap>>,
+    containers: Query<(Entity, &ssr_core::inventory::Container, &ItemPosition)>,
+    own: Res<crate::inventory_ui::OwnPlayerEntity>,
+    positions: Query<&ssr_core::PlayerPosition>,
+) {
+    if std::env::var_os("SSR_PULL_TEST").is_none() {
+        return;
+    }
+    state.0 += time.delta_secs();
+    let elapsed = state.0;
+    let player_position = own
+        .0
+        .and_then(|entity| positions.get(entity).ok())
+        .map(|position| position.0);
+    if state.1 == 0 && elapsed >= 3.0 {
+        let Some((_, _, position)) = containers.iter().next() else {
+            tracing::warn!("pull-test: ящиков нет");
+            return;
+        };
+        state.1 = 1;
+        state.2 = Some(position.0);
+        tracing::info!(
+            crate_x = position.0[0],
+            crate_y = position.0[1],
+            "pull-test: ящик найден"
+        );
+        // Встаём на тайл левее ящика.
+        for mut sender in senders.iter_mut() {
+            sender.send::<GameChannel>(ClientMessage::Admin {
+                command: format!("tp {:.0} {:.0}", position.0[0] - 32.0, position.0[1]),
+            });
+        }
+    }
+    if state.1 == 1 && elapsed >= 5.0 {
+        state.1 = 2;
+        let Some((entity, _, _)) = containers.iter().next() else {
+            return;
+        };
+        let Some(bits) = entity_map
+            .as_deref()
+            .and_then(|map| map.to_server().get(&entity))
+            .copied()
+            .map(Entity::to_bits)
+        else {
+            tracing::warn!("pull-test: нет серверной связи сущности");
+            return;
+        };
+        for mut sender in senders.iter_mut() {
+            sender.send::<GameChannel>(ClientMessage::PerformAction {
+                action: ssr_protocol::ActionKind::Pull { target: bits },
+            });
+        }
+        tracing::info!(target = bits, "pull-test: захват отправлен");
+    }
+    if state.1 == 2 && elapsed >= 7.0 {
+        state.1 = 3;
+        if let Some(position) = player_position {
+            // Уходим дальше В ТУ ЖЕ сторону (на 3 тайла влево): расстояние до
+            // ящика станет 4 тайла — больше запаса «верёвки» (0.15 м), значит
+            // сустав обязан подтянуть ящик за игроком на длину захвата.
+            for mut sender in senders.iter_mut() {
+                sender.send::<GameChannel>(ClientMessage::Admin {
+                    command: format!("tp {:.0} {:.0}", position[0] - 96.0, position[1]),
+                });
+            }
+            tracing::info!(x = position[0] - 96.0, "pull-test: отошёл на 3 тайла");
+        }
+    }
+    if state.1 == 3 && elapsed >= 9.0 {
+        state.1 = 4;
+        let Some((_, _, position)) = containers.iter().next() else {
+            return;
+        };
+        match state.2 {
+            Some(before) => {
+                let moved = (position.0[0] - before[0]).abs() + (position.0[1] - before[1]).abs();
+                tracing::info!(
+                    before_x = before[0],
+                    before_y = before[1],
+                    after_x = position.0[0],
+                    after_y = position.0[1],
+                    moved,
+                    "pull-test: итог (ящик должен был сдвинуться)"
+                );
+            }
+            None => tracing::warn!("pull-test: не было стартовой позиции"),
+        }
+    }
+}
+
 /// Подбор предмета с пола кликом мыши (как в SS14): ЛКМ по предмету под
 /// курсором. Клики по интерфейсу (кнопки, поля) мир не трогают.
+#[allow(clippy::too_many_arguments)]
 pub fn floor_item_click(
     mouse: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window>,

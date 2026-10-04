@@ -384,6 +384,7 @@ fn main() {
             world_items::copy_entity_key,
             world_items::pickup_test_mode,
             world_items::copy_test_mode,
+            world_items::pull_test_mode,
         )
             .run_if(in_game),
     );

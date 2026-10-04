@@ -138,6 +138,8 @@ fn main() {
             // Урон применяется сразу после разбора очереди действий (T4.1).
             (process_actions, apply_damage, respawn_dead).chain(),
             movement,
+            // Тянуть за собой (Pull): цель идёт за игроком после движения.
+            pull_follow,
             sync_replicated_position,
             update_client_rooms,
             sync_item_rooms,
@@ -2597,6 +2599,21 @@ fn handle_client_messages(
 #[derive(Component, Default)]
 struct MoveVel(Vec2);
 
+/// Игрок тянет сущность за собой (верб «Тянуть»): в сборке это
+/// `PullerComponent.Pulling` плюс distance-сустав до цели.
+#[derive(Component)]
+struct Pulling {
+    target: Entity,
+    /// Длина «верёвки»: расстояние между центрами в момент захвата.
+    length: f32,
+}
+
+/// Эту сущность тянут (`PullableComponent.Puller`).
+#[derive(Component)]
+struct PulledBy {
+    puller: Entity,
+}
+
 /// Движение по модели SS14 (`SharedMoverController`): friction → accelerate.
 /// Спринт включён по умолчанию (4.5 м/с), Shift = ходьба 2.5 м/с; разгон
 /// 20 м/с², торможение почти мгновенное (25/с). Это убирает рывки на сервере,
@@ -2611,8 +2628,17 @@ fn movement(
     let dt = time.delta_secs().min(0.1);
     clock.seconds += dt;
     let now = clock.seconds;
-    for (player, input, mut velocity, mut move_vel, knocked, stamina, sprinting_flag, health) in
-        players.iter_mut()
+    for (
+        player,
+        input,
+        mut velocity,
+        mut move_vel,
+        knocked,
+        stamina,
+        sprinting_flag,
+        health,
+        pulling,
+    ) in players.iter_mut()
     {
         // Лежачего не двигаем (падение/стан, T-мех).
         if knocked.is_some() {
@@ -2670,6 +2696,12 @@ fn movement(
             } else {
                 1.0
             }
+            // Тянуть тяжело и ходить, и бежать: ×0.95 (`PullerComponent`).
+            * if pulling.is_some() {
+                ssr_core::pull::PULL_SPEED_MODIFIER
+            } else {
+                1.0
+            }
             * damage_mult;
         // Quake: friction (при движении клампится до accel = 20/с), затем accelerate.
         let friction = if wish != Vec2::ZERO {
@@ -2685,6 +2717,46 @@ fn movement(
             move_vel.0 += wish * accel_speed;
         }
         velocity.0 = move_vel.0;
+    }
+}
+
+/// Ведёт тянумую сущность за игроком (`PullingSystem` сборки): сустав длиной
+/// `length` с запасом 0.15 м — внутри диапазона объект стоит, за границей
+/// подтягивается. Разрыв: стан тянущего, пропажа цели, слишком большое
+/// расхождение (телепорт).
+fn pull_follow(
+    mut commands: Commands,
+    mut pullers: Query<(Entity, &mut Pulling, &PlayerPosition, Option<&KnockedDown>)>,
+    mut targets: Query<(&mut ItemPosition, Option<&mut Position>), With<PulledBy>>,
+) {
+    for (player, pulling, player_position, knocked) in pullers.iter_mut() {
+        let Ok((mut item_position, body)) = targets.get_mut(pulling.target) else {
+            commands.entity(player).remove::<Pulling>();
+            continue;
+        };
+        if knocked.is_some() {
+            commands.entity(pulling.target).remove::<PulledBy>();
+            commands.entity(player).remove::<Pulling>();
+            continue;
+        }
+        let player_position = Vec2::from_array(player_position.0);
+        let target_position = Vec2::from_array(item_position.0);
+        let diff = player_position - target_position;
+        let distance = diff.length();
+        if distance > ssr_core::pull::PULL_BREAK_UNITS {
+            commands.entity(pulling.target).remove::<PulledBy>();
+            commands.entity(player).remove::<Pulling>();
+            continue;
+        }
+        let limit = pulling.length + ssr_core::pull::PULL_SLACK_UNITS;
+        if distance > limit {
+            let direction = diff / distance.max(1e-4);
+            let next = player_position - direction * pulling.length;
+            item_position.0 = [next.x, next.y];
+            if let Some(mut body) = body {
+                body.0 = Vector::new(next.x, next.y);
+            }
+        }
     }
 }
 
@@ -2859,6 +2931,8 @@ struct ActionQueries<'w, 's> {
     healths: Query<'w, 's, &'static Health>,
     access: Query<'w, 's, &'static Access>,
     powered: Query<'w, 's, &'static Powered>,
+    pulling: Query<'w, 's, &'static Pulling>,
+    pulled_by: Query<'w, 's, &'static PulledBy>,
     atmospheres: Res<'w, Atmospheres>,
     catalogs: Res<'w, ContentCatalog>,
 }
@@ -2888,6 +2962,7 @@ type MovingPlayers<'w, 's> = Query<
         Option<&'static mut ssr_core::stamina::Stamina>,
         Option<&'static Sprinting>,
         Option<&'static Health>,
+        Option<&'static Pulling>,
     ),
 >;
 
@@ -2995,6 +3070,29 @@ fn process_actions(
                                 action: ActionKind::Pickup { item: entity },
                             });
                         }
+                        // Тянуть за собой можно крупное (ящики и предметы от
+                        // 2×2): в сборке это `PullableComponent`. Мелочь в руке.
+                        let pullable = container_positions.get(target).is_ok()
+                            && (containers.get(target).is_ok()
+                                || items
+                                    .get(target)
+                                    .map(|item| {
+                                        ssr_core::pull::is_pullable(
+                                            world.catalogs.items.size_of(&item.name),
+                                        )
+                                    })
+                                    .unwrap_or(false));
+                        if pullable {
+                            let currently = world
+                                .pulling
+                                .get(player)
+                                .ok()
+                                .is_some_and(|pulling| pulling.target == target);
+                            options.push(ActionOption {
+                                label: if currently { "Отпустить" } else { "Тянуть" }.into(),
+                                action: ActionKind::Pull { target: entity },
+                            });
+                        }
                         if let Ok(door) = doors.get(target)
                             && has_door_access(&world.access, player, door)
                         {
@@ -3055,6 +3153,53 @@ fn process_actions(
             }
         };
         match action {
+            // Верб «Тянуть»/«Отпустить» (Pull): цель следует за игроком на
+            // длине «верёвки» — как distance-сустав в `PullingSystem` сборки.
+            ActionKind::Pull { target } => {
+                let Some(entity) = Entity::try_from_bits(target) else {
+                    continue;
+                };
+                // Повторное действие по той же цели — отпустить.
+                if world
+                    .pulling
+                    .get(player)
+                    .ok()
+                    .is_some_and(|pulling| pulling.target == entity)
+                {
+                    commands.entity(entity).remove::<PulledBy>();
+                    commands.entity(player).remove::<Pulling>();
+                    tracing::info!(?player, ?entity, "pull released (verb)");
+                    continue;
+                }
+                // Тянул что-то другое — прежнюю цель отпускаем.
+                if let Ok(pulling) = world.pulling.get(player) {
+                    commands.entity(pulling.target).remove::<PulledBy>();
+                }
+                let (Ok(target_position), Ok(player_position)) =
+                    (container_positions.get(entity), positions.get(player))
+                else {
+                    continue;
+                };
+                let diff = Vec2::from_array(target_position.0)
+                    - Vec2::from_array(player_position.0);
+                let distance = diff.length();
+                if distance > INTERACT_RANGE + TILE_SIZE {
+                    tracing::warn!(?player, ?entity, "pull: too far");
+                    continue;
+                }
+                // Цель уже кто-то тянет — прежний тянущий отпускает (перехват
+                // в сборке разрешён, `TryStartPull` меняет владельца).
+                if let Ok(previous) = world.pulled_by.get(entity) {
+                    commands.entity(previous.puller).remove::<Pulling>();
+                }
+                commands.entity(entity).insert(PulledBy { puller: player });
+                commands.entity(player).insert(Pulling {
+                    target: entity,
+                    length: distance.max(ssr_core::pull::PULL_MIN_LENGTH_UNITS),
+                });
+                tracing::info!(?player, ?entity, distance, "pull started");
+                continue;
+            }
             // Верб «Осмотреть»: описание объекта, как у очереди Examine.
             ActionKind::Examine { entity } => {
                 let text = describe_target(

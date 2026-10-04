@@ -15,6 +15,7 @@ pub mod inventory;
 pub mod items;
 pub mod light;
 pub mod mechanics;
+pub mod pull;
 pub mod occluders;
 pub mod power;
 pub mod prototypes;

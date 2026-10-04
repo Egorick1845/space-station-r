@@ -99,20 +99,32 @@ pub fn spawn_crate_visuals(
     }
 }
 
-/// Меняет крышку при открытии/закрытии и убирает осиротевшие визуалы.
+/// Меняет крышку при открытии/закрытии, ведёт визуал за позицией (ящик можно
+/// тянуть за собой) и убирает осиротевшие визуалы.
 pub fn update_crate_visuals(
     mut commands: Commands,
     registry: Res<RsiRegistry>,
     containers: Query<&Container>,
-    visuals: Query<(Entity, &CrateVisual)>,
+    positions: Query<&ItemPosition>,
+    mut visuals: Query<(Entity, &CrateVisual, &mut Transform)>,
     mut lids: Query<(&CrateLid, &mut Sprite)>,
 ) {
     let (Some(closed), Some(open)) = (registry.get(CRATE_CLOSED), registry.get(CRATE_OPEN)) else {
         return;
     };
-    for (visual_entity, visual) in visuals.iter() {
+    for (visual_entity, visual, mut transform) in visuals.iter_mut() {
         if containers.get(visual.container).is_err() {
             commands.entity(visual_entity).despawn();
+            continue;
+        }
+        // Тащат за собой (Pull) — спрайт идёт за реплицированной позицией.
+        if let Ok(position) = positions.get(visual.container) {
+            let target = Vec2::from_array(position.0);
+            let current = transform.translation.truncate();
+            if current != target {
+                transform.translation.x = target.x;
+                transform.translation.y = target.y;
+            }
         }
     }
     for (lid, mut sprite) in lids.iter_mut() {
