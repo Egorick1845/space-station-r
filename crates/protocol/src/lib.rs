@@ -277,15 +277,21 @@ pub enum ServerMessage {
     },
 }
 
-/// Канал чата (цвета — как в `ChatUIController` SS14).
+/// Канал чата. Цвета — `ChatChannelExtensions.TextColor` сборки
+/// (`Content.Shared/Chat/ChatChannelExtensions.cs`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChatChannel {
     /// Общий чат (OOC) — видят все.
     Ooc,
     /// Локальный чат (LOOC) — видят только рядом стоящие.
     Looc,
-    /// Системное сообщение сервера.
+    /// Системное сообщение сервера (`ChatChannel.Server` — Orange).
     System,
+    /// Чат мёртвых (`ChatChannel.Dead`, MediumPurple) — пишут только
+    /// призраки, читают призраки и админы (`GetDeadChatClients`).
+    Dead,
+    /// Админ-чат (`ChatChannel.AdminChat`, HotPink) — только для админов.
+    AdminChat,
 }
 
 /// Сущность в снимке мира.

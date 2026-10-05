@@ -1267,6 +1267,9 @@ pub fn world_click(
         &ssr_core::inventory::ItemPosition,
         &ssr_core::inventory::HeldBy,
     )>,
+    // Курсор над UI (чат, панели, кнопки) — клик принадлежит интерфейсу,
+    // как в SS14: раньше клик по чату одновременно бил/подбирал в мире.
+    ui: Query<&Interaction, With<Button>>,
     mut menu: ResMut<ActionMenu>,
     mut senders: Query<&mut MessageSender<ClientMessage>, With<Connected>>,
 ) {
@@ -1276,6 +1279,13 @@ pub fn world_click(
     let Some(cursor) = window.cursor_position() else {
         return;
     };
+    // Клик по интерфейсу принадлежит UI (строки списка, кнопки, чат).
+    if ui
+        .iter()
+        .any(|interaction| *interaction != Interaction::None)
+    {
+        return;
+    }
     let (camera, camera_transform) = *camera;
     let Ok(world) = camera.viewport_to_world_2d(camera_transform, cursor) else {
         return;

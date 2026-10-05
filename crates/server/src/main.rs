@@ -1982,6 +1982,24 @@ fn item_size_of(
 
 /// Обработчик всех сообщений клиентов: одна точка приёма (MessageReceiver
 /// осушается `receive()`), поэтому аргументов много.
+/// Прямое системное сообщение одному клиенту (отказ в канале чата и т.п.):
+/// в сборке ответ приходит `ChatMessageToOne` с `ChatChannel.Server`.
+fn send_system_to(
+    link_entity: Entity,
+    senders: &mut Query<(Entity, &mut MessageSender<ServerMessage>), With<Connected>>,
+    text: &str,
+) {
+    for (link, mut sender) in senders.iter_mut() {
+        if link == link_entity {
+            sender.send::<GameChannel>(ServerMessage::Chat {
+                channel: ChatChannel::System,
+                from: String::new(),
+                text: text.to_string(),
+            });
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_client_messages(
     mut commands: Commands,
@@ -2702,27 +2720,61 @@ fn handle_client_messages(
                         continue;
                     }
                     aux.cooldowns.0.insert(player.to_bits(), now);
+                    // Права каналов из сборки (`ChatSystem.cs`): чат мёртвых
+                    // пишут только призраки (SendDeadChat), админ-чат — только
+                    // админы (`ChatManager.SendAdminChat`). Отказ — прямое
+                    // системное сообщение этому клиенту.
+                    if channel == ChatChannel::Dead && sprint_state.ghosts.get(player).is_err() {
+                        send_system_to(
+                            link_entity,
+                            &mut senders,
+                            "Чат мёртвых доступен только призракам",
+                        );
+                        continue;
+                    }
+                    if channel == ChatChannel::AdminChat && !is_admin(&name) {
+                        send_system_to(
+                            link_entity,
+                            &mut senders,
+                            "Админ-чат доступен только администрации",
+                        );
+                        continue;
+                    }
                     let from = positions.get(player).map(|p| p.0).unwrap_or_default();
                     let mut recipients = 0;
                     for (link, mut sender) in senders.iter_mut() {
-                        // LOOC слышат только те, кто рядом; OOC — все.
-                        if channel == ChatChannel::Looc {
-                            let Some(target) = players
-                                .entries
-                                .iter()
-                                .find(|entry| entry.link == link)
-                                .map(|entry| entry.player)
-                            else {
-                                continue;
-                            };
-                            let Ok(target_position) = positions.get(target) else {
-                                continue;
-                            };
-                            let dx = target_position.0[0] - from[0];
-                            let dy = target_position.0[1] - from[1];
-                            if (dx * dx + dy * dy).sqrt() > CHAT_LOCAL_RANGE {
-                                continue;
+                        let entry = players
+                            .entries
+                            .iter()
+                            .find(|entry| entry.link == link);
+                        // Адресация из сборки: LOOC слышат только рядом (OOC —
+                        // все), чат мёртвых — призраки и админы
+                        // (`GetDeadChatClients`), админ-чат — только админы.
+                        let audible = match channel {
+                            ChatChannel::Looc => {
+                                let Some(target) = entry.map(|entry| entry.player) else {
+                                    continue;
+                                };
+                                let Ok(target_position) = positions.get(target) else {
+                                    continue;
+                                };
+                                let dx = target_position.0[0] - from[0];
+                                let dy = target_position.0[1] - from[1];
+                                (dx * dx + dy * dy).sqrt() <= CHAT_LOCAL_RANGE
                             }
+                            ChatChannel::Dead => entry
+                                .map(|entry| {
+                                    sprint_state.ghosts.get(entry.player).is_ok()
+                                        || is_admin(&entry.name)
+                                })
+                                .unwrap_or(false),
+                            ChatChannel::AdminChat => entry
+                                .map(|entry| is_admin(&entry.name))
+                                .unwrap_or(false),
+                            _ => true,
+                        };
+                        if !audible {
+                            continue;
                         }
                         sender.send::<GameChannel>(ServerMessage::Chat {
                             channel,

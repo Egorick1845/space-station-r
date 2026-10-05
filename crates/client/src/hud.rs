@@ -626,6 +626,7 @@ pub(crate) fn cursor_world(
 /// Действие по E: открыть ближайшую дверь или ящик под курсором; если рядом
 /// ничего нет — применить предмет из активной руки к тайлу (как в SS14).
 /// Подбор предметов с пола — кликом мыши (SS14), не на E.
+#[allow(clippy::too_many_arguments)]
 fn send_interact(
     senders: &mut Query<&mut MessageSender<ClientMessage>, With<Connected>>,
     world: Vec2,
@@ -637,32 +638,73 @@ fn send_interact(
         (Entity, &ssr_core::inventory::ItemPosition),
         With<ssr_core::inventory::Container>,
     >,
+    items: &Query<
+        (
+            Entity,
+            &ssr_core::inventory::ItemPosition,
+            &ssr_core::inventory::HeldBy,
+        ),
+        With<ssr_core::inventory::Item>,
+    >,
 ) {
-    let mut nearest: Option<(f32, Entity)> = None;
+    // Цель E (`ActivateItemInWorld` в сборке): сущность ПОД КУРСОРОМ — дверь,
+    // ящик или предмет на полу. Ищем ближайшую к курсору в пределах тайла
+    // (центры в 24 юнитах покрывают свой тайл целиком).
+    enum Target {
+        /// Дверь или ящик: отправляем `Interact`.
+        Use(Entity),
+        /// Предмет на полу: верб «Взять» (`Pickup`), как E с пустой рукой в SS14.
+        Pickup(Entity),
+    }
+    let mut nearest: Option<(f32, Target)> = None;
+    let mut consider = |distance: f32, target: Target| {
+        if distance <= 24.0 && nearest.as_ref().is_none_or(|(best, _)| distance < *best) {
+            nearest = Some((distance, target));
+        }
+    };
     for (entity, door) in doors.iter() {
         let distance = Vec2::from_array(door.position).distance(world);
-        if distance <= 24.0 && nearest.is_none_or(|(best, _)| distance < best) {
-            nearest = Some((distance, entity));
-        }
+        consider(distance, Target::Use(entity));
     }
     for (entity, position) in containers.iter() {
         let distance = Vec2::from_array(position.0).distance(world);
-        if distance <= 24.0 && nearest.is_none_or(|(best, _)| distance < best) {
-            nearest = Some((distance, entity));
+        consider(distance, Target::Use(entity));
+    }
+    for (entity, position, held) in items.iter() {
+        if held.player != 0 {
+            continue; // предмет в руках/инвентаре — не на полу
         }
+        let distance = Vec2::from_array(position.0).distance(world);
+        consider(distance, Target::Pickup(entity));
     }
     let tx = (world.x / 32.0).floor() as i32;
     let ty = (world.y / 32.0).floor() as i32;
-    // Объект рядом: клиентская сущность → серверные bits → Interact.
+    // Объект рядом: клиентская сущность → серверные bits → Interact/Pickup.
     if let Some((_, target)) = nearest
         && let Some(map) = entity_map
-        && let Some(server_entity) = map.to_server().get(&target)
     {
-        let bits = server_entity.to_bits();
-        for mut sender in senders.iter_mut() {
-            sender.send::<GameChannel>(ClientMessage::Interact { entity: bits });
+        match target {
+            Target::Use(entity) => {
+                if let Some(server_entity) = map.to_server().get(&entity) {
+                    let bits = server_entity.to_bits();
+                    for mut sender in senders.iter_mut() {
+                        sender.send::<GameChannel>(ClientMessage::Interact { entity: bits });
+                    }
+                    return;
+                }
+            }
+            Target::Pickup(entity) => {
+                if let Some(server_entity) = map.to_server().get(&entity) {
+                    let bits = server_entity.to_bits();
+                    for mut sender in senders.iter_mut() {
+                        sender.send::<GameChannel>(ClientMessage::PerformAction {
+                            action: ssr_protocol::ActionKind::Pickup { item: bits },
+                        });
+                    }
+                    return;
+                }
+            }
         }
-        return;
     }
     // Иначе — предмет из активной руки к тайлу.
     let item = own
@@ -956,6 +998,14 @@ pub fn hud_hotkeys(
     entity_map: Option<Res<ServerEntityMap>>,
     own: Res<OwnPlayerEntity>,
     hands: Query<&ssr_core::inventory::Hands>,
+    items: Query<
+        (
+            Entity,
+            &ssr_core::inventory::ItemPosition,
+            &ssr_core::inventory::HeldBy,
+        ),
+        With<ssr_core::inventory::Item>,
+    >,
     mut uis: Query<&mut crate::inventory_ui::InventoryUi>,
 ) {
     // Текст набирается в консоли или чате — горячие клавиши мира не работают.
@@ -986,8 +1036,9 @@ pub fn hud_hotkeys(
             sender.send::<GameChannel>(ClientMessage::DropHand);
         }
     }
-    // E — действие: дверь/ящик под курсором открыть, иначе применить предмет
-    // из активной руки к тайлу (как в SS14). Shift+E — осмотр.
+    // E — действие: дверь/ящик/предмет на полу под курсором; иначе применить
+    // предмет из активной руки к тайлу (как `ActivateItemInWorld` в SS14).
+    // Shift+E — осмотр.
     if keys.just_pressed(KeyCode::KeyE)
         && let Some(world) = cursor_world(&windows, &camera)
     {
@@ -1003,6 +1054,7 @@ pub fn hud_hotkeys(
                 &hands,
                 &doors,
                 &containers,
+                &items,
             );
         }
     }
