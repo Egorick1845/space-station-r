@@ -4286,8 +4286,44 @@ fn respawn_dead(
     mut commands: Commands,
     mut death_events: MessageReader<DeathEvent>,
     mut healths: Query<&mut Health>,
+    players: Res<Players>,
+    names: Query<&ssr_core::mechanics::PlayerName>,
+    mut system_chat: ResMut<SystemChatQueue>,
 ) {
     for event in death_events.read() {
+        // Системное сообщение в чат, как строка смерти в сборке
+        // (`ChatSystem.SendEntitySystemMessage`, локаль `chat/*.ftl`).
+        let victim = names
+            .get(event.target)
+            .ok()
+            .map(|name| name.0.clone())
+            .or_else(|| {
+                players
+                    .entries
+                    .iter()
+                    .find(|entry| entry.player == event.target)
+                    .map(|entry| entry.name.clone())
+            })
+            .unwrap_or_else(|| "Игрок".to_string());
+        let killer = event.killer.and_then(|killer| {
+            names
+                .get(killer)
+                .ok()
+                .map(|name| name.0.clone())
+                .or_else(|| {
+                    players
+                        .entries
+                        .iter()
+                        .find(|entry| entry.player == killer)
+                        .map(|entry| entry.name.clone())
+                })
+        });
+        match killer {
+            Some(killer) => system_chat
+                .0
+                .push(format!("{victim} погиб от рук {killer}")),
+            None => system_chat.0.push(format!("{victim} погиб")),
+        }
         if let Ok(mut health) = healths.get_mut(event.target) {
             health.current = health.max;
         }
