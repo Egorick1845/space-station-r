@@ -32,9 +32,10 @@ pub fn light_gpu_pass(
     let Some(state) = state else {
         return;
     };
-    let (Some(shadow), Some(fov), Some(light_a), Some(light_b), Some(wall_mask)) = (
+    let (Some(shadow), Some(fov), Some(fov_far), Some(light_a), Some(light_b), Some(wall_mask)) = (
         images.get(&state.handles.shadow_map),
         images.get(&state.handles.fov_map),
+        images.get(&state.handles.fov_far),
         images.get(&state.handles.light_a),
         images.get(&state.handles.light_b),
         images.get(&state.handles.wall_mask),
@@ -64,6 +65,7 @@ pub fn light_gpu_pass(
     };
     let shadow_view: &TextureView = &shadow.texture_view;
     let fov_view: &TextureView = &fov.texture_view;
+    let far_view: &TextureView = &fov_far.texture_view;
     let a_view: &TextureView = &light_a.texture_view;
     let b_view: &TextureView = &light_b.texture_view;
     let mask_view: &TextureView = &wall_mask.texture_view;
@@ -91,7 +93,12 @@ pub fn light_gpu_pass(
         &state.params,
         &[(3, shadow_view)],
     );
-    let fov_bind = bind(&layouts.fov, FOV_BINDINGS, &state.params, &[(4, fov_view)]);
+    let fov_bind = bind(
+        &layouts.fov,
+        FOV_BINDINGS,
+        &state.params,
+        &[(4, fov_view), (12, far_view)],
+    );
     let light_bind = bind(
         &layouts.light,
         LIGHT_BINDINGS,
@@ -126,7 +133,7 @@ pub fn light_gpu_pass(
         &layouts.apply,
         APPLY_BINDINGS,
         &state.params,
-        &[(5, b_view), (6, a_view), (8, fov_view), (11, mask_view)],
+        &[(5, b_view), (6, a_view), (8, fov_view), (11, mask_view), (13, far_view)],
     );
     let mask_bind = bind(
         &layouts.wall_mask,

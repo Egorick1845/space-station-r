@@ -489,6 +489,8 @@ pub fn update_lighting(
     // зависят от положения игрока и кэшируются, а поле света не пересчитывается
     // при ходьбе (в SS14 свет тоже считается в мировых координатах, а не от игрока).
     let mut segments: Vec<((f32, f32), (f32, f32))> = Vec::new();
+    // Тела тайлов стен (в тайловых единицах CPU-карты) — для карты hard FOV.
+    let mut solid_tiles: Vec<(i32, i32)> = Vec::new();
     for chunk in chunks.iter() {
         let base = (chunk.coords.0 * size_i, chunk.coords.1 * size_i);
         for ly in 0..size_i {
@@ -497,6 +499,7 @@ pub fn update_lighting(
                     continue;
                 }
                 let (x, y) = (base.0 + lx, base.1 + ly);
+                solid_tiles.push((x, y));
                 let (x0, y0) = (x as f32, y as f32);
                 let (x1, y1) = (x0 + 1.0, y0 + 1.0);
                 if !solid_tile(x, y - 1) {
@@ -896,6 +899,40 @@ pub fn update_lighting(
         FOV_REACH_TILES,
         FOV_BINS,
     );
+    // Дальняя граница первого тела стены (hard FOV, `fov.swsl` + `ApplyFovToBuffer`
+    // в движке): всё, что дальше ВЫХОДА из первого кластера сомкнутых тайлов,
+    // скрыто непрозрачной тьмой — стена/дверь за стеной не видны. CPU-карта
+    // работает в тайловых единицах (1 тайл = 1), поэтому bias движка (0.75
+    // мирового юнита) делится на размер тайла. У призрака FOV выключен
+    // (`Eye.DrawFov = false`, `observer.yml`).
+    let no_fov = own
+        .0
+        .map(|entity| ghosts.get(entity).is_ok())
+        .unwrap_or(false);
+    let eye_center = (player_tile.0 as f32 + 0.5, player_tile.1 as f32 + 0.5);
+    let hard_bias = ssr_core::light::HARD_FOV_BIAS / TILE_UNITS;
+    let reach_sq = (FOV_REACH_TILES + 2.0) * (FOV_REACH_TILES + 2.0);
+    let solid_rects: Vec<(f32, f32, f32, f32)> = solid_tiles
+        .iter()
+        .chain(closed_doors.iter())
+        .filter(|(tx, ty)| {
+            let dx = *tx as f32 + 0.5 - eye_center.0;
+            let dy = *ty as f32 + 0.5 - eye_center.1;
+            dx * dx + dy * dy <= reach_sq
+        })
+        .map(|(tx, ty)| (*tx as f32, *ty as f32, *tx as f32 + 1.0, *ty as f32 + 1.0))
+        .collect();
+    let far_map: Vec<f32> = if no_fov {
+        Vec::new()
+    } else {
+        (0..FOV_BINS)
+            .map(|bin| {
+                let angle = (bin as f32 / FOV_BINS as f32) * 2.0 * PI - PI;
+                let dir = (angle.cos(), angle.sin());
+                ssr_core::light::first_body_exit(eye_center, dir, solid_rects.iter().copied())
+            })
+            .collect()
+    };
     // Маска считается вдвое грубее текселей оверлея (`MASK_SUBTEXELS`) и
     // потом интерполируется: маска глаза мягкая, а пересчёт идёт на КАЖДЫЙ шаг
     // игрока — на полном разрешении это 4 мс на шаг.
@@ -904,6 +941,9 @@ pub fn update_lighting(
     let mask_dim_y = side_y as u32 * MASK_SUBTEXELS;
     let mask_step = 1.0 / MASK_SUBTEXELS as f32;
     let mut visible = vec![0.0f32; (mask_dim_x * mask_dim_y) as usize];
+    // Тексели ЗА первым телом стены: hard FOV прячет их полностью (маска = 0),
+    // просачивание видимости на них не действует.
+    let mut hard_hidden = vec![false; (mask_dim_x * mask_dim_y) as usize];
     for ty in 0..mask_dim_y {
         for tx in 0..mask_dim_x {
             let px = origin.0 as f32 + (tx as f32 + 0.5) * mask_step;
@@ -914,12 +954,21 @@ pub fn update_lighting(
             );
             let len = (diff.0 * diff.0 + diff.1 * diff.1).sqrt();
             let wall = sample_map(&eye_map, diff.0, diff.1, FOV_BINS);
-            visible[(ty * mask_dim_x + tx) as usize] = chebyshev_upper_bound(moment(wall), len);
+            let index = (ty * mask_dim_x + tx) as usize;
+            let hidden = !no_fov
+                && len > sample_map(&far_map, diff.0, diff.1, FOV_BINS) - hard_bias;
+            hard_hidden[index] = hidden;
+            visible[index] = if hidden {
+                0.0
+            } else {
+                chebyshev_upper_bound(moment(wall), len)
+            };
         }
     }
     // Стена берёт максимум видимости соседей: луч в центр тайла упирается в саму
     // стену, поэтому без просачивания её texel был бы чёрным (в движке стены
-    // видно по `wall-bleed`).
+    // видно по `wall-bleed`). Скрытые hard FOV стены просачивания не получают:
+    // иначе задняя грань первой стены подсветилась бы полом перед ней.
     for ty in 1..mask_dim_y - 1 {
         for tx in 1..mask_dim_x - 1 {
             let tile = ((tx / MASK_SUBTEXELS) as i32, (ty / MASK_SUBTEXELS) as i32);
@@ -927,6 +976,9 @@ pub fn update_lighting(
                 continue;
             }
             let index = (ty * mask_dim_x + tx) as usize;
+            if hard_hidden[index] {
+                continue;
+            }
             let mut visible_best = visible[index];
             for (dx, dy) in [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
                 let neighbor =

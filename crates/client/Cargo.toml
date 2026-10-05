@@ -15,3 +15,8 @@ tracing = { workspace = true }
 image = { workspace = true }
 serde = { workspace = true }
 ron = { workspace = true }
+
+[dev-dependencies]
+# Для теста валидации WGSL-шейдера света: ошибки шейдера иначе всплывают
+# только при запуске клиента (naga создаёт пайплайны лениво).
+naga = { version = "29", features = ["wgsl-in"] }

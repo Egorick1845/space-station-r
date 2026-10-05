@@ -15,6 +15,8 @@ pub enum WindowKind {
     Character,
     Hands,
     Container,
+    /// Крафт-меню (`ConstructionMenu` в сборке).
+    Craft,
 }
 
 /// Позиции окон (левый верхний угол, логические px); None — позиция по умолчанию.
@@ -24,6 +26,7 @@ pub struct WindowPositions {
     character: Option<Vec2>,
     hands: Option<Vec2>,
     container: Option<Vec2>,
+    craft: Option<Vec2>,
 }
 
 impl WindowPositions {
@@ -33,6 +36,7 @@ impl WindowPositions {
             WindowKind::Character => self.character,
             WindowKind::Hands => self.hands,
             WindowKind::Container => self.container,
+            WindowKind::Craft => self.craft,
         }
     }
 
@@ -42,6 +46,7 @@ impl WindowPositions {
             WindowKind::Character => self.character = Some(pos),
             WindowKind::Hands => self.hands = Some(pos),
             WindowKind::Container => self.container = Some(pos),
+            WindowKind::Craft => self.craft = Some(pos),
         }
     }
 }

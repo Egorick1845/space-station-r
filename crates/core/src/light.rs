@@ -101,6 +101,92 @@ pub fn bin_distance(
     best
 }
 
+/// Допуск кластера входов в тело стены: соседние тайлы одной стены входятся по
+/// лучу вплотную (общая грань), поэтому входы ближе этого допуска — одно тело.
+/// Зазор между разными конструкциями на сетке тайлов всегда больше тайла.
+pub const FOV_CLUSTER_EPS: f32 = 0.5;
+/// Bias hard FOV из `fov.swsl` движка (`−0.75/32` бина глубины на шкале тайла):
+/// точка за ВЫХОДОМ из первого тела стены получает непрозрачную тьму, а само
+/// тело (в том числе его дальняя грань с допуском) остаётся видно — «смотрим
+/// внутрь стен», `ApplyFovToBuffer` при `DrawHardFov = true`.
+pub const HARD_FOV_BIAS: f32 = 0.75;
+
+/// Луч против прямоугольника (slab-тест): `(вход, выход)` по лучу с единичным
+/// `dir`, `None` — если луч не проходит через тело прямоугольника.
+pub fn ray_rect_span(
+    origin: (f32, f32),
+    dir: (f32, f32),
+    rect: (f32, f32, f32, f32),
+) -> Option<(f32, f32)> {
+    let mut enter = f32::NEG_INFINITY;
+    let mut exit = f32::INFINITY;
+    for (o, d, lo, hi) in [
+        (origin.0, dir.0, rect.0, rect.2),
+        (origin.1, dir.1, rect.1, rect.3),
+    ] {
+        if d.abs() < 1e-6 {
+            // Луч параллелен плоскости: попадание только если origin внутри плиты.
+            if o < lo || o > hi {
+                return None;
+            }
+            continue;
+        }
+        let inv = 1.0 / d;
+        let (mut t0, mut t1) = ((lo - o) * inv, (hi - o) * inv);
+        if t0 > t1 {
+            std::mem::swap(&mut t0, &mut t1);
+        }
+        enter = enter.max(t0);
+        exit = exit.min(t1);
+    }
+    if enter > exit || exit <= 0.0 {
+        return None;
+    }
+    Some((enter.max(0.0), exit))
+}
+
+/// Расстояние по лучу до ВЫХОДА из первого тела стены (кластера сомкнутых
+/// прямоугольников тайлов) — аналог front-face culling в движке: карта FOV
+/// рендерится второй раз с `CullFaceMode.Front`, чтобы «смотреть внутрь стен»
+/// (`DrawFov`, `Clyde.LightRendering.cs:237-265`). Точка дальше этого выхода
+/// скрыта hard FOV непрозрачным чёрным (`fov.swsl`, `occludeColor = Black`).
+///
+/// `rects` — тела тайлов `(x0, y0, x1, y1)` в тех же единицах, что `origin`.
+/// Возвращает [`NO_OCCLUDER`], если по лучу стен нет вовсе.
+pub fn first_body_exit(
+    origin: (f32, f32),
+    dir: (f32, f32),
+    rects: impl IntoIterator<Item = (f32, f32, f32, f32)>,
+) -> f32 {
+    let rects: Vec<(f32, f32, f32, f32)> = rects.into_iter().collect();
+    let mut near = NO_OCCLUDER;
+    for &rect in &rects {
+        if let Some((enter, _)) = ray_rect_span(origin, dir, rect) {
+            near = near.min(enter);
+        }
+    }
+    if near >= NO_OCCLUDER {
+        return NO_OCCLUDER;
+    }
+    // Кластер расширяется, пока среди тайлов с входом не дальше текущего выхода
+    // находятся более дальние выходы (луч идёт вдоль стены через соседние тайлы).
+    let mut far = near;
+    loop {
+        let mut best = far;
+        for &rect in &rects {
+            if let Some((enter, exit)) = ray_rect_span(origin, dir, rect)
+                && enter <= far + FOV_CLUSTER_EPS
+            {
+                best = best.max(exit);
+            }
+        }
+        if best <= far + 1e-4 {
+            return far;
+        }
+        far = best;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -196,5 +282,61 @@ mod tests {
                 "индекс вне круга: {b}"
             );
         }
+    }
+
+    /// Hard FOV (§1 SS14_PORT_PLAN): точка на лице первой стены и внутри её тела
+    /// видна, точка ЗА телом — скрыта (выход из первого тела стены). Это и есть
+    /// ответ на жалобу «видно стены и двери, скрытые за другими стенами».
+    /// Единицы — мировые, как в GPU-конвейере (1 тайл = 32 юнита).
+    #[test]
+    fn first_body_exit_hides_only_behind_first_wall() {
+        let rects = [(0.0f32, 0.0, 32.0, 32.0)];
+        let east = (1.0f32, 0.0f32);
+        // Глаз в (−96, 16): вход в тело на t = 96, выход на t = 128.
+        let far = first_body_exit((-96.0, 16.0), east, rects);
+        assert!((far - 128.0).abs() < 1e-3, "выход из тела: {far}");
+        // Лицо стены (96) и середина тела (112) видны («внутрь стен»).
+        assert!(96.0 < far - HARD_FOV_BIAS);
+        assert!(112.0 < far - HARD_FOV_BIAS);
+        // Пол за стеной (160 > выхода 128) — скрыт.
+        assert!(160.0 > far - HARD_FOV_BIAS);
+        // Без стен — ничего не скрыто.
+        assert_eq!(first_body_exit((-96.0, 16.0), east, []), NO_OCCLUDER);
+    }
+
+    /// Кластер: луч идёт ВДОЛЬ стены из трёх сомкнутых тайлов — выход по концу
+    /// кластера, а не по первому тайлу (в движке это сплошной полигон стены).
+    #[test]
+    fn first_body_exit_follows_contiguous_cluster() {
+        let rects = [
+            (0.0f32, 0.0, 32.0, 32.0),
+            (32.0, 0.0, 64.0, 32.0),
+            (64.0, 0.0, 96.0, 32.0),
+        ];
+        // Луч из x = −32 через все три тайла вдоль стены: выход на x = 96 → t = 128.
+        let far = first_body_exit((-32.0, 16.0), (1.0, 0.0), rects);
+        assert!((far - 128.0).abs() < 1e-3, "выход из кластера: {far}");
+        // Третий тайл через зазор: кластер — два тайла (выход на x = 64 → t = 96),
+        // отдельно стоящий тайл его не расширяет.
+        let gapped = [
+            (0.0f32, 0.0, 32.0, 32.0),
+            (32.0, 0.0, 64.0, 32.0),
+            (160.0, 0.0, 192.0, 32.0),
+        ];
+        let far = first_body_exit((-32.0, 16.0), (1.0, 0.0), gapped);
+        assert!((far - 96.0).abs() < 1e-3, "зазор рвёт кластер: {far}");
+    }
+
+    /// Диагональный луч через угол: тело одного тайла по диагонали длиннее
+    /// тайла — выход обязан быть на дальнем углу.
+    #[test]
+    fn first_body_exit_handles_diagonal() {
+        let rects = [(0.0f32, 0.0, 32.0, 32.0)];
+        let eye = (-16.0f32, -16.0f32);
+        let len = (eye.0 * eye.0 + eye.1 * eye.1).sqrt();
+        let dir = (-eye.0 / len, -eye.1 / len); // к (32, 32) — диагональ тайла
+        let far = first_body_exit(eye, dir, rects);
+        let expected = len + std::f32::consts::SQRT_2 * 32.0;
+        assert!((far - expected).abs() < 1e-2, "диагональ: {far} vs {expected}");
     }
 }

@@ -503,10 +503,12 @@ pub struct ScrollDrag {
 
 /// Тянется ТОЛЬКО граббер (в движке клик по дорожке ничего не делает):
 /// `value = старт + Δy / (h − 10) · (контент − вьюпорт)`, как в `ScrollBar.cs`.
+#[allow(clippy::too_many_arguments)]
 pub fn appearance_scrollbar_drag(
     mut drag: ResMut<ScrollDrag>,
     mut state: ResMut<AppearanceUi>,
     mut hud: ResMut<crate::hud::HudState>,
+    mut craft: ResMut<crate::crafting::CraftingState>,
     content: Res<crate::content::ClientContent>,
     grabbers: Query<(&Interaction, &crate::hud::ScrollbarGrabber), Changed<Interaction>>,
     windows: Query<&Window>,
@@ -528,6 +530,7 @@ pub fn appearance_scrollbar_drag(
             ScrollList::AppearanceHair => state.hair_scroll,
             ScrollList::AppearanceBeard => state.beard_scroll,
             ScrollList::SpawnMenu => hud.spawn_scroll,
+            ScrollList::CraftMenu => craft.scroll,
         };
         drag.active = Some((grabber.list, y, scroll));
     }
@@ -552,6 +555,11 @@ pub fn appearance_scrollbar_drag(
             crate::hud::spawn_content_h(crate::hud::spawn_matched_count(&hud.search, &content)),
             crate::hud::spawn_view_h(),
         ),
+        ScrollList::CraftMenu => (
+            crate::crafting::matched_count(&craft, &content) as f32
+                * crate::crafting::RECIPE_ROW_STEP,
+            crate::crafting::list_view_h(),
+        ),
     };
     let track = (view_h - ui::SCROLLBAR_MIN_GRABBER).max(0.0);
     if track <= 0.0 {
@@ -571,6 +579,10 @@ pub fn appearance_scrollbar_drag(
         ScrollList::SpawnMenu => {
             hud.spawn_scroll = value;
             hud.spawn_scroll_target = value;
+        }
+        ScrollList::CraftMenu => {
+            craft.scroll = value;
+            craft.scroll_target = value;
         }
     }
 }
@@ -730,7 +742,7 @@ pub fn appearance_scroll_apply(
             ScrollList::AppearanceBeard => {
                 (beard_count(&state.search), BEARD_ROWS, state.beard_scroll)
             }
-            ScrollList::SpawnMenu => continue,
+            ScrollList::SpawnMenu | ScrollList::CraftMenu => continue,
         };
         // Геометрия граббера — как в `ScrollBar.cs`.
         let view_h = list_view_h(visible);

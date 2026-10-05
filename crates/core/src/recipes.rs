@@ -11,6 +11,10 @@ pub struct Recipe {
     pub id: String,
     /// Название для UI.
     pub name: String,
+    /// Категория для выпадающего списка крафт-меню (как `category` у
+    /// `ConstructionPrototype` в сборке); пусто — «Разное».
+    #[serde(default)]
+    pub category: Option<String>,
     /// Вход: (id предмета, количество).
     pub inputs: Vec<(String, u32)>,
     /// Выход: (id предмета, количество).
@@ -58,6 +62,7 @@ mod tests {
         Recipe {
             id: "rods".into(),
             name: "Прутья".into(),
+            category: None,
             inputs: vec![("SteelSheet".into(), 2), ("Crowbar".into(), 1)],
             output: ("MetalRod".into(), 4),
         }

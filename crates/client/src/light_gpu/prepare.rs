@@ -173,7 +173,7 @@ fn layout_entries(bindings: &[u32]) -> Vec<BindGroupLayoutEntry> {
             3 => storage_texture(3, TextureFormat::Rg32Float),
             4 => storage_texture(4, TextureFormat::R32Float),
             5 => storage_texture(5, TextureFormat::Rgba8Unorm),
-            6 | 7 | 8 | 11 => sampled_texture(*binding),
+            6 | 7 | 8 | 11 | 13 => sampled_texture(*binding),
             9 => BindGroupLayoutEntry {
                 binding: 9,
                 visibility: ShaderStages::COMPUTE,
@@ -185,6 +185,7 @@ fn layout_entries(bindings: &[u32]) -> Vec<BindGroupLayoutEntry> {
                 count: None,
             },
             10 => storage_texture(10, TextureFormat::R8Unorm),
+            12 => storage_texture(12, TextureFormat::R32Float),
             other => panic!("неизвестная привязка шейдера света: {other}"),
         };
         entries.push(entry);
@@ -195,10 +196,14 @@ fn layout_entries(bindings: &[u32]) -> Vec<BindGroupLayoutEntry> {
 /// Номера привязок каждой точки входа — из ОДНОГО списка строятся и лейаут, и
 /// bind group: разойтись они не могут (иначе wgpu ругается на число привязок).
 pub const SHADOW_BINDINGS: &[u32] = &[0, 1, 2, 3];
-pub const FOV_BINDINGS: &[u32] = &[0, 1, 4];
+/// Карта FOV читает тайлы стен (9) и пишет обе карты: расстояние до стены (4)
+/// и выход из первого тела стены (12) — hard FOV (`fov.swsl` движка).
+pub const FOV_BINDINGS: &[u32] = &[0, 1, 4, 9, 12];
 pub const LIGHT_BINDINGS: &[u32] = &[0, 1, 2, 5, 6, 7, 10];
 pub const BLUR_BINDINGS: &[u32] = &[0, 5, 6];
-pub const APPLY_BINDINGS: &[u32] = &[0, 5, 6, 8, 11];
+/// Маска FOV читает обе полярные карты глаза: расстояние (8) и выход из тела
+/// стены (13, hard FOV).
+pub const APPLY_BINDINGS: &[u32] = &[0, 5, 6, 8, 11, 13];
 /// Маска стен: тайлы стен в буфере и запись в маску.
 pub const WALL_MASK_BINDINGS: &[u32] = &[0, 9, 10];
 
@@ -299,6 +304,7 @@ pub fn extract_light(
         handles: LightSceneHandles {
             shadow_map: textures.shadow_map.clone(),
             fov_map: textures.fov_map.clone(),
+            fov_far: textures.fov_far.clone(),
             light_a: textures.light_a.clone(),
             light_b: textures.light_b.clone(),
             wall_mask: textures.wall_mask.clone(),
@@ -555,10 +561,10 @@ mod tests {
             WALL_MASK_BINDINGS,
         ] {
             assert_eq!(layout_entries(plan).len(), plan.len());
-            // Привязки 0..=11 — вся раскладка шейдера света.
+            // Привязки 0..=13 — вся раскладка шейдера света.
             for binding in plan {
                 assert!(
-                    *binding <= 11,
+                    *binding <= 13,
                     "привязка {binding} выходит за раскладку шейдера"
                 );
             }

@@ -55,6 +55,6 @@ mod tests {
         // 0.15 м = 4.8 мировых единицы при 32 px/м.
         assert!((PULL_SLACK_UNITS - 4.8).abs() < 1e-3);
         assert!((PULL_SPEED_MODIFIER - 0.95).abs() < 1e-6);
-        assert!(PULL_BREAK_UNITS > PULL_MIN_LENGTH_UNITS + PULL_SLACK_UNITS);
+        const { assert!(PULL_BREAK_UNITS > PULL_MIN_LENGTH_UNITS + PULL_SLACK_UNITS) };
     }
 }

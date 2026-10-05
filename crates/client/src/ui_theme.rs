@@ -70,6 +70,11 @@ pub const BUTTON_DISABLED: Color = Color::srgb_u8(0x30, 0x31, 0x3c);
 pub const BUTTON_RED: Color = Color::srgb_u8(0xd4, 0x3b, 0x3b);
 /// `StyleNano.NanoGold` — заголовки окон.
 pub const NANO_GOLD: Color = Color::srgb_u8(0xa8, 0x8b, 0x5e);
+/// Строка списка `ListContainer` (`ListContainerSheetlet.cs:20`: Color(55,55,68)).
+pub const LIST_CONTAINER_ROW: Color = Color::srgb_u8(0x37, 0x37, 0x44);
+/// Наведение/выбранная строка списка (`ListContainerSheetlet.cs` hover #4B4B56,
+/// ItemList selected `StyleNano.cs` Color(75,75,86) — совпадают).
+pub const LIST_CONTAINER_HOVER: Color = Color::srgb_u8(0x4b, 0x4b, 0x56);
 /// `StyleNano.PanelDark` (задел: фон панелей без текстуры).
 #[allow(dead_code)]
 pub const PANEL_DARK: Color = Color::srgb_u8(0x1e, 0x1e, 0x22);
@@ -206,15 +211,21 @@ pub const STATUS_HIGHLIGHTS: [&str; 2] = [
 ];
 
 /// Пути иконок верхней панели (порядок — как в [`UiTheme::icons`]).
-pub const TOP_ICONS: [&str; 8] = [
+/// Иконки верхней панели в ПОРЯДКЕ кнопок `GameTopMenuBar.xaml` (§11
+/// SS14_PORT_PLAN): Escape (hamburger), Guidebook (information), Character,
+/// Emotes, Crafting (hammer), Action (fist), Language (_EinsteinEngines),
+/// Admin (gavel), Sandbox, AHelp (info).
+pub const TOP_ICONS: [&str; 10] = [
     "sprites/ss14/Interface/hamburger.svg.192dpi.png",
-    "sprites/ss14/Interface/info.svg.192dpi.png",
+    "sprites/ss14/Interface/VerbIcons/information.svg.192dpi.png",
     "sprites/ss14/Interface/character.svg.192dpi.png",
     "sprites/ss14/Interface/emotes.svg.192dpi.png",
     "sprites/ss14/Interface/hammer.svg.192dpi.png",
     "sprites/ss14/Interface/fist.svg.192dpi.png",
+    "sprites/ss14/_EinsteinEngines/Interface/language.png",
     "sprites/ss14/Interface/gavel.svg.192dpi.png",
     "sprites/ss14/Interface/sandbox.svg.192dpi.png",
+    "sprites/ss14/Interface/info.svg.192dpi.png",
 ];
 
 /// Пути иконок действий (порядок — как в [`UiTheme::action_icons`]).

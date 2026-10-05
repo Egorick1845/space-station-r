@@ -49,6 +49,8 @@ pub const LIGHT_MAP_SIZE: (u32, u32) = (1440, 810);
 pub struct LightSceneHandles {
     pub shadow_map: Handle<Image>,
     pub fov_map: Handle<Image>,
+    /// Выход из первого тела стены по углу — hard FOV (`fov.swsl` движка).
+    pub fov_far: Handle<Image>,
     pub light_a: Handle<Image>,
     pub light_b: Handle<Image>,
     /// Маска стен (аналог стенсила движка): 1 — тайл стены, свет не гасится.
@@ -64,6 +66,10 @@ pub struct LightGpu {
     pub shadow_map: Handle<Image>,
     /// Полярная карта FOV от глаза игрока, `R32Float` — расстояние до стены.
     pub fov_map: Handle<Image>,
+    /// Полярная карта выхода из первого тела стены (`fov_far`): всё, что дальше
+    /// неё, прячет hard FOV непрозрачным чёрным (`fov.swsl` при
+    /// `DrawHardFov = true`) — стена за стеной в SS14 не видна.
+    pub fov_far: Handle<Image>,
     /// Карта света: rgb — накопленный свет (аддитивные источники + ambient),
     /// альфа — прозрачность тьмы для оверлея (`1 − свет`).
     pub light_a: Handle<Image>,
@@ -83,12 +89,14 @@ pub fn setup_light_gpu(mut commands: Commands, mut images: ResMut<Assets<Image>>
         TextureFormat::Rg32Float,
     ));
     let fov_map = images.add(polar_texture(FOV_BINS, 1, TextureFormat::R32Float));
+    let fov_far = images.add(polar_texture(FOV_BINS, 1, TextureFormat::R32Float));
     let light_a = images.add(light_texture());
     let light_b = images.add(light_texture());
     let wall_mask = images.add(wall_mask_texture());
     commands.insert_resource(LightGpu {
         shadow_map,
         fov_map,
+        fov_far,
         light_a,
         light_b,
         wall_mask,
@@ -430,6 +438,23 @@ mod tests {
         assert_eq!(packed.blur_params[0].blur_boost, 1.0);
         assert_eq!(packed.blur_params[3].blur_boost, 1.1);
         assert_eq!(packed.blur_params[2].viewport, [672.0, 480.0]);
+    }
+
+    /// WGSL-шейдер конвейера обязан разбираться и проходить валидацию naga:
+    /// ошибки шейдера иначе видны только при запуске клиента, когда Bevy
+    /// создаёт compute-пайплайны (и то в логах).
+    #[test]
+    fn light_shader_parses_and_validates() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/shaders/light.wgsl");
+        let source = std::fs::read_to_string(&path).expect("шейдер света читается");
+        let module = naga::front::wgsl::parse_str(&source).expect("WGSL разбирается naga");
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .expect("WGSL проходит валидацию");
     }
 
     /// Источник и отрезок — массивы по 48 и 16 байт (`vec4<f32>` в WGSL).

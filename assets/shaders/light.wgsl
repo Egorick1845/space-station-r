@@ -8,7 +8,11 @@
 //     у нас те же данные (отрезки стен) трассируются по лучам: результат —
 //     та же функция «расстояние до стены по углу».
 //  2. `fov_map` — такая же полярная карта от глаза (2048 бинов, как `FovMapSize`),
-//     используется как маска видимости для света и для тумана войны.
+//     используется как маска видимости для света и для тумана войны. Рядом —
+//     `fov_far_map`: расстояние до ВЫХОДА из первого тела стены по углу
+//     (аналог второго рендера карты глубины с front-face culling в движке —
+//     «смотрим внутрь стен»); по нему hard FOV прячет ВСЁ за первой стеной
+//     непрозрачным чёрным (`fov.swsl`, `occludeColor = Black`, `DrawHardFov`).
 //  3. `light_map` — карта света половинного разрешения: аддитивные вклады
 //     источников с формулой затухания движка, выборкой по карте теней
 //     (`ChebyshevUpperBound` + 7-точечный PCF из `light-soft.swsl`), маской FOV
@@ -91,6 +95,10 @@ struct Params {
 @group(0) @binding(9) var<storage, read> wall_tiles: array<WallTile>;
 @group(0) @binding(10) var wall_mask: texture_storage_2d<r8unorm, write>;
 @group(0) @binding(11) var wall_mask_read: texture_2d<f32>;
+// Дальняя граница первого тела стены от глаза (hard FOV, `fov.swsl`):
+// запись в проходе карты FOV, чтение — в проходе применения маски.
+@group(0) @binding(12) var fov_far_map: texture_storage_2d<r32float, write>;
+@group(0) @binding(13) var fov_far_read: texture_2d<f32>;
 
 const SHADOW_BINS: u32 = 512u; // ShadowMapSize в движке
 const FOV_BINS: u32 = 2048u;   // FovMapSize в движке
@@ -110,6 +118,16 @@ const NEIGHBOUR_OFFSETS: array<vec2<i32>, 8> = array<vec2<i32>, 8>(
 /// карту на четвертьразрешении с σ ≈ 24 экранных пикселя — у нас это ~10-12
 /// текселей карты; берём кольца 6/12/24, чтобы покрыть весь тайл стены).
 const WALL_BLEED_RADII: array<i32, 3> = array<i32, 3>(6, 12, 24);
+/// Допуск кластера входов в тело стены (как `FOV_CLUSTER_EPS` в `ssr_core::light`):
+/// сомкнутые тайлы одной стены входят по лучу вплотную, зазоры между разными
+/// конструкциями на сетке тайлов всегда больше тайла.
+const FOV_CLUSTER_EPS: f32 = 0.5;
+/// Bias hard FOV из `fov.swsl` (`−0.75/32` бина): точка за выходом из первого
+/// тела стены получает непрозрачную тьму, само тело видно («внутрь стен»).
+const HARD_FOV_BIAS: f32 = 0.75;
+/// Досягаемость hard FOV в мировых единицах: дальше диагонали видимой области
+/// (~31 тайл) карты глубины в движке клирятся 1234 — ничего не скрыто.
+const FOV_REACH_UNITS: f32 = 40.0 * 32.0;
 
 // Полярный угол: в движке `deflect = atan(rel.y, -rel.x) / PI`, `u = (deflect + 1) / 2`.
 fn polar_u(dx: f32, dy: f32) -> f32 {
@@ -151,6 +169,95 @@ fn bin_distance(origin: vec2<f32>, angle: f32) -> f32 {
     return best;
 }
 
+/// Луч против тела тайла (slab-тест): `(вход, выход)` по лучу; промах —
+/// `vec2(1e30, −1e30)` (как `None` в `ssr_core::light::ray_rect_span`).
+fn ray_rect_span(origin: vec2<f32>, dir: vec2<f32>, rect: vec4<f32>) -> vec2<f32> {
+    var enter = -1e30;
+    var exit = 1e30;
+    // Ось X: параллельный луч попадает в плиту только изнутри её диапазона.
+    if (abs(dir.x) < 1e-6) {
+        if (origin.x < rect.x || origin.x > rect.z) {
+            return vec2<f32>(1e30, -1e30);
+        }
+    } else {
+        let inv = 1.0 / dir.x;
+        var t0 = (rect.x - origin.x) * inv;
+        var t1 = (rect.z - origin.x) * inv;
+        if (t0 > t1) {
+            let tmp = t0;
+            t0 = t1;
+            t1 = tmp;
+        }
+        enter = max(enter, t0);
+        exit = min(exit, t1);
+    }
+    // Ось Y — то же самое.
+    if (abs(dir.y) < 1e-6) {
+        if (origin.y < rect.y || origin.y > rect.w) {
+            return vec2<f32>(1e30, -1e30);
+        }
+    } else {
+        let inv = 1.0 / dir.y;
+        var t0 = (rect.y - origin.y) * inv;
+        var t1 = (rect.w - origin.y) * inv;
+        if (t0 > t1) {
+            let tmp = t0;
+            t0 = t1;
+            t1 = tmp;
+        }
+        enter = max(enter, t0);
+        exit = min(exit, t1);
+    }
+    if (enter > exit || exit <= 0.0) {
+        return vec2<f32>(1e30, -1e30);
+    }
+    return vec2<f32>(max(enter, 0.0), exit);
+}
+
+/// Выход из первого тела стены по лучу (`ssr_core::light::first_body_exit`):
+/// кластер сомкнутых тайлов расширяется, пока у тайлов с входом не дальше
+/// текущего выхода есть более дальние выходы. Аналог front-face culling в
+/// движке (`DrawFov` рендерит карту глубины второй раз с `CullFaceMode.Front`
+/// — «смотрим внутрь стен», `Clyde.LightRendering.cs:237-265`).
+fn first_body_exit(origin: vec2<f32>, dir: vec2<f32>) -> f32 {
+    var near = NO_OCCLUDER;
+    let reach = (FOV_REACH_UNITS + 64.0) * (FOV_REACH_UNITS + 64.0);
+    for (var i = 0u; i < params.wall_tile_count; i = i + 1u) {
+        let rect = wall_tiles[i].rect;
+        let center = (rect.xy + rect.zw) * 0.5 - origin;
+        if (dot(center, center) > reach) {
+            continue; // тайл заведомо дальше досягаемости FOV
+        }
+        let span = ray_rect_span(origin, dir, rect);
+        if (span.x <= span.y) {
+            near = min(near, span.x);
+        }
+    }
+    if (near >= NO_OCCLUDER) {
+        return NO_OCCLUDER;
+    }
+    var far = near;
+    for (var iter = 0; iter < 32; iter = iter + 1) {
+        var best = far;
+        for (var i = 0u; i < params.wall_tile_count; i = i + 1u) {
+            let rect = wall_tiles[i].rect;
+            let center = (rect.xy + rect.zw) * 0.5 - origin;
+            if (dot(center, center) > reach) {
+                continue;
+            }
+            let span = ray_rect_span(origin, dir, rect);
+            if (span.x <= span.y && span.x <= far + FOV_CLUSTER_EPS) {
+                best = max(best, span.y);
+            }
+        }
+        if (best <= far + 1e-4) {
+            break;
+        }
+        far = best;
+    }
+    return far;
+}
+
 /// Полярная карта теней: `dispatch(SHADOW_BINS, N)` — x = бин угла,
 /// y = индекс источника.
 @compute @workgroup_size(64, 1)
@@ -168,15 +275,19 @@ fn shadow_map_cs(@builtin(global_invocation_id) id: vec3<u32>) {
     textureStore(shadow_map, vec2<i32>(i32(id.x), i32(id.y)), moment);
 }
 
-/// Полярная карта FOV от глаза игрока: один ряд, FOV_BINS бинов.
+/// Полярная карта FOV от глаза игрока: один ряд, FOV_BINS бинов. Рядом пишем
+/// карту ВЫХОДА из первого тела стены — по ней hard FOV прячет всё за стеной.
 @compute @workgroup_size(64, 1)
 fn fov_map_cs(@builtin(global_invocation_id) id: vec3<u32>) {
     if id.x >= FOV_BINS {
         return;
     }
     let angle = (f32(id.x) / f32(FOV_BINS)) * 2.0 * PI - PI;
+    let dir = vec2<f32>(cos(angle), sin(angle));
     let dist = bin_distance(params.eye, angle);
     textureStore(fov_map, vec2<i32>(i32(id.x), 0), vec4<f32>(dist, 0.0, 0.0, 1.0));
+    let far = first_body_exit(params.eye, dir);
+    textureStore(fov_far_map, vec2<i32>(i32(id.x), 0), vec4<f32>(far, 0.0, 0.0, 1.0));
 }
 
 /// Момент из карты теней по углу: ЛИНЕЙНАЯ интерполяция двух соседних бинов
@@ -210,6 +321,19 @@ fn fov_depth(rel: vec2<f32>) -> f32 {
     let i1 = wrap_bin(i32(base) + 1, i32(FOV_BINS));
     let a = textureLoad(fov_read, vec2<i32>(i0, 0), 0).x;
     let b = textureLoad(fov_read, vec2<i32>(i1, 0), 0).x;
+    return mix(a, b, f);
+}
+
+/// Выход из первого тела стены по направлению — та же интерполяция бинов, что у
+/// `fov_depth`, но по карте `fov_far` (hard FOV, `fov.swsl`).
+fn fov_far_depth(rel: vec2<f32>) -> f32 {
+    let u = polar_bin(rel.x, rel.y, f32(FOV_BINS));
+    let base = floor(u);
+    let f = u - base;
+    let i0 = wrap_bin(i32(base), i32(FOV_BINS));
+    let i1 = wrap_bin(i32(base) + 1, i32(FOV_BINS));
+    let a = textureLoad(fov_far_read, vec2<i32>(i0, 0), 0).x;
+    let b = textureLoad(fov_far_read, vec2<i32>(i1, 0), 0).x;
     return mix(a, b, f);
 }
 
@@ -377,7 +501,9 @@ fn wall_mask_cs(
 /// Умножение карты света на видимость глаза (`fov-lighting.swsl`):
 /// `occlusion = Chebyshev(момент FOV, расстояние)`, при полной видимости — без
 /// изменений, иначе свет гасится (occludeColor чёрный). На тайлах стен маска не
-/// гасит свет — как стенсил `ApplyLightingFovToBuffer` в движке.
+/// гасит свет — их перезаписывает просачивание (`wall-merge.swsl`), а гасит
+/// только hard FOV: всё за первым телом стены заливается непрозрачным чёрным
+/// (`fov.swsl`, `ApplyFovToBuffer`, `DrawHardFov = true` в движке).
 @compute @workgroup_size(8, 8)
 fn light_apply_fov_cs(@builtin(global_invocation_id) id: vec3<u32>) {
     let map = vec2<u32>(params.map_size);
@@ -440,13 +566,22 @@ fn light_apply_fov_cs(@builtin(global_invocation_id) id: vec3<u32>) {
             let spilled = clamp(sum / weight, vec3<f32>(0.0), vec3<f32>(1.0)) * WALL_BLEED_BOOST;
             color = vec4<f32>(spilled, color.a);
         }
-        // Стенсил движка: стены не затемняются маской видимости.
+        // `MergeWallLayer` перезаписывает свет стен: мягкая маска видимости их
+        // не гасит — ВИДИМЫЕ стены гасит только hard FOV ниже.
         occlusion = 1.0;
     }
     color = color * occlusion;
-    // Тьма оверлея считается заново: alpha = 1 − свет (движок рисует
-    // occludeColor с alpha = 1 − occlusion поверх карты света).
-    let luminance = clamp(dot(color.rgb, vec3<f32>(0.299, 0.587, 0.114)), 0.0, 1.0);
-    let alpha = max(1.0 - luminance, 1.0 - occlusion);
-    textureStore(dst, vec2<i32>(i32(id.x), i32(id.y)), vec4<f32>(color.rgb, alpha));
+    // Hard FOV (`fov.swsl`, `ApplyFovToBuffer` при `DrawHardFov = true`): точка
+    // за ВЫХОДОМ из первого тела стены — непрозрачный чёрный (rgb = 0 ⇒
+    // оверлей-умножение даёт чистый чёрный; alpha = 1 — для CPU-пути). Именно
+    // этот проход прячет стены и двери ЗА другими стенами, которых раньше было
+    // видно: маска их не гасила, а ambient давал alpha < 1.
+    if (params.fov_range <= 0.5 && our_dist > fov_far_depth(rel) - HARD_FOV_BIAS) {
+        color = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    } else {
+        // Тьма оверлея только от итогового цвета: alpha = 1 − свет.
+        let luminance = clamp(dot(color.rgb, vec3<f32>(0.299, 0.587, 0.114)), 0.0, 1.0);
+        color = vec4<f32>(color.rgb, 1.0 - luminance);
+    }
+    textureStore(dst, vec2<i32>(i32(id.x), i32(id.y)), color);
 }

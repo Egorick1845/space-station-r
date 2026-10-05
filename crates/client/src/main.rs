@@ -283,7 +283,10 @@ fn main() {
             console::update_console_text,
             crafting::toggle_crafting,
             crafting::render_crafting,
-            crafting::craft_click,
+            crafting::craft_ui_clicks,
+            crafting::craft_input,
+            crafting::craft_scroll_wheel,
+            crafting::craft_scroll_anim,
         )
             .run_if(in_game),
     );
@@ -349,8 +352,16 @@ fn main() {
             hud::spawn_hud,
             hud::hud_hotkeys,
             hud::hud_click,
+            hud::topbar_toggle_tint,
+            hud::render_stub_windows,
             hud::hud_button_tint,
             hud::update_ghost_bar,
+        )
+            .run_if(in_game),
+    );
+    app.add_systems(
+        Update,
+        (
             hud::admin_player_click,
             hud::menu_buttons_click,
             hud::render_spawn_menu,

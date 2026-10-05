@@ -42,6 +42,12 @@ pub struct HudState {
     /// Окно «Телепорт призрака» (`MiniGhostTargetWindow` в SS14).
     pub warp_open: bool,
     pub combat: bool,
+    /// Заглушки верхней панели (§11): Guidebook/Emotes/Action/Language/AHelp.
+    pub guidebook_open: bool,
+    pub emotes_open: bool,
+    pub actions_open: bool,
+    pub language_open: bool,
+    pub ahelp_open: bool,
     pub search: String,
     /// Прокрутка списка спавн-меню в пикселях (непрерывная, как `ScrollContainer`);
     /// текущее значение догоняет `spawn_scroll_target` с rate 15.
@@ -51,6 +57,14 @@ pub struct HudState {
     /// открытии F5 во время игры).
     pub search_focused: bool,
 }
+
+/// Кнопка верхней панели — для подсветки открытого окна (ToggleMode в SS14).
+#[derive(Component)]
+pub struct TopBarButton;
+
+/// Окно-заглушка верхней панели: маркер корня (по одному на каждое открытое).
+#[derive(Component)]
+pub struct StubWindowRoot;
 
 /// Действие кнопки HUD.
 #[derive(Component, Clone, PartialEq)]
@@ -71,6 +85,14 @@ pub enum HudAction {
     Examine,
     /// Выбросить предмет из активной руки (Q).
     Drop,
+    /// Окно персонажа (I — `OpenCharacterMenu` в сборке).
+    ToggleCharacter,
+    /// Заглушки кнопок GameTopMenuBar (§11): окна появятся со своими системами.
+    ToggleGuidebook,
+    ToggleEmotes,
+    ToggleAction,
+    ToggleLanguage,
+    ToggleAHelp,
     /// Админ-команда серверу.
     Admin(String),
     /// Спавн предмета из каталога (клик — в мир, Ctrl+клик — в рюкзак).
@@ -367,16 +389,24 @@ pub fn spawn_hud(
     if own.0.is_none() || !roots.is_empty() {
         return;
     }
-    // Верхняя панель: иконка + подпись горячей клавиши (порядок — TOP_ICONS).
-    // Верхняя панель — меню-кнопки (в SS14 их 10: гайд, персонаж, эмоции,
-    // крафт, действия, админ, песочница, AHelp). У нас есть что открыть:
-    // настройки (Esc), крафт (G — как OpenCraftingMenu в движке), спавн (F5),
-    // админка (F7). Бой и осмотр — это ДЕЙСТВИЯ, они в левой колонке.
-    let top: [(&str, HudAction, usize); 4] = [
-        ("Esc", HudAction::OpenSettings, 0),
-        ("G", HudAction::ToggleCraft, 4),
-        ("F5", HudAction::ToggleSpawn, 7),
-        ("F7", HudAction::ToggleAdmin, 6),
+    // Верхняя панель — GameTopMenuBar (§11 SS14_PORT_PLAN, `GameTopMenuBar.xaml`):
+    // 10 кнопок в ПОРЯДКЕ сборки, Escape 70×64 (ButtonOpenRight), остальные
+    // 42×64 (ButtonSquare), AHelp замыкает. Иконка 24×24 (TextureScale 0.5) +
+    // подпись горячей клавиши (BoundKeyHelper.ShortKeyName). Guidebook/Emotes/
+    // Action/Language/AHelp — окна-заглушки, пока их системы не перенесены.
+    // Порядок и подписи:
+    // (ключ, действие, индекс иконки TOP_ICONS)
+    let top: [(&str, HudAction, usize); 10] = [
+        ("Esc", HudAction::OpenSettings, 0),       // EscapeButton (hamburger)
+        ("Num0", HudAction::ToggleGuidebook, 1),   // GuidebookButton
+        ("I", HudAction::ToggleCharacter, 2),      // CharacterButton
+        ("Y", HudAction::ToggleEmotes, 3),         // EmotesButton
+        ("G", HudAction::ToggleCraft, 4),          // CraftingButton (hammer)
+        ("", HudAction::ToggleAction, 5),          // ActionButton (fist)
+        ("L", HudAction::ToggleLanguage, 6),       // LanguageButton
+        ("F7", HudAction::ToggleAdmin, 7),         // AdminButton (gavel)
+        ("F5", HudAction::ToggleSpawn, 8),         // SandboxButton
+        ("F1", HudAction::ToggleAHelp, 9),         // AHelpButton (info)
     ];
     commands
         .spawn((
@@ -397,6 +427,7 @@ pub fn spawn_hud(
                 let width = if index == 0 { 70.0 } else { 42.0 };
                 bar.spawn((
                     action,
+                    TopBarButton,
                     Button,
                     HudTint::button(),
                     BackgroundColor(ui::GLASS_BUTTON),
@@ -1034,6 +1065,7 @@ pub fn hud_click(
     settings: Res<Settings>,
     keys: Res<ButtonInput<KeyCode>>,
     menus: Query<Entity, With<crate::settings::SettingsMenu>>,
+    mut uis: Query<&mut crate::inventory_ui::InventoryUi>,
     mut senders: Query<&mut MessageSender<ClientMessage>, With<Connected>>,
     mut clicks: HudClicks,
 ) {
@@ -1047,6 +1079,17 @@ pub fn hud_click(
         }
         match action {
             HudAction::ToggleCraft => crafting.open = !crafting.open,
+            HudAction::ToggleCharacter => {
+                // Окно персонажа живёт в inventory_ui (`InventoryUi.character_open`).
+                for mut ui in uis.iter_mut() {
+                    ui.character_open = !ui.character_open;
+                }
+            }
+            HudAction::ToggleGuidebook => state.guidebook_open = !state.guidebook_open,
+            HudAction::ToggleEmotes => state.emotes_open = !state.emotes_open,
+            HudAction::ToggleAction => state.actions_open = !state.actions_open,
+            HudAction::ToggleLanguage => state.language_open = !state.language_open,
+            HudAction::ToggleAHelp => state.ahelp_open = !state.ahelp_open,
             HudAction::ToggleSpawn => {
                 state.spawn_open = !state.spawn_open;
                 state.admin_open = false;
@@ -1105,6 +1148,116 @@ pub fn hud_click(
     }
 }
 
+/// Подсветка кнопки верхней панели, пока её окно открыто (ToggleMode в SS14:
+/// `MenuButton.Pressed` до закрытия). Пишет фон каждый кадр и потому стоит
+/// ПОСЛЕ `hud_button_tint` — её решает последнее слово.
+#[allow(clippy::too_many_arguments)]
+pub fn topbar_toggle_tint(
+    mut buttons: Query<(&HudAction, &mut BackgroundColor), With<TopBarButton>>,
+    uis: Query<&mut crate::inventory_ui::InventoryUi>,
+    settings_open: Query<(), With<crate::settings::SettingsMenu>>,
+    state: Res<HudState>,
+    crafting: Res<crate::crafting::CraftingState>,
+) {
+    use crate::ui_theme as ui;
+    if buttons.is_empty() {
+        return;
+    }
+    let character_open = uis.iter().any(|ui| ui.character_open);
+    let is_open = |action: &HudAction| -> bool {
+        match action {
+            HudAction::OpenSettings => !settings_open.is_empty(),
+            HudAction::ToggleCraft => crafting.open,
+            HudAction::ToggleCharacter => character_open,
+            HudAction::ToggleSpawn => state.spawn_open,
+            HudAction::ToggleAdmin => state.admin_open,
+            HudAction::ToggleGuidebook => state.guidebook_open,
+            HudAction::ToggleEmotes => state.emotes_open,
+            HudAction::ToggleAction => state.actions_open,
+            HudAction::ToggleLanguage => state.language_open,
+            HudAction::ToggleAHelp => state.ahelp_open,
+            _ => false,
+        }
+    };
+    for (action, mut background) in buttons.iter_mut() {
+        background.0 = if is_open(action) {
+            ui::GLASS_BUTTON_PRESSED
+        } else {
+            ui::GLASS_BUTTON
+        };
+    }
+}
+
+/// Заголовки окон-заглушек верхней панели в порядке кнопок (§11).
+const STUB_TITLES: [&str; 5] = [
+    "Справочник",
+    "Эмоции",
+    "Действия",
+    "Язык",
+    "Обращение к админам",
+];
+
+/// Отпечаток окон-заглушек: пять переключателей.
+type StubSignature = [bool; 5];
+
+/// Рисует окна-заглушки для кнопок GameTopMenuBar, чьи системы ещё не
+/// перенесены (Guidebook/Emotes/Action/Language/AHelp). Окна каскадом со
+/// сдвигом 24 px, чтобы не ложились друг на друга.
+pub fn render_stub_windows(
+    mut commands: Commands,
+    state: Res<HudState>,
+    theme: Res<crate::ui_theme::UiTheme>,
+    roots: Query<(Entity, &StubWindowRoot)>,
+    mut last: Local<Option<StubSignature>>,
+) {
+    use crate::ui_theme as ui;
+    let signature = [
+        state.guidebook_open,
+        state.emotes_open,
+        state.actions_open,
+        state.language_open,
+        state.ahelp_open,
+    ];
+    if last.as_ref() == Some(&signature) {
+        return;
+    }
+    *last = Some(signature);
+    for (entity, _) in roots.iter() {
+        commands.entity(entity).despawn();
+    }
+    for (index, open) in signature.into_iter().enumerate() {
+        if !open {
+            continue;
+        }
+        commands
+            .spawn((
+                HudMenuRoot,
+                StubWindowRoot,
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: px(100.0 + index as f32 * 24.0),
+                    top: px(100.0 + index as f32 * 24.0),
+                    width: px(260),
+                    flex_direction: FlexDirection::Column,
+                    ..default()
+                },
+            ))
+            .with_children(|window| {
+                window_header(window, &theme, STUB_TITLES[index]);
+                let (body, background) = window_body();
+                window
+                    .spawn((body, background))
+                    .with_children(|body| {
+                        body.spawn((
+                            Text::new("В разработке — раздел плана порта (§11)."),
+                            TextFont::from_font_size(ui::FONT_BASE),
+                            TextColor(ui::TEXT_MUTED),
+                        ));
+                    });
+            });
+    }
+}
+
 /// Клики по строкам админ-меню: телепорт к игроку или кик.
 pub fn admin_player_click(
     mut senders: Query<&mut MessageSender<ClientMessage>, With<Connected>>,
@@ -1133,7 +1286,11 @@ pub fn admin_player_click(
 
 /// Шапка окна по SS14: плоский фон `Accent("#2A2A38D9", 0.26)`, акцентная
 /// линия 2 px снизу, заголовок `#EAF2FF` (14) и крестик `cross.svg`.
-fn window_header(header: &mut ChildSpawnerCommands, theme: &crate::ui_theme::UiTheme, title: &str) {
+pub(crate) fn window_header(
+    header: &mut ChildSpawnerCommands,
+    theme: &crate::ui_theme::UiTheme,
+    title: &str,
+) {
     use crate::ui_theme as ui;
     header
         .spawn((
@@ -1171,7 +1328,7 @@ fn window_header(header: &mut ChildSpawnerCommands, theme: &crate::ui_theme::UiT
 }
 
 /// Тело окна: плоская панель StyleNano с отступом содержимого 10.
-fn window_body() -> (Node, BackgroundColor) {
+pub(crate) fn window_body() -> (Node, BackgroundColor) {
     use crate::ui_theme as ui;
     (
         Node {
@@ -1187,7 +1344,7 @@ fn window_body() -> (Node, BackgroundColor) {
 }
 
 /// Плоское поле ввода (в сборке у LineEdit нет рамки — только фон).
-fn glass_field() -> (Node, BackgroundColor) {
+pub(crate) fn glass_field() -> (Node, BackgroundColor) {
     use crate::ui_theme as ui;
     (
         Node {
@@ -1255,6 +1412,8 @@ pub enum ScrollList {
     AppearanceHair,
     AppearanceBeard,
     SpawnMenu,
+    /// Список рецептов в крафт-меню (ConstructionMenu).
+    CraftMenu,
 }
 
 /// Граббер полосы прокрутки (маркер нужен, чтобы подсветка не трогала другие
@@ -1640,9 +1799,11 @@ pub struct MenuClearButton;
 pub struct MenuCloseButton;
 
 /// Обрабатывает «Очистить» и крестик в окнах меню.
+#[allow(clippy::too_many_arguments)]
 pub fn menu_buttons_click(
     mut state: ResMut<HudState>,
     mut placement: ResMut<Placement>,
+    mut crafting: ResMut<crate::crafting::CraftingState>,
     clear: Query<&Interaction, (Changed<Interaction>, With<MenuClearButton>)>,
     close: Query<&Interaction, (Changed<Interaction>, With<MenuCloseButton>)>,
 ) {
@@ -1656,6 +1817,7 @@ pub fn menu_buttons_click(
             state.spawn_open = false;
             state.admin_open = false;
             state.warp_open = false;
+            crafting.open = false;
             placement.item = None;
         }
     }
@@ -2146,14 +2308,28 @@ pub fn close_windows_on_escape(
         state.search_focused = false;
         return;
     }
+    if crafting.search_focused {
+        crafting.search_focused = false;
+        return;
+    }
     let any_open = state.spawn_open
         || state.admin_open
         || state.warp_open
         || crafting.open
-        || placement.item.is_some();
+        || placement.item.is_some()
+        || state.guidebook_open
+        || state.emotes_open
+        || state.actions_open
+        || state.language_open
+        || state.ahelp_open;
     state.spawn_open = false;
     state.admin_open = false;
     state.warp_open = false;
+    state.guidebook_open = false;
+    state.emotes_open = false;
+    state.actions_open = false;
+    state.language_open = false;
+    state.ahelp_open = false;
     placement.item = None;
     // Крафт закрывается ВМЕСТЕ с остальными окнами (был баг: он попадал в
     // `any_open`, но флаг не сбрасывался — окно не закрывалось на Esc).
