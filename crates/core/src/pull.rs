@@ -40,10 +40,8 @@ mod tests {
     fn pullable_comes_from_prototype_not_size() {
         // `Pullable` есть и на `BaseItem`, и на `BaseStructure`: тянуть можно
         // всё, размер роли не играет (в сборке это компонент, не порог размера).
-        let set = crate::items::ItemSet::load(
-            &crate::assets_root().join("prototypes/items.ron"),
-        )
-        .expect("items.ron");
+        let set = crate::items::ItemSet::load(&crate::assets_root().join("prototypes/items.ron"))
+            .expect("items.ron");
         for id in ["Crowbar", "SteelSheet", "ToolboxRed", "Medkit", "Paper"] {
             assert!(
                 set.pullable(id),

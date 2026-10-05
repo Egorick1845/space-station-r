@@ -171,7 +171,8 @@ mod tests {
     fn polar_bin_inverts_generation() {
         const BINS: usize = 512;
         // Центр бина `b` смотрит под углом `b/BINS·2π − π` (как в генерации).
-        let angle_of = |b: f32| (b / BINS as f32) * 2.0 * std::f32::consts::PI - std::f32::consts::PI;
+        let angle_of =
+            |b: f32| (b / BINS as f32) * 2.0 * std::f32::consts::PI - std::f32::consts::PI;
         // Для каждого кардинального направления выборка должна попасть в бин,
         // чей угол совпадает с направлением (в пределах одного бина).
         for (name, dx, dy) in [
@@ -190,7 +191,10 @@ mod tests {
         for step in 0..64 {
             let angle = step as f32 / 64.0 * 2.0 * std::f32::consts::PI;
             let b = polar_bin(angle.cos(), angle.sin(), BINS);
-            assert!((-0.5..BINS as f32 - 0.5).contains(&b), "индекс вне круга: {b}");
+            assert!(
+                (-0.5..BINS as f32 - 0.5).contains(&b),
+                "индекс вне круга: {b}"
+            );
         }
     }
 }

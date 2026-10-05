@@ -99,6 +99,17 @@ const FOV_BINS: u32 = 2048u;   // FovMapSize в движке
 /// Без этого стены либо чернеют целиком, либо (при маске стен на весь тайл)
 /// светятся квадратами в невидимой зоне.
 const WALL_BLEED_DEPTH: f32 = 14.0;
+/// Множитель света, переносимого с пола на стену (`wall-bleed-blur.swsl`: 1.1).
+const WALL_BLEED_BOOST: f32 = 1.1;
+/// Соседи текселя карты света (8 направлений) — для просачивания на стены.
+const NEIGHBOUR_OFFSETS: array<vec2<i32>, 8> = array<vec2<i32>, 8>(
+    vec2<i32>(1, 0), vec2<i32>(-1, 0), vec2<i32>(0, 1), vec2<i32>(0, -1),
+    vec2<i32>(1, 1), vec2<i32>(1, -1), vec2<i32>(-1, 1), vec2<i32>(-1, -1),
+);
+/// Радиусы кольцевой выборки «затёкшего» света в текселях карты (движок размывает
+/// карту на четвертьразрешении с σ ≈ 24 экранных пикселя — у нас это ~10-12
+/// текселей карты; берём кольца 6/12/24, чтобы покрыть весь тайл стены).
+const WALL_BLEED_RADII: array<i32, 3> = array<i32, 3>(6, 12, 24);
 
 // Полярный угол: в движке `deflect = atan(rel.y, -rel.x) / PI`, `u = (deflect + 1) / 2`.
 fn polar_u(dx: f32, dy: f32) -> f32 {
@@ -168,11 +179,38 @@ fn fov_map_cs(@builtin(global_invocation_id) id: vec3<u32>) {
     textureStore(fov_map, vec2<i32>(i32(id.x), 0), vec4<f32>(dist, 0.0, 0.0, 1.0));
 }
 
-/// Момент из карты теней по углу (соответствует `occludeDepth` в движке).
+/// Момент из карты теней по углу: ЛИНЕЙНАЯ интерполяция двух соседних бинов
+/// (в движке полярная карта читается `texture.Sample` с линейным фильтром).
+/// Раньше брался ровно один бин (`round`) — из-за этого края теней шли
+/// ступеньками по бинам («квадратики») и дрожали, когда бин границы менялся.
+/// Полярная карта циклична по углу, поэтому индексы заворачиваются по модулю.
 fn occlude_depth(rel: vec2<f32>, light_index: u32) -> vec2<f32> {
-    let u = clamp(polar_bin(rel.x, rel.y, f32(SHADOW_BINS)), -0.5, f32(SHADOW_BINS) - 0.5);
-    let x = clamp(i32(round(u)), 0, i32(SHADOW_BINS) - 1);
-    return textureLoad(shadow_map_read, vec2<i32>(x, i32(light_index)), 0).xy;
+    let u = polar_bin(rel.x, rel.y, f32(SHADOW_BINS));
+    let base = floor(u);
+    let f = u - base;
+    let i0 = wrap_bin(i32(base), i32(SHADOW_BINS));
+    let i1 = wrap_bin(i32(base) + 1, i32(SHADOW_BINS));
+    let a = textureLoad(shadow_map_read, vec2<i32>(i0, i32(light_index)), 0).xy;
+    let b = textureLoad(shadow_map_read, vec2<i32>(i1, i32(light_index)), 0).xy;
+    return mix(a, b, f);
+}
+
+/// Заворот индекса бина в диапазон `[0, bins)` (карта углов замкнута в кольцо).
+fn wrap_bin(index: i32, bins: i32) -> i32 {
+    return ((index % bins) + bins) % bins;
+}
+
+/// Глубина стены от глаза по направлению: тоже линейная интерполяция соседних
+/// бинов карты FOV (без неё граница видимости прыгает на бин и «дрожит»).
+fn fov_depth(rel: vec2<f32>) -> f32 {
+    let u = polar_bin(rel.x, rel.y, f32(FOV_BINS));
+    let base = floor(u);
+    let f = u - base;
+    let i0 = wrap_bin(i32(base), i32(FOV_BINS));
+    let i1 = wrap_bin(i32(base) + 1, i32(FOV_BINS));
+    let a = textureLoad(fov_read, vec2<i32>(i0, 0), 0).x;
+    let b = textureLoad(fov_read, vec2<i32>(i1, 0), 0).x;
+    return mix(a, b, f);
 }
 
 /// `ChebyshevUpperBound` из `shadow_cast_shared.swsl` дословно.
@@ -350,20 +388,56 @@ fn light_apply_fov_cs(@builtin(global_invocation_id) id: vec3<u32>) {
     let world = params.camera + uv * params.viewport;
     let rel = world - params.eye;
     let our_dist = length(rel);
-    let u = polar_bin(rel.x, rel.y, f32(FOV_BINS));
-    let bin = clamp(i32(round(u)), 0, i32(FOV_BINS) - 1);
-    let wall_dist = textureLoad(fov_read, vec2<i32>(bin, 0), 0).x;
+    // Глубина стены от глаза по этому направлению (с интерполяцией бинов).
+    let wall_dist = fov_depth(rel);
     var occlusion = chebyshev(vec2<f32>(wall_dist, wall_dist * wall_dist + 0.25), our_dist);
-    // Стена не гасится маской видимости (стенсил движка), но свет заходит в неё
-    // лишь на глубину просачивания и гаснет: передняя грань стены освещена,
-    // глубина — тёмная. Так «стены видно» рядом с освещённой зоной, и при этом
-    // в невидимой зоне не появляются светлые квадраты тайлов.
+    // Просачивание света на стены (`wall-bleed-blur.swsl`): видимая грань стены
+    // освещается светом соседних НЕ-стеновых текселей, поэтому стена рядом с
+    // освещённым полом видна, а глубина стены (там и соседи — стена) остаётся
+    // тёмной. Раньше яркость стены гасилась по расстоянию от глаза
+    // (`exp(-depth / 14)`) — из-за этого темнела ровно та стена, что перед нами.
     let wall = textureLoad(wall_mask_read, vec2<i32>(i32(id.x), i32(id.y)), 0).x;
-    if (wall > 0.5 && wall_dist < NO_OCCLUDER * 0.5) {
-        let depth = clamp(our_dist - wall_dist, 0.0, 128.0);
-        occlusion = max(occlusion, exp(-depth / WALL_BLEED_DEPTH));
-    }
     var color = textureLoad(src, vec2<i32>(i32(id.x), i32(id.y)), 0);
+    if (wall > 0.5) {
+        // Стены: `BlurOntoWalls` + `MergeWallLayer` — последние два прохода
+        // движка. Полноэкранное размытие карты света на четвертьразрешении
+        // (три итерации H+V, радиус `7e-3 * 14/cameraSize * (i+1)` ≈ σ 24
+        // экранных пикселя) даёт «затёкший» на стены свет, после чего полигоны
+        // окклюдеров ПЕРЕЗАПИСЫВАЮТ значение буфера этим размытым светом ×1.1
+        // (`wall-merge.swsl`, без смешивания).
+        //
+        // Внутри тайла стены собственного света нет (самозатенение VSM), поэтому
+        // без замены стена прямо перед игроком остаётся чёрной — ровно дефект
+        // «тень падает на стены перед нами». Размытие приближаем кольцевой
+        // выборкой: 8 направлений × 3 радиуса, вес 1/r, только НЕ-стеновые
+        // тексели (пол рядом со стеной её и освещает), стена не гасится FOV.
+        var sum = vec3<f32>(0.0);
+        var weight = 0.0;
+        for (var r = 0u; r < 3u; r = r + 1u) {
+            let radius = WALL_BLEED_RADII[r];
+            for (var k = 0u; k < 8u; k = k + 1u) {
+                let step = vec2<i32>(NEIGHBOUR_OFFSETS[k]) * radius;
+                let ncoord = vec2<i32>(i32(id.x), i32(id.y)) + step;
+                let in_map =
+                    all(ncoord >= vec2<i32>(0)) && all(ncoord < vec2<i32>(params.map_size));
+                if (!in_map) {
+                    continue;
+                }
+                if (textureLoad(wall_mask_read, ncoord, 0).x > 0.5) {
+                    continue; // сосед — тоже стена, света там нет
+                }
+                let w = 1.0 / f32(radius);
+                sum = sum + textureLoad(src, ncoord, 0).rgb * w;
+                weight = weight + w;
+            }
+        }
+        if (weight > 0.0) {
+            let spilled = clamp(sum / weight, vec3<f32>(0.0), vec3<f32>(1.0)) * WALL_BLEED_BOOST;
+            color = vec4<f32>(spilled, color.a);
+        }
+        // Стенсил движка: стены не затемняются маской видимости.
+        occlusion = 1.0;
+    }
     color = color * occlusion;
     // Тьма оверлея считается заново: alpha = 1 − свет (движок рисует
     // occludeColor с alpha = 1 − occlusion поверх карты света).
