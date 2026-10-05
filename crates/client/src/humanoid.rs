@@ -231,10 +231,22 @@ pub fn sync_bodies(
         let sex = sexes.get(entity).copied().unwrap_or_default();
         format!("{}{}", species_of(entity), sex.part_suffix())
     };
+    // Призраки видны только призракам и админам: в сборке живые не видят
+    // призраков вне PostRound (`GhostSystem.OnGhostStartup` перекладывает слои
+    // видимости `Ghost`/`Normal`, показ включается `showghosts`).
+    let own_is_ghost = own
+        .0
+        .map(|entity| ghosts.get(entity).is_ok())
+        .unwrap_or(false);
+    let ghost_visible = |entity: Entity| own_is_ghost || ghosts.get(entity).is_err();
+
     if let Some(own_entity) = own.0 {
         let species_id = species_of(own_entity);
         let sex = sexes.get(own_entity).copied().unwrap_or_default();
         for player_entity in players.iter() {
+            if !ghost_visible(player_entity) {
+                continue;
+            }
             let signature = body_signature(player_entity);
             if bodies.get(player_entity).ok().map(|b| b.0.as_str()) == Some(signature.as_str()) {
                 continue;
@@ -257,6 +269,13 @@ pub fn sync_bodies(
         // Свой игрок рисуется отдельным визуалом Player: его дубль убирает
         // sync_remote_players — здесь тело ему собирать не нужно.
         if Some(visual.player) == own.0 {
+            continue;
+        }
+        // Призрак невидим живым (`visibilityMask` в `observer.yml`).
+        if !ghost_visible(visual.player) {
+            if bodies.get(visual_entity).is_ok() {
+                detach_body(&mut commands, &children, visual_entity);
+            }
             continue;
         }
         let species_id = species_of(visual.player);

@@ -130,6 +130,8 @@ fn main() {
     app.init_resource::<weapons::ShootQueue>();
     app.init_resource::<weapons::ReloadQueue>();
     app.init_resource::<weapons::SoundQueue>();
+    // Системные сообщения чата (вход/выход, смерть, призрак).
+    app.init_resource::<SystemChatQueue>();
     app.add_systems(Startup, startup);
     app.add_systems(
         Startup,
@@ -156,6 +158,7 @@ fn main() {
             handle_client_messages,
             // Урон применяется сразу после разбора очереди действий (T4.1).
             (process_actions, apply_damage, respawn_dead).chain(),
+            flush_system_chat,
             movement,
             // Тянуть за собой (Pull): цель идёт за игроком после движения.
             pull_follow,
@@ -1568,6 +1571,8 @@ struct AuxParams<'w, 's> {
     /// параметров у `handle_client_messages`.
     shoot_queue: ResMut<'w, weapons::ShootQueue>,
     reload_queue: ResMut<'w, weapons::ReloadQueue>,
+    /// Системные сообщения чата (вход/выход игрока, призрак).
+    system_chat: ResMut<'w, SystemChatQueue>,
 }
 
 /// Индекс из времени: без внешних RNG-зависимостей.
@@ -1653,11 +1658,13 @@ fn on_link_disconnected(
     trigger: On<Add, Disconnected>,
     mut commands: Commands,
     mut players: ResMut<Players>,
+    mut system_chat: ResMut<SystemChatQueue>,
 ) {
     let bits = trigger.entity.to_bits();
     if let Some((name, entity)) = players.remove_by_link(bits) {
         // despawn реплицируется: у клиентов сущность игрока удалится (T1.3).
         commands.entity(entity).despawn();
+        system_chat.0.push(format!("{name} отключился"));
         tracing::info!(name, "Player disconnected");
     } else {
         tracing::debug!(link = ?trigger.entity, "link disconnected before handshake");
@@ -2018,6 +2025,8 @@ fn handle_client_messages(
                         continue;
                     }
                     tracing::info!(client = ?remote_id, name, "Player connected");
+                    // Системное сообщение в чат: как строка входа игрока в сборке.
+                    aux.system_chat.0.push(format!("{name} подключился"));
                     connected.push((link_entity, name));
                 }
                 ClientMessage::Examine { entity, tx, ty } => {
@@ -3002,6 +3011,7 @@ fn movement(
         sprinting_flag,
         health,
         pulling,
+        ghost,
     ) in players.iter_mut()
     {
         // Лежачего не двигаем (падение/стан, T-мех).
@@ -3037,7 +3047,15 @@ fn movement(
             }
         }
         // В SS14 спринт по умолчанию: Shift включает ХОДЬБУ, а не бег.
-        let base_speed = if input.running {
+        // Призрак летает по `observer.yml`: ходьба 8, бег 12 тайлов/с
+        // (`baseWalkSpeed`/`baseSprintSpeed` у `Incorporeal`).
+        let base_speed = if ghost.is_some() {
+            if input.running {
+                OBSERVER_WALK_SPEED * TILE_SIZE
+            } else {
+                OBSERVER_SPRINT_SPEED * TILE_SIZE
+            }
+        } else if input.running {
             PLAYER_WALK_SPEED
         } else {
             PLAYER_MOVE_SPEED
@@ -3351,6 +3369,9 @@ type MovingPlayers<'w, 's> = Query<
         Option<&'static Sprinting>,
         Option<&'static Health>,
         Option<&'static Pulling>,
+        // Призрак (Content.Shared/Ghost/GhostComponent.cs): скорости берутся
+        // из observer.yml (8 ходьба / 12 бег тайлов в секунду).
+        Option<&'static Ghost>,
     ),
 >;
 
@@ -3411,7 +3432,23 @@ fn process_actions(
     let pending = std::mem::take(&mut queue.0);
     for (player, queued) in pending {
         let action = match queued {
-            QueuedAction::Do(action) => action,
+            QueuedAction::Do(action) => {
+                // Призрак не взаимодействует: в сборке `SharedGhostSystem`
+                // отменяет `UseAttemptEvent`, `InteractionAttemptEvent`,
+                // `DropAttemptEvent`, `PickupAttemptEvent`,
+                // `InteractionVerbAttemptEvent`, если `!CanGhostInteract`
+                // (у `MobObserver` он `false`). Осмотр и VV разрешены.
+                if world.ghosts.get(player).is_ok()
+                    && !matches!(
+                        action,
+                        ActionKind::Examine { .. } | ActionKind::ViewVariables { .. }
+                    )
+                {
+                    tracing::debug!(?player, "ghost: взаимодействие запрещено");
+                    continue;
+                }
+                action
+            }
             // Осмотр (механики владельца): описание объекта или тайла игроку.
             QueuedAction::Examine { entity, tx, ty } => {
                 let text = describe_target(
@@ -3460,9 +3497,7 @@ fn process_actions(
                     };
                     let lx = tx.rem_euclid(chunk_tiles) as usize;
                     let ly = ty.rem_euclid(chunk_tiles) as usize;
-                    ssr_core::occluders::is_solid(
-                        chunk.tiles[ly * chunk_tiles as usize + lx],
-                    )
+                    ssr_core::occluders::is_solid(chunk.tiles[ly * chunk_tiles as usize + lx])
                 };
                 // `InRangeUnobstructed` (`SharedInteractionSystem.cs:651-693`):
                 // цель должна быть в 1.5 тайла И не за стеной.
@@ -4483,6 +4518,11 @@ fn verb_default(kind: ssr_core::verbs::VerbType) -> ActionOption {
     }
 }
 
+/// Скорости призрака, тайлов/с: `Resources/Prototypes/Entities/Mobs/Player/observer.yml`
+/// (`Incorporeal`: `baseWalkSpeed: 8`, `baseSprintSpeed: 12`).
+const OBSERVER_WALK_SPEED: f32 = 8.0;
+const OBSERVER_SPRINT_SPEED: f32 = 12.0;
+
 /// Тайл занят стеной? Снаряд в сборке сталкивается со слоями
 /// `Impassable | BulletImpassable` (`ProjectileSystem.OnStartCollide` требует
 /// hard-фикстуру) — у нас стены это тайлы, проверяем по чанкам карты.
@@ -4826,4 +4866,30 @@ fn gun_test(
         let _ = hand.take_in_active(item.to_bits());
     }
     tracing::info!(player = ?player, "gun test: пистолет выдан");
+}
+
+/// Очередь системных сообщений чата: наполняется событиями (вход/выход игрока,
+/// смерть, призрак), рассылается всем клиентам одной системой.
+/// В сборке это `ChatSystem.SendEntitySystemMessage` / системные строки
+/// (`Resources/Locale/*/chat/*.ftl`).
+#[derive(Resource, Default)]
+struct SystemChatQueue(Vec<String>);
+
+/// Рассылает системные сообщения всем подключённым клиентам:
+/// `ServerMessage::Event { kind: "system:<текст>" }` → строка в чате.
+fn flush_system_chat(
+    mut queue: ResMut<SystemChatQueue>,
+    mut senders: Query<&mut MessageSender<ServerMessage>, With<Connected>>,
+) {
+    if queue.0.is_empty() {
+        return;
+    }
+    for text in std::mem::take(&mut queue.0) {
+        for mut sender in senders.iter_mut() {
+            sender.send::<GameChannel>(ServerMessage::Event {
+                kind: format!("system:{text}"),
+            });
+        }
+        tracing::info!(%text, "system chat message");
+    }
 }
