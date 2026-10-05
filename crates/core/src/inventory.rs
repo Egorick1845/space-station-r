@@ -30,10 +30,27 @@ pub fn item_size(name: &str) -> (u8, u8) {
 
 /// Инвентарь-сетка (SS14-тетрис): в каждой клетке — bits предмета, который её
 /// занимает; предмет размера w×h заполняет w·h клеток (ADR-3, реплицируется).
+/// Ширина переменная: у рюкзака 7×4, у хранилищ из прототипов (`Storage.grid`,
+/// пояс 8×2 и т.п.) — своя; высота = `cells.len() / width`.
 #[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Inventory {
-    /// Клетки построчно (7×4): None — пусто.
+    /// Колонок в сетке (по умолчанию 7 — рюкзак игрока).
+    #[serde(default = "default_inventory_cols")]
+    pub cols: u8,
+    /// Клетки построчно: None — пусто.
     pub cells: Vec<Option<u64>>,
+}
+
+fn default_inventory_cols() -> u8 {
+    INVENTORY_COLS
+}
+
+/// Строк в сетке по числу клеток и ширине.
+fn rows(cols: u8, cells: usize) -> u8 {
+    if cols == 0 {
+        return 0;
+    }
+    ((cells as f32) / (cols as f32)).ceil() as u8
 }
 
 #[allow(clippy::derivable_impls)]
@@ -44,10 +61,25 @@ impl Default for Inventory {
 }
 
 impl Inventory {
+    /// Рюкзак игрока: 7×4.
     pub fn new() -> Self {
         Self {
+            cols: INVENTORY_COLS,
             cells: vec![None; INVENTORY_SLOTS],
         }
+    }
+
+    /// Сетка произвольного размера (`Storage.grid` прототипа).
+    pub fn with_size(cols: u8, rows: u8) -> Self {
+        Self {
+            cols: cols.max(1),
+            cells: vec![None; cols.max(1) as usize * rows.max(1) as usize],
+        }
+    }
+
+    /// Строк в сетке.
+    pub fn rows(&self) -> u8 {
+        rows(self.cols, self.cells.len())
     }
 
     pub fn contains(&self, item: u64) -> bool {
@@ -74,14 +106,16 @@ impl Inventory {
 
     /// Подходит ли позиция для предмета w×h (все клетки пусты и внутри сетки).
     fn fits(&self, w: u8, h: u8, index: u8) -> bool {
-        let x = index % INVENTORY_COLS;
-        let y = index / INVENTORY_COLS;
-        if x + w > INVENTORY_COLS || y + h > INVENTORY_ROWS {
+        let cols = self.cols;
+        let total = self.cells.len() as u8;
+        let x = index % cols;
+        let y = index / cols;
+        if x + w > cols || (y + h) * cols > total {
             return false;
         }
         (0..h).all(|dy| {
             (0..w).all(|dx| {
-                let cell = (y + dy) * INVENTORY_COLS + (x + dx);
+                let cell = (y + dy) * cols + (x + dx);
                 self.cells.get(cell as usize).copied().flatten().is_none()
             })
         })
@@ -92,7 +126,7 @@ impl Inventory {
     pub fn find_place(&self, w: u8, h: u8, at: Option<u8>) -> Option<u8> {
         match at {
             Some(index) => self.fits(w, h, index).then_some(index),
-            None => (0..INVENTORY_SLOTS as u8).find(|index| self.fits(w, h, *index)),
+            None => (0..self.cells.len() as u8).find(|index| self.fits(w, h, *index)),
         }
     }
 
@@ -101,11 +135,12 @@ impl Inventory {
         if !self.fits(w, h, index) {
             return false;
         }
-        let x = index % INVENTORY_COLS;
-        let y = index / INVENTORY_COLS;
+        let cols = self.cols;
+        let x = index % cols;
+        let y = index / cols;
         for dy in 0..h {
             for dx in 0..w {
-                let cell = (y + dy) * INVENTORY_COLS + (x + dx);
+                let cell = (y + dy) * cols + (x + dx);
                 self.cells[cell as usize] = Some(item);
             }
         }
@@ -133,7 +168,7 @@ impl Inventory {
 
 /// Раскладка предметов в сетке для отрисовки «тетрисом»: для каждого предмета
 /// (bits, x, y, w, h) — ограничивающий прямоугольник занятых им клеток.
-pub fn item_layout(cells: &[Option<u64>]) -> Vec<(u64, u8, u8, u8, u8)> {
+pub fn item_layout(cols: u8, cells: &[Option<u64>]) -> Vec<(u64, u8, u8, u8, u8)> {
     let mut seen: Vec<u64> = Vec::new();
     let mut layout = Vec::new();
     for cell in cells.iter().flatten() {
@@ -147,7 +182,7 @@ pub fn item_layout(cells: &[Option<u64>]) -> Vec<(u64, u8, u8, u8, u8)> {
             .filter(|(_, value)| **value == Some(*cell))
             .map(|(index, _)| {
                 let index = index as u8;
-                (index % INVENTORY_COLS, index / INVENTORY_COLS)
+                (index % cols, index / cols)
             })
             .collect();
         let x = coords.iter().map(|c| c.0).min().unwrap_or(0);
@@ -267,6 +302,15 @@ pub struct ItemPosition(pub [f32; 2]);
 pub struct Container {
     pub open: bool,
     pub name: String,
+}
+
+/// Хранилище ПРЕДМЕТА (`StorageComponent` в сборке: пояс, сумка, ящик для
+/// инструментов): открывается ОКНОМ StorageWindow, содержимое не высыпается —
+/// в отличие от ящика (EntityStorage: высыпание/всасывание). Сетка задаётся
+/// прототипом (`Storage.grid`), состояние меняет только сервер (ADR-3).
+#[derive(Component, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct ItemStorage {
+    pub open: bool,
 }
 
 /// Предмет-сущность (T3.2): имя до появления прототипов в игре (T5.2).

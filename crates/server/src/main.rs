@@ -24,7 +24,7 @@ use lightyear::prelude::*;
 use ssr_core::atmosphere::Gas;
 use ssr_core::clothing::{Clothing, ClothingSlot};
 use ssr_core::inventory::{
-    Container, Hands, Health, HeldBy, Inventory, Item, ItemPosition, SLOT_ANY,
+    Container, Hands, Health, HeldBy, Inventory, Item, ItemPosition, ItemStorage, SLOT_ANY,
 };
 use ssr_core::mechanics::{FacialHair, Hair, Sex, facial_hair_style_names, hair_style_names};
 use ssr_core::mechanics::{Ghost, KNOCKDOWN_SECS, KnockedDown, Sprinting};
@@ -171,6 +171,7 @@ fn main() {
                 equip_spawned_guns,
                 fire_weapons,
                 move_projectiles,
+                move_thrown,
                 flush_world_sounds,
                 reload_weapons,
                 gun_test,
@@ -306,6 +307,8 @@ struct ProtoCatalog {
     slots: std::collections::HashMap<String, Vec<ssr_core::prototypes::ProtoItemSlot>>,
     /// Теги прототипов — по ним магазин находит подходящий патрон.
     item_tags: std::collections::HashMap<String, Vec<String>>,
+    /// Storage прототипов (StorageComponent): пояс, сумка, коробка.
+    storages: std::collections::HashMap<String, ssr_core::prototypes::ProtoStorage>,
 }
 
 /// Данные структуры из прототипа (стол, машина, шкаф).
@@ -372,6 +375,11 @@ impl ProtoCatalog {
             .clone()
     }
 
+    /// `Storage` прототипа (`StorageComponent`): сетка и максимальный размер.
+    fn storage_of(&self, id: &str) -> Option<&ssr_core::prototypes::ProtoStorage> {
+        self.storages.get(id)
+    }
+
     /// Патрон для магазина по его тегам: в сборке `BallisticAmmoProvider.whitelist`
     /// принимает `CartridgePistol`; ищем первый патрон с общим тегом (нужно для
     /// ручного снаряжения магазинов — P1 `MayTransfer`).
@@ -431,6 +439,10 @@ fn load_prototypes(mut commands: Commands) {
                     catalog
                         .slots
                         .insert(proto.id.clone(), proto.item_slots.clone());
+                }
+                // `Storage` (пояс/сумка/коробка): сетка и максимальный размер.
+                if let Some(storage) = &proto.storage {
+                    catalog.storages.insert(proto.id.clone(), storage.clone());
                 }
                 if !proto.tags.is_empty() {
                     catalog
@@ -618,15 +630,33 @@ const ATMOS_STEP_SECS: f32 = 0.2;
 /// Внимание: явная схема с 4 соседями устойчива только при K <= 0.25.
 const DIFFUSION_K: f32 = 0.2;
 
-/// Автоматика двери (как в SS14): открывается при подходе игрока с доступом,
-/// закрывается через [`AUTO_CLOSE_SECS`] после того, как рядом никого не осталось.
-const AUTO_DOOR_RANGE: f32 = 44.0;
-const AUTO_CLOSE_SECS: f32 = 4.0;
+/// Автоматика двери (как в SS14): дверь открывается НЕ по близости, а когда
+/// игрок с доступом идёт вплотную (толчок, `DoorSystem` в сборке реагирует на
+/// столкновение тела с дверью); закрывается через [`AUTO_CLOSE_SECS`], пока в
+/// проёме никого нет (`Safety`).
+const AUTO_CLOSE_SECS: f32 = 5.0;
 
 /// Таймер автозакрытия двери (только сервер, не реплицируется).
 #[derive(Component)]
 struct DoorAuto {
     close_in: f32,
+}
+
+/// Скорость брошенного предмета, юнит/с: в сборке бросок ~10 тайлов/с
+/// (`SharedHandsSystem.TryThrow`, тайл 1 м → у нас 32 юнита).
+const THROW_SPEED: f32 = 320.0;
+/// Время полёта брошенного предмета, с (дальше гаснет скорость — как трение).
+const THROW_LIFETIME: f32 = 0.5;
+/// Дальность аккуратного дропа Q: InteractionRange (1.5 тайла) в сборке.
+const DROP_RANGE: f32 = INTERACT_RANGE;
+
+/// Брошенный предмет (`ThrownItemComponent` в сборке): летит по прямой,
+/// гасится о стену или игрока, затем остаётся лежать. Только сервер: клиент
+/// видит полёт по обновлениям `ItemPosition`.
+#[derive(Component)]
+struct Thrown {
+    velocity: [f32; 2],
+    lifetime: f32,
 }
 
 /// Атмосфера мира (T4.3, lite): единая сетка газа по тайлам карты.
@@ -1144,17 +1174,27 @@ fn knockdown_tick(
     }
 }
 
-/// Автоматика дверей (как в SS14): подошёл игрок с доступом — дверь
-/// открывается; ушёл — закрывается через [`AUTO_CLOSE_SECS`].
+/// Двери по модели SS14: НЕ открываются от близости, а только от ТОЛЧКА
+/// (игрок идёт вплотную в дверь — аналог bump-open через `PhysicsController`)
+/// или от руки (Interact). Открытая дверь закрывается через
+/// [`AUTO_CLOSE_SECS`] (у шлюза в сборке `secondsUntilAutoclose = 5`), пока в
+/// проёме кто-то стоит — не закрывается (`Safety`). Раньше дверь открывалась
+/// от близости 44 юнита и тут же захлопывалась после ручного открытия из
+/// «мёртвой зоны» 44–48, а ручное закрытие рядом мгновенно отменялось.
+#[allow(clippy::too_many_arguments)]
 fn auto_doors(
     mut commands: Commands,
     time: Res<Time>,
     mut doors: Query<(Entity, &mut Door, &mut DoorAuto)>,
     positions: Query<&PlayerPosition>,
+    inputs: Query<&PlayerInput>,
     access: Query<&Access>,
     powered: Query<&Powered>,
     players: Res<Players>,
 ) {
+    // Радиус толчка: центр игрока вплотную к двери (дальше половины тайла
+    // плюс радиус тела коллизия ещё не подпускает).
+    const BUMP_RANGE: f32 = 30.0;
     for (entity, mut door, mut auto) in doors.iter_mut() {
         // Без питания дверь не работает (T4.4) и закрывается, если была открыта.
         if !powered.get(entity).map(|state| state.0).unwrap_or(true) {
@@ -1166,12 +1206,14 @@ fn auto_doors(
             continue;
         }
         let center = Vec2::from_array(door.position);
-        let mut nearby = false;
+        let mut bumping = false; // допущенный игрок идёт вплотную в дверь
+        let mut blocked = false; // кто-то стоит в проёме — не закрывать
         for entry in &players.entries {
             let Ok(position) = positions.get(entry.player) else {
                 continue;
             };
-            if Vec2::from_array(position.0).distance(center) > AUTO_DOOR_RANGE {
+            let distance = Vec2::from_array(position.0).distance(center);
+            if distance > BUMP_RANGE {
                 continue;
             }
             let allowed = match door.access.as_deref() {
@@ -1181,19 +1223,28 @@ fn auto_doors(
                     .map(|keys| keys.list.iter().any(|key| key == required))
                     .unwrap_or(false),
             };
-            if allowed {
-                nearby = true;
-                break;
+            if !allowed {
+                continue;
+            }
+            blocked = true;
+            let moving = inputs
+                .get(entry.player)
+                .map(|input| input.direction != [0.0, 0.0])
+                .unwrap_or(false);
+            if moving {
+                bumping = true;
             }
         }
-        if nearby {
+        if bumping && !door.open {
+            door.open = true;
+            commands.entity(entity).insert(ColliderDisabled);
             auto.close_in = AUTO_CLOSE_SECS;
-            if !door.open {
-                door.open = true;
-                commands.entity(entity).insert(ColliderDisabled);
-                tracing::info!(door = ?entity, "door auto-opened");
-            }
+            tracing::info!(door = ?entity, "door bumped open");
         } else if door.open {
+            if blocked {
+                auto.close_in = AUTO_CLOSE_SECS;
+                continue;
+            }
             auto.close_in -= time.delta_secs();
             if auto.close_in <= 0.0 {
                 door.open = false;
@@ -1573,6 +1624,8 @@ struct AuxParams<'w, 's> {
     reload_queue: ResMut<'w, weapons::ReloadQueue>,
     /// Системные сообщения чата (вход/выход игрока, призрак).
     system_chat: ResMut<'w, SystemChatQueue>,
+    /// Хранилища предметов (пояса/сумки) — проверка доступа из сообщений.
+    item_storages: Query<'w, 's, &'static ItemStorage>,
 }
 
 /// Индекс из времени: без внешних RNG-зависимостей.
@@ -2000,6 +2053,118 @@ fn send_system_to(
     }
 }
 
+/// Снимает слот с игрока и каскадно зависимые слоты (`dependsOn` шаблона
+/// человека, как `TryUnequip` в Equip.cs:458): снятое — в свободную руку,
+/// иначе под ноги (`HandsSystem.PickupOrDrop`). Общая для ClientMessage::Unequip
+/// и верба «Снять» (ActionKind::Unequip).
+fn unequip_slot(
+    commands: &mut Commands,
+    clothings: &mut Query<&mut Clothing>,
+    hands: &mut Query<&mut Hands>,
+    positions: &Query<&PlayerPosition>,
+    player: Entity,
+    slot: ClothingSlot,
+) {
+    let Ok(mut clothing) = clothings.get_mut(player) else {
+        return;
+    };
+    let Some(item) = clothing.unequip(slot) else {
+        return;
+    };
+    let mut removed = vec![item];
+    for dependent in slot.dependents() {
+        if let Some(extra) = clothing.unequip(*dependent) {
+            removed.push(extra);
+        }
+    }
+    for item in removed {
+        // Приёмник — как в сборке: `TryUnequip` (Equip.cs:473-475) кладёт снятое
+        // `DropNextTo`, а `OnUseSlot` — через `HandsSystem.PickupOrDrop`
+        // (Equip.cs:102): свободная рука, иначе пол. В РЮКЗАК НЕ КЛАДЁМ: снятый
+        // рюкзак попадал в собственную сетку и исчезал (владелец: «сняв его
+        // кликом он тупо исчезает»).
+        let mut placed = false;
+        if let Ok(mut hand) = hands.get_mut(player) {
+            placed = hand.take_in_active(item);
+        }
+        if !placed
+            && let (Ok(position), Some(entity)) =
+                (positions.get(player), Entity::try_from_bits(item))
+        {
+            commands.entity(entity).insert((
+                HeldBy { player: 0 },
+                ItemPosition([position.0[0], position.0[1] - TILE_SIZE * 0.8]),
+            ));
+        }
+    }
+}
+
+/// Даёт предмету хранилище из прототипа (`StorageComponent`): сетка —
+/// ограничивающий прямоугольник `Storage.grid` (у пояса `0,0,7,1` → 8×2).
+/// Вызывается при надевании и при спавне экипировки; при снятии компоненты
+/// остаются — содержимое пояса сохраняется, как в сборке.
+fn attach_item_storage(
+    commands: &mut Commands,
+    prototypes: &ProtoCatalog,
+    inventories: &Query<&mut Inventory>,
+    name: &str,
+    item: Entity,
+) {
+    let Some(storage) = prototypes.storage_of(name) else {
+        return;
+    };
+    if inventories.get(item).is_ok() {
+        return; // сетка уже есть — содержимое не сбрасываем
+    }
+    // Ограничивающий прямоугольник всех боксов сетки.
+    let Some(&(x0, y0, x1, y1)) = storage.grid.first() else {
+        return;
+    };
+    let bounds = storage
+        .grid
+        .iter()
+        .skip(1)
+        .fold((x0, y0, x1, y1), |(lx, ly, hx, hy), (a, b, c, d)| {
+            (lx.min(*a), ly.min(*b), hx.max(*c), hy.max(*d))
+        });
+    let cols = (bounds.2 - bounds.0 + 1).clamp(1, 16) as u8;
+    let rows = (bounds.3 - bounds.1 + 1).clamp(1, 16) as u8;
+    commands
+        .entity(item)
+        .insert((ItemStorage { open: false }, Inventory::with_size(cols, rows)));
+    tracing::info!(name, cols, rows, "item storage attached");
+}
+
+/// Доступно ли хранилище предмета: открыто И (носитель — это сам игрок ИЛИ
+/// предмет лежит рядом). Для надетого пояса позиции нет — доступ по одежде.
+fn storage_accessible(
+    item_storages: &Query<&ItemStorage>,
+    item_positions: &Query<&ItemPosition>,
+    clothings: &Query<&mut Clothing>,
+    player: Entity,
+    container: Entity,
+    player_position: [f32; 2],
+) -> bool {
+    if !item_storages.get(container).is_ok_and(|storage| storage.open) {
+        return false;
+    }
+    if clothings
+        .get(player)
+        .map(|clothing| clothing.contains(container.to_bits()))
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    item_positions
+        .get(container)
+        .map(|position| {
+            let dx = position.0[0] - player_position[0];
+            let dy = position.0[1] - player_position[1];
+            dx * dx + dy * dy <= INTERACT_RANGE * INTERACT_RANGE
+        })
+        .unwrap_or(false)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_client_messages(
     mut commands: Commands,
@@ -2399,7 +2564,7 @@ fn handle_client_messages(
                         }
                     }
                 }
-                ClientMessage::DropHand => {
+                ClientMessage::DropHand { target, throw } => {
                     let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {
                         continue;
                     };
@@ -2411,17 +2576,46 @@ fn handle_client_messages(
                         continue;
                     };
                     hand.take(item);
-                    // Выброс на пол (механики владельца): предмет остаётся сущностью,
-                    // но теряет владельца и получает мировую позицию.
+                    let Some(entity) = Entity::try_from_bits(item) else {
+                        continue;
+                    };
+                    // SS14 (`SharedHandsSystem`): Q кладёт предмет К КУРСОРУ,
+                    // но не дальше InteractionRange — дальше зажимаем к игроку;
+                    // Ctrl+Q (`ThrowItemInHand`) — бросок: предмет летит к
+                    // курсору и гасится о стены.
                     let Ok(position) = positions.get(player) else {
                         continue;
                     };
-                    if let Some(entity) = Entity::try_from_bits(item) {
-                        commands
-                            .entity(entity)
-                            .insert((HeldBy { player: 0 }, ItemPosition(position.0)));
-                        tracing::info!(item, position = ?position.0, "item dropped on floor");
+                    let from = position.0;
+                    let mut offset = [target[0] - from[0], target[1] - from[1]];
+                    let distance = (offset[0] * offset[0] + offset[1] * offset[1]).sqrt();
+                    if throw && distance > 8.0 {
+                        // Бросок: скорость из сборки ~10 тайлов/с (TILE 32 → 320
+                        // юнит/с), время полёта ограничено — как дальность руки.
+                        let speed = THROW_SPEED;
+                        let dir = [offset[0] / distance, offset[1] / distance];
+                        commands.entity(entity).insert((
+                            HeldBy { player: 0 },
+                            ItemPosition(from),
+                            Thrown {
+                                velocity: [dir[0] * speed, dir[1] * speed],
+                                lifetime: THROW_LIFETIME,
+                            },
+                        ));
+                        tracing::info!(item, target = ?target, "item thrown");
+                        continue;
                     }
+                    if distance > DROP_RANGE {
+                        offset = [
+                            offset[0] / distance * DROP_RANGE,
+                            offset[1] / distance * DROP_RANGE,
+                        ];
+                    }
+                    let at = [from[0] + offset[0], from[1] + offset[1]];
+                    commands
+                        .entity(entity)
+                        .insert((HeldBy { player: 0 }, ItemPosition(at)));
+                    tracing::info!(item, at = ?at, "item dropped on floor");
                 }
                 ClientMessage::Shoot { dir } => {
                     let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {
@@ -2653,53 +2847,115 @@ fn handle_client_messages(
                             ));
                         }
                     }
+                    if let Some(entity) = Entity::try_from_bits(item) {
+                        attach_item_storage(
+                            &mut commands,
+                            &content.prototypes,
+                            &inventories,
+                            &name,
+                            entity,
+                        );
+                    }
                     tracing::info!(%name, slot = slot.id(), from_hand = in_hand, "clothing equipped");
                 }
                 ClientMessage::Unequip { slot } => {
                     let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {
                         continue;
                     };
-                    let player = entry.player;
                     let Some(slot) = ClothingSlot::from_id(&slot) else {
                         continue;
                     };
-                    let Ok(mut clothing) = aux.clothings.get_mut(player) else {
+                    let player = entry.player;
+                    unequip_slot(
+                        &mut commands,
+                        &mut aux.clothings,
+                        &mut hands,
+                        &positions,
+                        player,
+                        slot,
+                    );
+                    tracing::info!(slot = slot.id(), "clothing unequipped");
+                }
+                ClientMessage::StoragePut { container, item } => {
+                    // Положить предмет из активной руки в хранилище предмета
+                    // (окно пояса в сборке: перетаскивание в StorageWindow).
+                    let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {
                         continue;
                     };
-                    let Some(item) = clothing.unequip(slot) else {
+                    let player = entry.player;
+                    let Some(container_entity) = Entity::try_from_bits(container) else {
                         continue;
                     };
-                    // Каскад зависимых слотов (`dependsOn` шаблона человека):
-                    // снимая комбинезон, снимаем карманы и ID, снимая верхнюю
-                    // одежду — разгрузку (в сборке это `TryUnequip`, Equip.cs:458).
-                    let mut removed = vec![item];
-                    for dependent in slot.dependents() {
-                        if let Some(extra) = clothing.unequip(*dependent) {
-                            removed.push(extra);
-                        }
+                    // Хранилище открыто и доступно (носитель или рядом).
+                    if !storage_accessible(
+                        &aux.item_storages,
+                        &item_positions,
+                        &aux.clothings,
+                        player,
+                        container_entity,
+                        positions.get(player).map(|p| p.0).unwrap_or_default(),
+                    ) {
+                        continue;
                     }
-                    for item in removed {
-                        // Приёмник — как в сборке: `TryUnequip` (Equip.cs:473-475)
-                        // кладёт снятое `DropNextTo`, а `OnUseSlot` — через
-                        // `HandsSystem.PickupOrDrop` (Equip.cs:102): свободная рука,
-                        // иначе пол. В РЮКЗАК НЕ КЛАДЁМ: снятый рюкзак попадал в
-                        // собственную сетку и исчезал (владелец: «сняв его кликом
-                        // он тупо исчезает»).
-                        let mut placed = false;
-                        if let Ok(mut hand) = hands.get_mut(player) {
-                            placed = hand.take_in_active(item);
-                        }
-                        if !placed
-                            && let (Ok(position), Some(entity)) =
-                                (positions.get(player), Entity::try_from_bits(item))
-                        {
-                            commands.entity(entity).insert((
-                                HeldBy { player: 0 },
-                                ItemPosition([position.0[0], position.0[1] - TILE_SIZE * 0.8]),
-                            ));
-                        }
+                    let Ok(mut hand) = hands.get_mut(player) else {
+                        continue;
+                    };
+                    if hand.active_item() != Some(item) {
+                        tracing::warn!(item, "storage put: item is not in the active hand");
+                        continue;
                     }
-                    tracing::info!(slot = slot.id(), item, "clothing unequipped");
+                    let (w, h) = item_size_of(&content.catalogs, &content.prototypes, &items, item);
+                    let Ok(mut dest) = inventories.get_mut(container_entity) else {
+                        continue;
+                    };
+                    let Some(index) = dest.put_first_fit(item, w, h) else {
+                        tracing::warn!(item, "storage put: no room");
+                        continue;
+                    };
+                    hand.take(item);
+                    tracing::info!(item, container, index, "item stored");
+                }
+                ClientMessage::StorageTake { container, slot } => {
+                    // Взять из хранилища в активную руку (клик по ячейке окна;
+                    // рука занята — оставляем в хранилище, как отмена перетаскивания).
+                    let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {
+                        continue;
+                    };
+                    let player = entry.player;
+                    let Some(container_entity) = Entity::try_from_bits(container) else {
+                        continue;
+                    };
+                    if !storage_accessible(
+                        &aux.item_storages,
+                        &item_positions,
+                        &aux.clothings,
+                        player,
+                        container_entity,
+                        positions.get(player).map(|p| p.0).unwrap_or_default(),
+                    ) {
+                        continue;
+                    }
+                    let Ok(mut source) = inventories.get_mut(container_entity) else {
+                        continue;
+                    };
+                    let Some(item) = source.cells.get(slot as usize).copied().flatten() else {
+                        continue;
+                    };
+                    let to_hand = match hands.get_mut(player) {
+                        Ok(mut hand) => hand.take_in_active(item),
+                        Err(_) => false,
+                    };
+                    if !to_hand {
+                        tracing::warn!(item, "storage take: active hand is busy");
+                        continue;
+                    }
+                    source.take(item);
+                    if let Some(entity) = Entity::try_from_bits(item) {
+                        commands.entity(entity).insert(HeldBy {
+                            player: player.to_bits(),
+                        });
+                    }
+                    tracing::info!(item, container, slot, "item taken from storage");
                 }
                 ClientMessage::Chat { channel, text } => {
                     let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {
@@ -2951,6 +3207,13 @@ fn handle_client_messages(
                 continue;
             };
             clothing.equip(slot, item.to_bits());
+            attach_item_storage(
+                &mut commands,
+                &content.prototypes,
+                &inventories,
+                worn_name,
+                item,
+            );
         }
         commands.entity(player).insert(clothing);
         // Пол: варианты есть только у head/chest/groin (SS14 HasSexMorph).
@@ -3382,6 +3645,11 @@ fn spawn_walls(mut commands: Commands, map: Res<GameMap>, mut index: ResMut<MapI
 #[derive(bevy::ecs::system::SystemParam)]
 struct ActionQueries<'w, 's> {
     healths: Query<'w, 's, &'static mut Health>,
+    clothings: Query<'w, 's, &'static mut Clothing>,
+    /// Хранилища предметов (пояса/сумки) и авто-закрытие дверей — здесь, чтобы
+    /// у `process_actions` не превышался предел числа параметров (16).
+    item_storages: Query<'w, 's, &'static mut ItemStorage>,
+    door_autos: Query<'w, 's, &'static mut DoorAuto>,
     access: Query<'w, 's, &'static Access>,
     powered: Query<'w, 's, &'static Powered>,
     pulling: Query<'w, 's, &'static Pulling>,
@@ -3608,6 +3876,49 @@ fn process_actions(
                                 action: ActionKind::Attack { target: entity },
                                 ..verb_default(ssr_core::verbs::VerbType::Interaction)
                             });
+                        }
+                        // Экипировка цели (SS14: ПКМ по игроку показывает
+                        // вербы его одежды — `StrippingSystem`/InventorySystem):
+                        // «Снять» (только с себя), «Осмотреть» каждый предмет.
+                        if let Ok(clothing) = world.clothings.get(target) {
+                            for (slot, item_bits) in &clothing.slots {
+                                let Some(item_entity) = Entity::try_from_bits(*item_bits) else {
+                                    continue;
+                                };
+                                let item_name = items
+                                    .get(item_entity)
+                                    .map(|item| item.name.clone())
+                                    .unwrap_or_default();
+                                let mut unequip = ActionOption {
+                                    label: format!("Снять: {item_name}"),
+                                    action: ActionKind::Unequip {
+                                        slot: slot.id().to_string(),
+                                    },
+                                    icon: Some(
+                                        "Interface/VerbIcons/equip.svg.192dpi.png".to_string(),
+                                    ),
+                                    ..verb_default(ssr_core::verbs::VerbType::Interaction)
+                                };
+                                if target != player {
+                                    // Стриппинг чужой одежды — StrippingComponent,
+                                    // в порте ещё нет: верб виден, но отключён.
+                                    unequip.disabled = true;
+                                    unequip.message = Some("Можно снимать только с себя".into());
+                                }
+                                options.push(unequip);
+                                options.push(ActionOption {
+                                    label: format!("Осмотреть: {item_name}"),
+                                    action: ActionKind::Examine {
+                                        entity: *item_bits,
+                                    },
+                                    icon: Some(
+                                        "Interface/VerbIcons/examine.svg.192dpi.png".into(),
+                                    ),
+                                    priority: 10,
+                                    close_menu: Some(false),
+                                    ..verb_default(ssr_core::verbs::VerbType::Examine)
+                                });
+                            }
                         }
                         // Предмет: «Взять» (`AddPickupVerb`) и «Осмотреть»
                         // (`AddExamineVerb`, категория Examine, приоритет 10).
@@ -4018,6 +4329,14 @@ fn process_actions(
                     continue;
                 };
                 let Ok(mut door) = doors.get_mut(target) else {
+                    // Хранилище предмета (`StorageComponent`): пояс/сумка —
+                    // окно StorageWindow, содержимое НЕ высыпается. Открыть
+                    // может носитель (предмет надет) — позиций у него нет.
+                    if let Ok(mut storage) = world.item_storages.get_mut(target) {
+                        storage.open = !storage.open;
+                        tracing::info!(item = ?target, open = storage.open, "item storage toggled");
+                        continue;
+                    }
                     // Не дверь — возможно, контейнер (T3.4): открыть/закрыть.
                     if let Ok(mut container) = containers.get_mut(target) {
                         let dx = container_positions
@@ -4191,10 +4510,30 @@ fn process_actions(
                 door.open = !door.open;
                 if door.open {
                     commands.entity(target).insert(ColliderDisabled);
+                    // Ручное открытие тоже запускает авто-закрытие (`DoorSystem`:
+                    // secondsUntilAutoclose), иначе дверь стояла бы открытой.
+                    if let Ok(mut auto) = world.door_autos.get_mut(target) {
+                        auto.close_in = AUTO_CLOSE_SECS;
+                    }
                 } else {
                     commands.entity(target).remove::<ColliderDisabled>();
                 }
                 tracing::info!(door = ?target, open = door.open, "door toggled");
+            }
+            ActionKind::Unequip { slot } => {
+                // Верб «Снять» (ПКМ по себе → вербы экипировки): тот же каскад,
+                // что и ClientMessage::Unequip (`TryUnequip` в сборке).
+                let Some(slot) = ClothingSlot::from_id(&slot) else {
+                    continue;
+                };
+                unequip_slot(
+                    &mut commands,
+                    &mut world.clothings,
+                    &mut hands,
+                    &positions,
+                    player,
+                    slot,
+                );
             }
             ActionKind::UseItem { item, tx, ty } => {
                 let Ok(player_position) = positions.get(player) else {
@@ -4815,6 +5154,37 @@ fn move_projectiles(
                 tracing::info!(proto = %projectile.proto, x, y, "projectile hit");
             }
             commands.entity(entity).despawn();
+        }
+    }
+}
+
+/// Полёт брошенного предмета (Ctrl+Q, `ThrownItemComponent` в сборке):
+/// летит по прямой, гасится о стену или игрока, затем просто лежит.
+/// Урон от броска в сборке считается по массе и скорости (`ThrowRegion`) —
+/// добавим при переносе масс предметов (PORT_PLAN 2.x).
+fn move_thrown(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut thrown: Query<(Entity, &mut Thrown, &mut ItemPosition)>,
+    map: Res<GameMap>,
+    players: Query<&PlayerPosition>,
+) {
+    let dt = time.delta_secs();
+    for (entity, mut item, mut position) in thrown.iter_mut() {
+        position.0[0] += item.velocity[0] * dt;
+        position.0[1] += item.velocity[1] * dt;
+        item.lifetime -= dt;
+        let (x, y) = (position.0[0], position.0[1]);
+        let stopped = item.lifetime <= 0.0
+            || wall_at(&map, x, y)
+            || players.iter().any(|player_position| {
+                let dx = player_position.0[0] - x;
+                let dy = player_position.0[1] - y;
+                dx * dx + dy * dy < (TILE_SIZE * 0.5) * (TILE_SIZE * 0.5)
+            });
+        if stopped {
+            commands.entity(entity).remove::<Thrown>();
+            tracing::info!(item = ?entity, x, y, "thrown item landed");
         }
     }
 }

@@ -293,7 +293,7 @@ pub fn render_container_panel(
                         ));
                     }
                     // Предметы поверх — во всю занятую площадь (тетрис).
-                    for (bits, x, y, w, h) in ssr_core::inventory::item_layout(&slots) {
+                    for (bits, x, y, w, h) in ssr_core::inventory::item_layout(ssr_core::inventory::INVENTORY_COLS, &slots) {
                         let Some(sprite) = sprites.icon(bits) else {
                             continue;
                         };

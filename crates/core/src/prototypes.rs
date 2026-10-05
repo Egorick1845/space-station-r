@@ -310,6 +310,20 @@ impl ProtoSet {
         self.protos.iter().map(|p| (p.id.as_str(), p)).collect()
     }
 
+    /// Прототип по ЛОКАЛИЗОВАННОМУ ИМЕНИ предмета (`Item.name` у сущностей —
+    /// это `name` прототипа; `id` клиенту не известен).
+    pub fn by_name(&self, name: &str) -> Option<&Proto> {
+        self.protos
+            .iter()
+            .find(|proto| proto.name.as_deref() == Some(name))
+    }
+
+    /// `Storage` прототипа по имени предмета (`StorageComponent`: сетка и
+    /// максимальный размер вкладываемого).
+    pub fn storage_of(&self, name: &str) -> Option<&ProtoStorage> {
+        self.by_name(name)?.storage.as_ref()
+    }
+
     /// Габариты предмета по его размеру-прототипу (`Item.size` → `itemSize`).
     pub fn size_cells(&self, id: &str) -> Option<(u8, u8)> {
         let proto = self.protos.iter().find(|proto| proto.id == id)?;

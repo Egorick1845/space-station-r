@@ -175,6 +175,13 @@ impl Clothing {
     pub fn has_backpack(&self) -> bool {
         self.get(ClothingSlot::Back).is_some()
     }
+
+    /// Надет ли этот предмет (bits) в любой слот: нужно, чтобы понять, доступно
+    /// ли хранилище предмета (`StorageComponent`) — носитель может открыть его
+    /// без проверки расстояния (`StorageSystem`: владелец рядом всегда).
+    pub fn contains(&self, item: u64) -> bool {
+        self.slots.iter().any(|(_, worn)| *worn == item)
+    }
 }
 
 #[cfg(test)]
