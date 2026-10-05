@@ -18,6 +18,8 @@ pub struct ClientContent {
     pub proto_names: HashMap<String, String>,
     /// Размер предмета из прототипа: id → id размера (`Normal`, `Small`, …).
     pub proto_sizes: HashMap<String, String>,
+    /// Явная форма предмета (`Item.shape`): id → габариты в клетках (лом 1×2).
+    pub proto_shapes: HashMap<String, (u8, u8)>,
     /// `IconSmooth` прототипа: id → (ключ соединения, база состояния) — у столов
     /// `("table", "state_")`, состояния спрайта `state_0`…`state_15`.
     pub proto_smooth: HashMap<String, (String, String)>,
@@ -97,6 +99,10 @@ pub fn load_content(mut commands: Commands) {
                 }
                 if let Some(size) = proto.size {
                     content.proto_sizes.insert(proto.id.clone(), size);
+                }
+                // Явная форма (`Item.shape`) — перекрывает размер (лом 1×2).
+                if let Some(cells) = ssr_core::item_size::cells_of_shape(&proto.shape) {
+                    content.proto_shapes.insert(proto.id.clone(), cells);
                 }
                 if let Some(smooth) = proto.smooth {
                     content

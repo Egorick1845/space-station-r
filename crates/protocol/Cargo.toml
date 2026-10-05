@@ -6,13 +6,15 @@ publish.workspace = true
 
 [features]
 # Сетевой слой для lightyear: опционален, чтобы базовый крейт оставался serde-only (PLAN.md §4)
-net = ["dep:lightyear", "dep:bevy_app", "dep:ssr-core"]
+net = ["dep:lightyear", "dep:bevy_app"]
 
 [dependencies]
 serde = { workspace = true }
 lightyear = { workspace = true, optional = true }
 bevy_app = { workspace = true, optional = true }
-ssr-core = { workspace = true, optional = true }
+# Типы вербов (`VerbType`/`VerbCategory`) нужны в сообщениях — зависимость
+# безусловная, крейт всё равно лёгкий (serde + core).
+ssr-core = { workspace = true }
 
 [dev-dependencies]
 postcard = { workspace = true, features = ["alloc"] }

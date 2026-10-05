@@ -31,6 +31,11 @@ pub struct Proto {
     /// Размер предмета (Small/Medium/Large).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<String>,
+    /// `Item.shape` — ЯВНАЯ форма предмета в клетках инвентаря (`Box2i` со
+    /// включительными границами). Перекрывает `defaultShape` размера: у лома
+    /// `Normal` + `shape: [0,0,0,1]` = 1×2, у стали `Normal` без формы = 2×2.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shape: Vec<(i32, i32, i32, i32)>,
     /// Слот экипировки (belt/head/...).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub equip: Option<String>,

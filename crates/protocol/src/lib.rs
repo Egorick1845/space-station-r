@@ -156,13 +156,85 @@ pub enum ActionKind {
     /// Тянуть сущность за собой (верб «Тянуть», `PullMessage` в сборке).
     /// Повторное действие по той же цели отпускает её.
     Pull { target: u64 },
+    /// Админ-верб «Удалить» (`delete-verb-get-data-text`, категория Debug).
+    Delete { entity: u64 },
+    /// Дебаг-верб «Оживить» (`rejuvenate-verb-get-data-text`).
+    Rejuvenate { entity: u64 },
+    /// Админ-верб «Стать призраком» (`aghost`).
+    AdminGhost,
+    /// Верб «View Variables» (`VvVerb`): открыть окно переменных сущности.
+    ViewVariables { entity: u64 },
 }
 
-/// Пункт меню действий: подпись + само действие.
+/// Пункт меню действий (верб): подпись, действие и метаданные из
+/// `Content.Shared/Verbs/Verb.cs` — тип (шрифт и `TypePriority`), категория
+/// (подменю), иконка, приоритет, недоступность с причиной.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ActionOption {
+    /// Текст верба (`Verb.Text`).
     pub label: String,
+    /// Исполняемое действие.
     pub action: ActionKind,
+    /// Тип верба: задаёт `TypePriority` и стиль шрифта (`Verb.cs:218-364`).
+    #[serde(default)]
+    pub kind: ssr_core::verbs::VerbType,
+    /// Категория (подменю); `None` — верхний уровень (`VerbCategory.cs`).
+    #[serde(default)]
+    pub category: Option<ssr_core::verbs::VerbCategory>,
+    /// Иконка (`SpriteSpecifier`).
+    #[serde(default)]
+    pub icon: Option<String>,
+    /// Приоритет внутри типа (`Verb.Priority`, больше — выше).
+    #[serde(default)]
+    pub priority: i32,
+    /// Недоступен: серый пункт, причина в `message` (`Verb.Disabled`).
+    #[serde(default)]
+    pub disabled: bool,
+    /// Причина недоступности / подсказка (`Verb.Message`).
+    #[serde(default)]
+    pub message: Option<String>,
+    /// Закрывать ли меню после исполнения (`Verb.CloseMenu`).
+    #[serde(default)]
+    pub close_menu: Option<bool>,
+    /// Верб исполняется на клиенте (`Verb.ClientExclusive`).
+    #[serde(default)]
+    pub client_exclusive: bool,
+    /// Требуется подтверждение (`Verb.ConfirmationPopup`).
+    #[serde(default)]
+    pub confirmation_popup: bool,
+}
+
+impl ActionOption {
+    /// Ключ сортировки — как `Verb.CompareTo` (`Verb.cs:169-207`): тип (убыв.),
+    /// приоритет (убыв.), категория (без категории — ПЕРВЫМИ), затем текст.
+    pub fn sort_key(&self) -> (i32, i32, u8, &str, &str) {
+        (
+            -self.kind.priority(),
+            -self.priority,
+            u8::from(self.category.is_some()),
+            self.category
+                .map(ssr_core::verbs::VerbCategory::text)
+                .unwrap_or(""),
+            self.label.as_str(),
+        )
+    }
+
+    /// Помещает верб в категорию (подменю).
+    pub fn in_category(mut self, category: ssr_core::verbs::VerbCategory) -> Self {
+        self.category = Some(category);
+        self
+    }
+
+    /// Закрывать ли меню (`CloseMenu ?? CloseMenuDefault`; у `ExamineVerb` — нет).
+    pub fn closes_menu(&self) -> bool {
+        self.close_menu
+            .unwrap_or(!matches!(self.kind, ssr_core::verbs::VerbType::Examine))
+    }
+
+    /// Стиль текста (`TextStyleClass`) — различие типов вербов в меню.
+    pub fn style_class(&self) -> &'static str {
+        self.kind.style_class()
+    }
 }
 
 /// Сообщения сервер → клиент.

@@ -261,3 +261,59 @@ pub fn shoot_test_mode(
     }
     tracing::info!(shot = state.1, "shoot test: выстрел отправлен");
 }
+
+/// Тест-режим `SSR_SPAWN_MENU_TEST=1`: клиент открывает панель спавна через
+/// 3 секунды после подключения (проверка списка и кликов без мыши).
+pub fn spawn_menu_test(
+    time: Res<Time>,
+    mut state: Local<(f32, bool)>,
+    mut hud: ResMut<crate::hud::HudState>,
+) {
+    if std::env::var_os("SSR_SPAWN_MENU_TEST").is_none() || state.1 {
+        return;
+    }
+    state.0 += time.delta_secs();
+    if state.0 < 3.0 {
+        return;
+    }
+    state.1 = true;
+    hud.spawn_open = true;
+    tracing::info!("spawn menu test: панель спавна открыта");
+}
+
+/// Тест-режим `SSR_VERB_TEST=1`: клиент через 4 с запрашивает вербы для СВОЕЙ
+/// сущности — проверка меню (Админ/Дебаг/View Variables) скриншотом.
+pub fn verb_test_mode(
+    time: Res<Time>,
+    own: Res<crate::inventory_ui::OwnPlayerEntity>,
+    mut menu: ResMut<crate::inventory_ui::ActionMenu>,
+    mut state: Local<(f32, bool)>,
+    mut senders: Query<&mut MessageSender<ClientMessage>, With<Connected>>,
+    windows: Query<&Window>,
+) {
+    if std::env::var_os("SSR_VERB_TEST").is_none() || state.1 {
+        return;
+    }
+    state.0 += time.delta_secs();
+    if state.0 < 4.0 {
+        return;
+    }
+    state.1 = true;
+    let Some(player) = own.0 else {
+        return;
+    };
+    let cursor = windows
+        .single()
+        .ok()
+        .and_then(|window| window.cursor_position())
+        .unwrap_or(Vec2::new(400.0, 300.0));
+    menu.cursor = cursor;
+    for mut sender in senders.iter_mut() {
+        sender.send::<ssr_protocol::net::GameChannel>(ClientMessage::RequestActions {
+            entity: player.to_bits(),
+            tx: 0,
+            ty: 0,
+        });
+    }
+    tracing::info!("verb test: вербы запрошены");
+}

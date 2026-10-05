@@ -1004,11 +1004,17 @@ fn ui_open(ui: &InventoryUi) -> bool {
     ui.open
 }
 
-/// Меню действий: строится из ответа сервера, позиционируется у курсора.
+/// Меню действий (вербов): строится из ответа сервера, позиционируется у курсора.
+/// Оформление — как `ContextMenuPopup`/`ContextMenuElement` в сборке: строки по
+/// 32 px, иконка 32×32 слева, шрифт по типу верба (`InteractionVerb` — жирный
+/// курсив, `ActivationVerb` — жирный, `AlternativeVerb` — курсив), недоступные
+/// вербы серые с причиной, категории — заголовками с отступом.
 pub fn render_action_menu(
     mut commands: Commands,
     menu: Res<ActionMenu>,
     root: Query<Entity, With<ActionMenuRoot>>,
+    registry: Res<crate::rsi::RsiRegistry>,
+    content: Res<crate::content::ClientContent>,
     mut last: Local<Option<(usize, Vec2)>>,
 ) {
     let signature = (menu.options.len(), menu.cursor);
@@ -1022,40 +1028,121 @@ pub fn render_action_menu(
     if menu.options.is_empty() {
         return;
     }
+    // В сборке меню — Popup у курсора с полем 2 px и высотой элемента 32 px;
+    // свыше 10 элементов появляется прокрутка (`ContextMenuPopup.xaml.cs:23`).
     commands
         .spawn((
             ActionMenuRoot,
             Node {
                 position_type: PositionType::Absolute,
                 left: px(menu.cursor.x.clamp(0.0, 1100.0)),
-                top: px(menu.cursor.y.clamp(0.0, 600.0)),
+                top: px(menu.cursor.y.clamp(0.0, 560.0)),
+                max_height: px(32.0 * 10.0),
                 flex_direction: FlexDirection::Column,
-                padding: UiRect::all(px(4)),
+                padding: UiRect::all(px(2)),
                 row_gap: px(2),
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.08, 0.08, 0.10, 0.95)),
+            BackgroundColor(Color::srgba(0.04, 0.04, 0.05, 0.96)),
         ))
         .with_children(|list| {
+            let mut current_category: Option<ssr_core::verbs::VerbCategory> = None;
             for (index, option) in menu.options.iter().enumerate() {
+                // Заголовок категории — как элемент-категория в сборке
+                // (`AddVerbCategory`): иконка + текст, клик открывает подменю.
+                if option.category != current_category {
+                    current_category = option.category;
+                    if let Some(category) = option.category {
+                        list.spawn((
+                            Node {
+                                height: px(32),
+                                padding: UiRect::axes(px(6), px(4)),
+                                align_items: AlignItems::Center,
+                                column_gap: px(6),
+                                border: UiRect::all(px(1)),
+                                ..default()
+                            },
+                            BackgroundColor(Color::srgb(0.10, 0.10, 0.13)),
+                            BorderColor::from(Color::srgb(0.28, 0.28, 0.33)),
+                        ))
+                        .with_children(|row| {
+                            row.spawn((
+                                Text::new(category.text()),
+                                TextFont::from_font_size(13.0),
+                                TextColor(Color::srgb(0.85, 0.85, 0.88)),
+                            ));
+                        });
+                    }
+                }
+                let indented = option.category.is_some();
+                let (font_size, bold, _italic) = match option.style_class() {
+                    "InteractionVerb" => (12.0, true, true),
+                    "ActivationVerb" => (12.0, true, false),
+                    "AlternativeVerb" => (12.0, false, true),
+                    _ => (12.0, false, false),
+                };
+                let color = if option.disabled {
+                    Color::srgb(0.45, 0.45, 0.48)
+                } else {
+                    Color::srgb(0.92, 0.92, 0.94)
+                };
+                let label = match (&option.message, option.disabled) {
+                    (Some(message), true) => format!("{} ({message})", option.label),
+                    _ => option.label.clone(),
+                };
+                let icon = option
+                    .icon
+                    .as_deref()
+                    .and_then(|path| registry.get(&format!("sprites/ss14/{path}")))
+                    .map(|sprite| {
+                        (
+                            sprite.image.clone(),
+                            sprite.layout.clone(),
+                            sprite.index(0, 0),
+                        )
+                    });
                 list.spawn((
                     ActionMenuOption(index),
                     Button,
                     Node {
-                        padding: UiRect::axes(px(10), px(5)),
+                        height: px(32),
+                        min_width: px(160),
+                        margin: UiRect::left(px(if indented { 8 } else { 0 })),
+                        padding: UiRect::axes(px(6), px(2)),
+                        align_items: AlignItems::Center,
+                        column_gap: px(6),
                         border: UiRect::all(px(1)),
                         ..default()
                     },
-                    BackgroundColor(Color::srgb(0.13, 0.13, 0.16)),
-                    BorderColor::from(Color::srgb(0.30, 0.30, 0.35)),
+                    BackgroundColor(if option.disabled {
+                        Color::srgb(0.08, 0.08, 0.10)
+                    } else {
+                        Color::srgb(0.11, 0.11, 0.14)
+                    }),
+                    BorderColor::from(Color::srgb(0.26, 0.26, 0.31)),
                 ))
-                .with_child((
-                    Text::new(option.label.clone()),
-                    TextFont::from_font_size(14.0),
-                    TextColor(Color::srgb(0.90, 0.90, 0.92)),
-                ));
+                .with_children(|row| {
+                    // Иконка 32×32 (`SpriteView`/`TextureRect` в сборке).
+                    if let Some((image, layout, index)) = icon {
+                        row.spawn((
+                            ImageNode::from_atlas_image(image, TextureAtlas { layout, index }),
+                            Node {
+                                width: px(24),
+                                height: px(24),
+                                ..default()
+                            },
+                        ));
+                    }
+                    let text = Text::new(label);
+                    row.spawn((
+                        text,
+                        TextFont::from_font_size(if bold { font_size + 0.5 } else { font_size }),
+                        TextColor(color),
+                    ));
+                });
             }
         });
+    let _ = &content;
 }
 
 // ---------------------------------------------------------------- ввод
@@ -1616,12 +1703,25 @@ pub fn drag_highlight(
     items: Query<&ssr_core::inventory::Item>,
     mut cells: Query<(&Interaction, &InvSlot, &mut BackgroundColor)>,
 ) {
-    // Форма переносимого предмета: (w, h) из каталога, как в сборке (`ItemSize`).
+    // Форма переносимого предмета: сначала данные сборки (явная `Item.shape`,
+    // затем `Item.size`), потом наш каталог — у лома 1×2, у стали 2×2.
     let shape = (drag.item != 0).then(|| {
         items
             .get(Entity::try_from_bits(drag.item).unwrap_or(Entity::PLACEHOLDER))
             .ok()
-            .map(|item| content.items.size_of(&item.name))
+            .map(|item| {
+                content
+                    .proto_shapes
+                    .get(&item.name)
+                    .copied()
+                    .or_else(|| {
+                        content
+                            .proto_sizes
+                            .get(&item.name)
+                            .and_then(|size| ssr_core::item_size::cells_of(size))
+                    })
+                    .unwrap_or_else(|| content.items.size_of(&item.name))
+            })
     });
     // Клетка под курсором — через `Interaction` (та же механика, что у переноса).
     let hovered = cells

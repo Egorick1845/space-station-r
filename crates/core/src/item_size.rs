@@ -128,6 +128,24 @@ pub fn fits(left: &str, right: &str) -> bool {
     }
 }
 
+/// Габариты явной формы предмета (`Item.shape`): объединяющий прямоугольник
+/// всех боксов. `None` — формы нет, берётся `defaultShape` размера.
+/// У лома в сборке `shape: [0,0,0,1]` при размере `Normal` → 1×2 клетки.
+pub fn cells_of_shape(shape: &[(i32, i32, i32, i32)]) -> Option<(u8, u8)> {
+    let first = shape.first()?;
+    let (mut left, mut bottom, mut right, mut top) = *first;
+    for (l, b, r, t) in shape.iter().skip(1) {
+        left = left.min(*l);
+        bottom = bottom.min(*b);
+        right = right.max(*r);
+        top = top.max(*t);
+    }
+    Some((
+        (right - left + 1).clamp(1, u8::MAX as i32) as u8,
+        (top - bottom + 1).clamp(1, u8::MAX as i32) as u8,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,5 +186,19 @@ mod tests {
         assert!(fits("Small", "Small"), "равный размер разрешён");
         assert!(fits("Tiny", "Small"));
         assert!(!fits("Normal", "Small"));
+    }
+
+    /// Явная форма перекрывает размер: лом 1×2 при размере `Normal`.
+    #[test]
+    fn explicit_shape_overrides_size_default() {
+        // Лом: `Item { size: Normal, shape: [0,0,0,1] }` → 1 клетка в ширину,
+        // 2 в высоту (`Resources/Prototypes/Entities/Objects/Tools/crowbars.yml:57-61`).
+        assert_eq!(cells_of_shape(&[(0, 0, 0, 1)]), Some((1, 2)));
+        // Сталь: `Normal` без формы → 2×2 (`defaultShape` размера).
+        assert_eq!(cells_of_shape(&[]), None);
+        assert_eq!(cells_of("Normal"), Some((2, 2)));
+        // Несколько боксов — объединяющий прямоугольник.
+        assert_eq!(cells_of_shape(&[(0, 0, 0, 0), (2, 0, 3, 0)]), Some((4, 1)));
+        assert_eq!(cells_of_shape(&[(0, 0, 0, 0), (0, 2, 0, 3)]), Some((1, 4)));
     }
 }

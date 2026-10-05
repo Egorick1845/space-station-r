@@ -242,6 +242,12 @@ impl Health {
         self.current = (self.current - amount).max(0);
         self.current == 0
     }
+
+    /// Полностью вылечить — дебаг-верб «Оживить» (`rejuvenate` в сборке лечит
+    /// и снимает станы; у нас здоровье и `KnockedDown`).
+    pub fn heal(&mut self) {
+        self.current = self.max;
+    }
 }
 
 /// Предмет удерживается игроком (руки/рюкзак): реплицируется, чтобы клиент

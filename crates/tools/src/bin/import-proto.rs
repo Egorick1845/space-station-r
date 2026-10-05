@@ -272,6 +272,7 @@ fn resolve(
     let mut sprite = None;
     let mut tags = Vec::new();
     let mut size = None;
+    let mut shape: Vec<(i32, i32, i32, i32)> = Vec::new();
     let mut equip = None;
     let mut storage = None;
     let mut clothing_slots = Vec::new();
@@ -328,6 +329,9 @@ fn resolve(
             "Item" => {
                 // `ItemComponent.Size` по умолчанию `Small` (`ItemComponent.cs:23`).
                 size = Some(value["size"].as_str().unwrap_or("Small").to_string());
+                // `Item.shape` — явная форма, перекрывает `defaultShape` размера:
+                // у лома `[0,0,0,1]` при размере `Normal` = 1×2 клетки.
+                shape = parse_shape(&value["shape"]);
                 is_item = true;
             }
             "Icon" => {
@@ -538,6 +542,7 @@ fn resolve(
             sprite,
             tags,
             size,
+            shape,
             equip,
             abstract_: proto.abstract_,
             storage,
@@ -628,6 +633,23 @@ fn merge_value(parent: &Value, child: &Value) -> Value {
         }
         _ => child.clone(),
     }
+}
+
+/// `Item.shape` — список боксов `"x1,y1,x2,y2"` (включительные границы).
+fn parse_shape(value: &Value) -> Vec<(i32, i32, i32, i32)> {
+    let Some(list) = value.as_sequence() else {
+        return Vec::new();
+    };
+    list.iter()
+        .filter_map(|entry| {
+            let text = entry.as_str()?;
+            let parts: Vec<i32> = text
+                .split(',')
+                .filter_map(|part| part.trim().parse().ok())
+                .collect();
+            (parts.len() == 4).then(|| (parts[0], parts[1], parts[2], parts[3]))
+        })
+        .collect()
 }
 
 /// Снимает YAML-тег (`!type:PhysShapeAabb`) — значения читаются из `.value`.

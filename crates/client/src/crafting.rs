@@ -39,15 +39,20 @@ type CraftClicks<'w, 's> = Query<
     (Changed<Interaction>, With<Button>),
 >;
 
-/// Клавиша C открывает и закрывает панель крафта.
+/// Клавиша G открывает и закрывает панель крафта (в сборке `OpenCraftingMenu`
+/// привязан к G, `Resources/keybinds.yml:248-250`). На Esc панель закрывает
+/// `hud::close_windows_on_escape` — как `CloseModals` (Esc) в сборке.
 pub fn toggle_crafting(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
     console: Res<crate::console::Console>,
+    chat: Res<crate::chat::ChatState>,
     mut state: ResMut<CraftingState>,
     root: Query<Entity, With<CraftingRoot>>,
 ) {
-    if console.open || !keys.just_pressed(KeyCode::KeyC) {
+    // Пока игрок печатает в чате или в консоли — клавиша не открывает панель
+    // («слишком настойчиво открывается»).
+    if console.open || chat.focused || !keys.just_pressed(KeyCode::KeyG) {
         return;
     }
     state.open = !state.open;

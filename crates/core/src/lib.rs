@@ -27,6 +27,7 @@ pub mod ss14_proto;
 pub mod stamina;
 pub mod structures;
 pub mod tiles;
+pub mod verbs;
 pub mod weapons;
 
 /// Корень workspace (для доступа к assets/ из инструментов и headless-сервера).

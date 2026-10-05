@@ -1014,9 +1014,8 @@ pub fn hud_hotkeys(
             ui.character_open = !ui.character_open;
         }
     }
-    if keys.just_pressed(KeyCode::KeyC) {
-        crafting.open = !crafting.open;
-    }
+    // Крафт (G) обрабатывает `crafting::toggle_crafting` — здесь не дублируем,
+    // иначе два обработчика гасят друг друга.
     // V — окно рюкзака (в SS14 это клавиша `OpenBackpack`).
     if keys.just_pressed(KeyCode::KeyV) {
         for mut ui in uis.iter_mut() {
@@ -2156,6 +2155,9 @@ pub fn close_windows_on_escape(
     state.admin_open = false;
     state.warp_open = false;
     placement.item = None;
+    // Крафт закрывается ВМЕСТЕ с остальными окнами (был баг: он попадал в
+    // `any_open`, но флаг не сбрасывался — окно не закрывалось на Esc).
+    crafting.open = false;
     if any_open {
         tracing::info!("escape: windows closed");
         return;

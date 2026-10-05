@@ -290,6 +290,8 @@ struct ProtoCatalog {
     ids: std::collections::HashSet<String>,
     /// Размер предмета: id → id размера из `item_size.yml` (`Normal`, `Small`, …).
     sizes: std::collections::HashMap<String, String>,
+    /// Габариты ЯВНОЙ формы предмета (Item.shape): у лома 1×2 при размере Normal.
+    shape_cells: std::collections::HashMap<String, (u8, u8)>,
     /// Структуры (не-предметы): коллизия, поверхность, соединение спрайтов.
     structures: std::collections::HashMap<String, StructureInfo>,
     /// Оружие (`Gun`), патроны (`CartridgeAmmo`), снаряды (`Projectile`),
@@ -321,8 +323,13 @@ impl ProtoCatalog {
         self.ids.contains(id)
     }
 
-    /// Габариты предмета по его размеру-прототипу (клетки инвентаря).
+    /// Габариты предмета: явная форма (`Item.shape`) перекрывает `defaultShape`
+    /// размера (`item_size.yml`) — у лома `Normal` + `[0,0,0,1]` = 1×2, у стали
+    /// `Normal` без формы = 2×2.
     fn size_cells(&self, id: &str) -> Option<(u8, u8)> {
+        if let Some(cells) = self.shape_cells.get(id) {
+            return Some(*cells);
+        }
         let size_id = self.sizes.get(id)?;
         ssr_core::item_size::cells_of(size_id)
     }
@@ -396,6 +403,10 @@ fn load_prototypes(mut commands: Commands) {
                 // меню, но стрельба обязана их находить).
                 if let Some(size) = &proto.size {
                     catalog.sizes.insert(proto.id.clone(), size.clone());
+                }
+                // Явная форма предмета (`Item.shape`): у лома 1×2, у стали нет.
+                if let Some(cells) = ssr_core::item_size::cells_of_shape(&proto.shape) {
+                    catalog.shape_cells.insert(proto.id.clone(), cells);
                 }
                 if let Some(gun) = &proto.gun {
                     catalog.guns.insert(proto.id.clone(), gun.clone());
@@ -1781,13 +1792,11 @@ fn run_admin_command(
                 .min(20);
             // Второй режим: положить предмет на пол у ног (спавн-меню, «разместить»).
             let on_floor = parts.next() == Some("floor");
-            // Размер: наш каталог, иначе размер из прототипа сборки
-            // (`Item.size` → `item_size.yml`): у стали это `Normal` = 2×2.
-            let (w, h) = if catalogs.items.by_id(item_id).is_some() {
-                catalogs.items.size_of(item_id)
-            } else {
-                prototypes.size_cells(item_id).unwrap_or((1, 1))
-            };
+            // Размер: сначала данные сборки (форма/размер прототипа), затем наш
+            // каталог — у стали `Normal` = 2×2, у лома `Normal` + `shape` = 1×2.
+            let (w, h) = prototypes
+                .size_cells(item_id)
+                .unwrap_or_else(|| catalogs.items.size_of(item_id));
             let Some(base) = positions.get(player).ok().map(|p| p.0) else {
                 return "нет позиции игрока".to_string();
             };
@@ -1948,8 +1957,8 @@ fn run_admin_command(
 /// Единая точка приёма сообщений клиента: рукопожатие (Connect/Welcome, T1.2),
 /// операции над руками и админ-команды; исполняемое уходит в [`ActionQueue`].
 /// [`ActionQueue`] и обрабатывается одной системой [`process_actions`].
-/// Размер предмета по bits сущности: сначала наш каталог (`items.ron`), затем
-/// размер из прототипа сборки (`Item.size` → `itemSize`, `item_size.yml`).
+/// Размер предмета по bits сущности: сначала данные СБОРКИ (явная форма
+/// `Item.shape`, затем размер `Item.size` → `item_size.yml`), потом наш каталог.
 fn item_size_of(
     catalogs: &ContentCatalog,
     prototypes: &ProtoCatalog,
@@ -1959,10 +1968,10 @@ fn item_size_of(
     let Some(item) = Entity::try_from_bits(bits).and_then(|entity| items.get(entity).ok()) else {
         return (1, 1);
     };
-    if catalogs.items.by_id(&item.name).is_some() {
-        return catalogs.items.size_of(&item.name);
+    if let Some(cells) = prototypes.size_cells(&item.name) {
+        return cells;
     }
-    prototypes.size_cells(&item.name).unwrap_or((1, 1))
+    catalogs.items.size_of(&item.name)
 }
 
 /// Обработчик всех сообщений клиентов: одна точка приёма (MessageReceiver
@@ -3303,7 +3312,7 @@ fn spawn_walls(mut commands: Commands, map: Res<GameMap>, mut index: ResMut<MapI
 /// число аргументов системы: у функций-систем лимит 16 параметров).
 #[derive(bevy::ecs::system::SystemParam)]
 struct ActionQueries<'w, 's> {
-    healths: Query<'w, 's, &'static Health>,
+    healths: Query<'w, 's, &'static mut Health>,
     access: Query<'w, 's, &'static Access>,
     powered: Query<'w, 's, &'static Powered>,
     pulling: Query<'w, 's, &'static Pulling>,
@@ -3312,6 +3321,8 @@ struct ActionQueries<'w, 's> {
     catalogs: Res<'w, ContentCatalog>,
     /// Размеры предметов из прототипов сборки (`item_size.yml`).
     prototypes: Res<'w, ProtoCatalog>,
+    /// Призраки — проверка состояния для админ-верба `aghost`.
+    ghosts: Query<'w, 's, &'static Ghost>,
 }
 
 /// Доступ к двери (T4.2): дверь без ключа открыта всем, с ключом — только
@@ -3383,7 +3394,7 @@ fn process_actions(
     positions: Query<&PlayerPosition>,
     mut inventories: Query<&mut Inventory>,
     mut hands: Query<&mut Hands>,
-    world: ActionQueries,
+    mut world: ActionQueries,
     mut doors: Query<&mut Door>,
     mut containers: Query<&mut Container>,
     container_positions: Query<&ItemPosition>,
@@ -3430,30 +3441,66 @@ fn process_actions(
             }
             QueuedAction::RequestActions { entity, tx, ty } => {
                 let mut options: Vec<ActionOption> = Vec::new();
+                // Сбор вербов — по правилам `SharedVerbSystem.GetLocalVerbs`:
+                // `CanAccess` (дистанция `InteractionRange = 1.5` тайла) и
+                // `CanInteract`, `Using` — предмет в активной руке.
+                let player_position = positions.get(player).ok().map(|p| p.0);
+                let hand_item = hands.get(player).ok().and_then(|h| h.active_item());
+                let in_range = |target: Entity| {
+                    let (Some(user), Ok(target_position)) =
+                        (player_position, container_positions.get(target))
+                    else {
+                        return false;
+                    };
+                    let dx = target_position.0[0] - user[0];
+                    let dy = target_position.0[1] - user[1];
+                    dx * dx + dy * dy <= (INTERACT_RANGE * 1.5) * (INTERACT_RANGE * 1.5)
+                };
                 if entity != 0 {
                     if let Some(target) = Entity::try_from_bits(entity) {
-                        if world.healths.get(target).is_ok() {
+                        // Health → верб «Ударить» (в сборке это боевой режим, у нас
+                        // дублируем вербом: `InteractionVerb`).
+                        if world.healths.get(target).is_ok() && in_range(target) {
                             options.push(ActionOption {
                                 label: "Ударить".into(),
                                 action: ActionKind::Attack { target: entity },
+                                ..verb_default(ssr_core::verbs::VerbType::Interaction)
                             });
                         }
-                        // Предмет: свои вербы, как в SS14 (меню по ПКМ).
-                        if items.get(target).is_ok() {
+                        // Предмет: «Взять» (`AddPickupVerb`) и «Осмотреть»
+                        // (`AddExamineVerb`, категория Examine, приоритет 10).
+                        if let Ok(item) = items.get(target) {
+                            let held = hand_item.is_some();
+                            let mut pickup = ActionOption {
+                                label: "Взять".into(),
+                                action: ActionKind::Pickup { item: entity },
+                                icon: Some("Interface/VerbIcons/pickup.svg.192dpi.png".to_string()),
+                                ..verb_default(ssr_core::verbs::VerbType::Interaction)
+                            };
+                            // В сборке верб пропадает, если руки заняты или
+                            // предмет уже в руке (`args.Using != null`).
+                            if held {
+                                pickup.disabled = true;
+                                pickup.message = Some("Руки заняты".into());
+                            }
+                            if !in_range(target) {
+                                pickup.disabled = true;
+                                pickup.message = Some("Слишком далеко".into());
+                            }
+                            options.push(pickup);
                             options.push(ActionOption {
                                 label: "Осмотреть".into(),
                                 action: ActionKind::Examine { entity },
+                                icon: Some("Interface/VerbIcons/examine.svg.192dpi.png".into()),
+                                priority: 10,
+                                close_menu: Some(false),
+                                ..verb_default(ssr_core::verbs::VerbType::Examine)
                             });
-                            options.push(ActionOption {
-                                label: "Взять".into(),
-                                action: ActionKind::Pickup { item: entity },
-                            });
+                            let _ = item;
                         }
-                        // Тянуть можно то, у чего в прототипе есть `Pullable`:
-                        // в сборке он стоит и на `BaseItem` (base_item.yml:62), и
-                        // на `BaseStructure` (base_structure.yml:27) — то есть
-                        // ЛЮБОЙ предмет и любая конструкция, независимо от размера
-                        // (прежнее правило «от 2×2» было выдумкой).
+                        // Тянуть: верб ставит `PullingSystem.AddPullVerbs` —
+                        // обычный `Verb` БЕЗ категории и иконки, поэтому в меню
+                        // он всплывает выше категоризированных.
                         let pullable = container_positions.get(target).is_ok()
                             && (containers.get(target).is_ok()
                                 || items
@@ -3474,24 +3521,73 @@ fn process_actions(
                                 }
                                 .into(),
                                 action: ActionKind::Pull { target: entity },
+                                ..verb_default(ssr_core::verbs::VerbType::Verb)
                             });
                         }
+                        // Дверь: открыть/закрыть (`AddToggleOpenVerb`, иконки
+                        // `open.svg`/`close.svg`).
                         if let Ok(door) = doors.get(target)
                             && has_door_access(&world.access, player, door)
                         {
+                            let (text, icon) = if door.open {
+                                ("Закрыть", "Interface/VerbIcons/close.svg.192dpi.png")
+                            } else {
+                                ("Открыть", "Interface/VerbIcons/open.svg.192dpi.png")
+                            };
                             options.push(ActionOption {
-                                label: if door.open {
-                                    "Закрыть"
-                                } else {
-                                    "Открыть"
-                                }
-                                .into(),
+                                label: text.into(),
                                 action: ActionKind::Interact { entity },
+                                icon: Some(icon.into()),
+                                ..verb_default(ssr_core::verbs::VerbType::Interaction)
                             });
                         }
+                        // Админ-верб «Стать призраком» (`aghost` в сборке —
+                        // кнопка админ-меню; у нас ещё и вербом по себе).
+                        if target == player {
+                            options.push(
+                                ActionOption {
+                                    label: "Стать призраком".into(),
+                                    action: ActionKind::AdminGhost,
+                                    icon: Some(
+                                        "Interface/VerbIcons/sentient.svg.192dpi.png".into(),
+                                    ),
+                                    ..verb_default(ssr_core::verbs::VerbType::Verb)
+                                }
+                                .in_category(ssr_core::verbs::VerbCategory::Admin),
+                            );
+                        }
+                        // Админ/дебаг-вербы — как `AdminVerbSystem` (категории
+                        // Admin/Debug) и `VvVerb` (всегда первый в меню).
+                        options.push(ActionOption {
+                            label: "View Variables".into(),
+                            action: ActionKind::ViewVariables { entity },
+                            icon: Some("Interface/VerbIcons/vv.svg.192dpi.png".into()),
+                            client_exclusive: false,
+                            ..verb_default(ssr_core::verbs::VerbType::ViewVariables)
+                        });
+                        options.push(
+                            ActionOption {
+                                label: "Удалить".into(),
+                                action: ActionKind::Delete { entity },
+                                icon: Some(
+                                    "Interface/VerbIcons/delete_transparent.svg.192dpi.png".into(),
+                                ),
+                                confirmation_popup: true,
+                                ..verb_default(ssr_core::verbs::VerbType::Verb)
+                            }
+                            .in_category(ssr_core::verbs::VerbCategory::Debug),
+                        );
+                        options.push(
+                            ActionOption {
+                                label: "Оживить".into(),
+                                action: ActionKind::Rejuvenate { entity },
+                                icon: Some("Interface/VerbIcons/rejuvenate.svg.192dpi.png".into()),
+                                ..verb_default(ssr_core::verbs::VerbType::Verb)
+                            }
+                            .in_category(ssr_core::verbs::VerbCategory::Debug),
+                        );
                     }
                 } else {
-                    let hand_item = hands.get(player).ok().and_then(|h| h.active_item());
                     let item_name = hand_item
                         .and_then(Entity::try_from_bits)
                         .and_then(|e| items.get(e).ok())
@@ -3514,12 +3610,19 @@ fn process_actions(
                         options.push(ActionOption {
                             label: "Построить стену".into(),
                             action: ActionKind::UseItem { item, tx, ty },
+                            ..verb_default(ssr_core::verbs::VerbType::Interaction)
                         });
                         // Лом НЕ разбирает стены: в сборке стена разбирается
                         // строительством (`Construction` с инструментами), а
                         // `Crowbar` умеет только `Prying` (двери и половые плитки).
                     }
                 }
+                // Порядок — как `SortedSet<Verb>` в сборке (`Verb.CompareTo`).
+                options.sort_by(|left, right| {
+                    left.sort_key()
+                        .cmp(&right.sort_key())
+                        .then_with(|| left.label.cmp(&right.label))
+                });
                 if !options.is_empty()
                     && let Some(link) = players
                         .entries
@@ -3706,6 +3809,64 @@ fn process_actions(
                     });
                 }
             }
+            // Админ-верб «Удалить» (`delete-verb-get-data-text`, категория Debug):
+            // удаляем сущность (в сборке — с подтверждением).
+            ActionKind::Delete { entity } => {
+                let Some(target) = Entity::try_from_bits(entity) else {
+                    continue;
+                };
+                tracing::info!(?player, ?target, "admin verb: delete");
+                commands.entity(target).despawn();
+            }
+            // Дебаг-верб «Оживить»: полное лечение (`rejuvenate` в сборке лечит,
+            // снимает станы и чинит — у нас лечим и поднимаем).
+            ActionKind::Rejuvenate { entity } => {
+                let Some(target) = Entity::try_from_bits(entity) else {
+                    continue;
+                };
+                if let Ok(mut health) = world.healths.get_mut(target) {
+                    tracing::info!(?player, ?target, "debug verb: rejuvenate");
+                    // `rejuvenate` в сборке лечит полностью и снимает станы.
+                    health.heal();
+                }
+                commands.entity(target).remove::<KnockedDown>();
+            }
+            // Админ-верб «Стать призраком» (`aghost`): переводим игрока в
+            // состояние призрака — сквозь стены и невидимым для живых.
+            ActionKind::AdminGhost => {
+                if world.ghosts.get(player).is_ok() {
+                    commands.entity(player).remove::<Ghost>();
+                    tracing::info!(?player, "aghost: вернулся в тело");
+                } else {
+                    // В сборке призрак не сталкивается со стенами: у фикстуры
+                    // `MobObserver` слой `GhostImpassable`, а маска не задана
+                    // (`CollisionMask = 0`). У нас тело игрока — динамическое, и
+                    // проход сквозь стены даёт `ColliderDisabled`.
+                    commands.entity(player).insert((Ghost, ColliderDisabled));
+                    tracing::info!(?player, "aghost: стал призраком");
+                }
+            }
+            // Верб «View Variables»: отдаём клиенту снимок компонентов и полей
+            // сущности (упрощённый `ViewVariablesBlobMembers` сборки).
+            ActionKind::ViewVariables { entity } => {
+                let Some(target) = Entity::try_from_bits(entity) else {
+                    continue;
+                };
+                let dump = describe_components(target, &items, &containers, &doors);
+                if let Some(link) = players
+                    .entries
+                    .iter()
+                    .find(|entry| entry.player == player)
+                    .map(|entry| entry.link)
+                    && let Ok(mut sender) = senders.get_mut(link)
+                {
+                    sender.send::<GameChannel>(ServerMessage::Event {
+                        kind: format!("vv:{entity}:{dump}"),
+                    });
+                }
+                tracing::info!(?player, ?target, "vv opened");
+            }
+            // Двери и контейнеры: открыть/закрыть (`Interact`).
             ActionKind::Interact { entity } => {
                 let Some(target) = Entity::try_from_bits(entity) else {
                     tracing::warn!(bits = entity, "interact: invalid entity bits");
@@ -4219,6 +4380,51 @@ fn log_player_position(time: Res<Time>, mut next_log: Local<f32>, players: Query
 fn tick_logger(mut state: ResMut<TickState>) {
     state.tick += 1;
     tracing::debug!(tick = state.tick, "server tick");
+}
+
+/// Снимок компонентов и полей сущности для окна View Variables — упрощённый
+/// `ViewVariablesBlobMembers` из сборки: имя компонента и его поля.
+fn describe_components(
+    target: Entity,
+    items: &Query<&Item>,
+    containers: &Query<&mut Container>,
+    doors: &Query<&mut Door>,
+) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Ok(item) = items.get(target) {
+        parts.push(format!("Item {{ name: {} }}", item.name));
+    }
+    if let Ok(container) = containers.get(target) {
+        parts.push(format!("Container {{ open: {} }}", container.open));
+    }
+    if let Ok(door) = doors.get(target) {
+        parts.push(format!(
+            "Door {{ open: {}, access: {:?} }}",
+            door.open, door.access
+        ));
+    }
+    if parts.is_empty() {
+        parts.push("(нет известных компонентов)".to_string());
+    }
+    parts.join(" | ")
+}
+
+/// Верб со значениями по умолчанию (`Verb.cs`): текст пустой, приоритет 0,
+/// категории и иконки нет — заполняют точечно.
+fn verb_default(kind: ssr_core::verbs::VerbType) -> ActionOption {
+    ActionOption {
+        label: String::new(),
+        action: ActionKind::Examine { entity: 0 },
+        kind,
+        category: None,
+        icon: None,
+        priority: 0,
+        disabled: false,
+        message: None,
+        close_menu: None,
+        client_exclusive: false,
+        confirmation_popup: false,
+    }
 }
 
 /// Тайл занят стеной? Снаряд в сборке сталкивается со слоями

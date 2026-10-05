@@ -416,6 +416,8 @@ fn main() {
                 weapons::play_world_sounds,
                 weapons::update_ammo_counter,
                 weapons::shoot_test_mode,
+                weapons::spawn_menu_test,
+                weapons::verb_test_mode,
             ),
             world_items::sync_floor_item_icons,
             world_items::floor_item_click,
@@ -738,6 +740,11 @@ fn receive_server(
                             tracing::info!(bits, "door denied event");
                         }
                         None if kind == "hit" => sounds.punch += 1,
+                        // Системное сообщение (вход/выход игрока, смерть, призрак,
+                        // ответ на верб) — строка в чате, без консольного дубля.
+                        None if let Some(text) = kind.strip_prefix("system:") => {
+                            chat.system(text);
+                        }
                         None if let Some(text) = kind.strip_prefix("admin:") => {
                             // Ответ админ-команды (T5.5) — в консоль и в чат.
                             console.push_line(format!("[сервер] {text}"));
