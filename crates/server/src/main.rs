@@ -3446,6 +3446,26 @@ fn process_actions(
                 // `CanInteract`, `Using` — предмет в активной руке.
                 let player_position = positions.get(player).ok().map(|p| p.0);
                 let hand_item = hands.get(player).ok().and_then(|h| h.active_item());
+                // Тайл занят стеной (для проверки видимости) — по индексу чанков.
+                let solid_at = |x: f32, y: f32| -> bool {
+                    let chunk_tiles = ssr_core::tiles::CHUNK_TILES as i32;
+                    let tx = (x / TILE_SIZE).floor() as i32;
+                    let ty = (y / TILE_SIZE).floor() as i32;
+                    let coords = (tx.div_euclid(chunk_tiles), ty.div_euclid(chunk_tiles));
+                    let Some(entity) = index.chunks.get(&coords).copied() else {
+                        return true;
+                    };
+                    let Ok(chunk) = chunks.get(entity) else {
+                        return true;
+                    };
+                    let lx = tx.rem_euclid(chunk_tiles) as usize;
+                    let ly = ty.rem_euclid(chunk_tiles) as usize;
+                    ssr_core::occluders::is_solid(
+                        chunk.tiles[ly * chunk_tiles as usize + lx],
+                    )
+                };
+                // `InRangeUnobstructed` (`SharedInteractionSystem.cs:651-693`):
+                // цель должна быть в 1.5 тайла И не за стеной.
                 let in_range = |target: Entity| {
                     let (Some(user), Ok(target_position)) =
                         (player_position, container_positions.get(target))
@@ -3454,7 +3474,43 @@ fn process_actions(
                     };
                     let dx = target_position.0[0] - user[0];
                     let dy = target_position.0[1] - user[1];
-                    dx * dx + dy * dy <= (INTERACT_RANGE * 1.5) * (INTERACT_RANGE * 1.5)
+                    if dx * dx + dy * dy > (INTERACT_RANGE * 1.5) * (INTERACT_RANGE * 1.5) {
+                        return false;
+                    }
+                    let from = [user[0], user[1]];
+                    let to = target_position.0;
+                    let steps = (((to[0] - from[0]).abs().max((to[1] - from[1]).abs()))
+                        / (TILE_SIZE * 0.5))
+                        .ceil()
+                        .max(1.0) as u32;
+                    let target_tile = (
+                        (to[0] / TILE_SIZE).floor() as i32,
+                        (to[1] / TILE_SIZE).floor() as i32,
+                    );
+                    let mut last_tile = (
+                        (from[0] / TILE_SIZE).floor() as i32,
+                        (from[1] / TILE_SIZE).floor() as i32,
+                    );
+                    for step in 1..steps {
+                        let t = step as f32 / steps as f32;
+                        let x = from[0] + (to[0] - from[0]) * t;
+                        let y = from[1] + (to[1] - from[1]) * t;
+                        let tile = (
+                            (x / TILE_SIZE).floor() as i32,
+                            (y / TILE_SIZE).floor() as i32,
+                        );
+                        if tile == last_tile {
+                            continue;
+                        }
+                        last_tile = tile;
+                        if tile == target_tile {
+                            break;
+                        }
+                        if solid_at(x, y) {
+                            return false;
+                        }
+                    }
+                    true
                 };
                 if entity != 0 {
                     if let Some(target) = Entity::try_from_bits(entity) {
