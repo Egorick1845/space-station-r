@@ -20,7 +20,9 @@ use std::path::PathBuf;
 
 use serde_yaml_ng::Value;
 use ssr_core::prototypes::{
-    Proto, ProtoFixture, ProtoLight, ProtoSet, ProtoSmooth, ProtoStack, ProtoStorage,
+    Proto, ProtoAmmoProvider, ProtoCartridge, ProtoFixture, ProtoGun, ProtoItemSlot, ProtoLight,
+    ProtoMagazineVisuals, ProtoMelee, ProtoProjectile, ProtoSet, ProtoSmooth, ProtoStack,
+    ProtoStorage,
 };
 
 /// Максимум итераций разрешения наследования (защита от глубоких цепочек).
@@ -285,6 +287,15 @@ fn resolve(
     let mut fixtures: Vec<ProtoFixture> = Vec::new();
     let mut climbable = false;
     let mut icon_state = None;
+    let mut gun = None;
+    let mut cartridge = None;
+    let mut projectile = None;
+    let mut ammo_provider = None;
+    let mut melee = None;
+    let mut item_slots: Vec<ProtoItemSlot> = Vec::new();
+    let mut ammo_counter = false;
+    let mut magazine_visuals = None;
+    let mut projectile_lifetime = 10.0f32;
     for (name, value) in &merged {
         match name.as_str() {
             "Sprite" => {
@@ -411,6 +422,84 @@ fn resolve(
                 }
             }
             "Pullable" => pullable = true,
+            // --- Оружие, патроны, снаряды, ближний бой (W-план) ---
+            "Gun" => {
+                gun = Some(ProtoGun {
+                    fire_rate: value["fireRate"].as_f64().unwrap_or(5.0) as f32,
+                    selected_mode: value["selectedMode"]
+                        .as_str()
+                        .unwrap_or("SemiAuto")
+                        .to_string(),
+                    modes: string_list(&value["availableModes"]),
+                    sound: sound_path(&value["soundGunshot"]),
+                    projectile_speed: value["projectileSpeed"].as_f64().map(|v| v as f32),
+                    angle_increase: value["angleIncrease"].as_f64().map(|v| v as f32),
+                    angle_decay: value["angleDecay"].as_f64().map(|v| v as f32),
+                    min_angle: value["minAngle"].as_f64().map(|v| v as f32),
+                    max_angle: value["maxAngle"].as_f64().map(|v| v as f32),
+                });
+            }
+            "CartridgeAmmo" => {
+                if let Some(proto) = value["proto"].as_str() {
+                    cartridge = Some(ProtoCartridge {
+                        proto: proto.to_string(),
+                        spent: value["spent"].as_bool().unwrap_or(false),
+                    });
+                }
+            }
+            "Projectile" => {
+                projectile = Some(ProtoProjectile {
+                    damage: damage_types(&value["damage"]),
+                    impact_effect: value["impactEffect"].as_str().map(str::to_string),
+                    sound_hit: sound_path(&value["soundHit"]),
+                    lifetime: projectile_lifetime,
+                    delete_on_hit: value["deleteOnHit"].as_bool().unwrap_or(true),
+                });
+            }
+            "BallisticAmmoProvider" | "MagazineAmmoProvider" => {
+                ammo_provider = Some(ProtoAmmoProvider {
+                    capacity: value["capacity"].as_u64().unwrap_or(0) as u32,
+                    proto: value["proto"].as_str().map(str::to_string),
+                    sound_insert: sound_path(&value["soundInsert"]),
+                    sound_eject: sound_path(&value["soundEject"]),
+                });
+            }
+            "MeleeWeapon" => {
+                melee = Some(ProtoMelee {
+                    damage: damage_types(&value["damage"]),
+                    // Дефолты `MeleeWeaponComponent`: range 1.5, attackRate 1.5.
+                    range: value["range"].as_f64().unwrap_or(1.5) as f32,
+                    attack_rate: value["attackRate"].as_f64().unwrap_or(1.5) as f32,
+                    sound_hit: sound_path(&value["soundHit"]),
+                });
+            }
+            "ItemSlots" => {
+                if let Some(map) = value["slots"].as_mapping() {
+                    for (slot_id, slot) in map {
+                        let Some(slot_id) = slot_id.as_str() else {
+                            continue;
+                        };
+                        item_slots.push(ProtoItemSlot {
+                            id: slot_id.to_string(),
+                            starting_item: slot["startingItem"].as_str().map(str::to_string),
+                            priority: slot["priority"].as_i64().unwrap_or(0) as i32,
+                            whitelist_tags: string_list(&slot["whitelist"]["tags"]),
+                        });
+                    }
+                }
+            }
+            "AmmoCounter" => ammo_counter = true,
+            "MagazineVisuals" => {
+                magazine_visuals = Some(ProtoMagazineVisuals {
+                    mag_state: value["magState"].as_str().unwrap_or("mag").to_string(),
+                    steps: value["steps"].as_u64().unwrap_or(1) as u32,
+                    zero_visible: value["zeroVisible"].as_bool().unwrap_or(true),
+                });
+            }
+            "TimedDespawn" => {
+                // Время жизни снаряда (`BaseBullet` — 10 с).
+                projectile_lifetime = value["lifetime"].as_f64().unwrap_or(10.0) as f32;
+            }
             "Physics" => {
                 body_type = value["bodyType"].as_str().map(str::to_string);
             }
@@ -467,6 +556,14 @@ fn resolve(
             fixtures,
             climbable,
             icon_state,
+            gun,
+            cartridge,
+            projectile,
+            ammo_provider,
+            melee,
+            item_slots,
+            ammo_counter,
+            magazine_visuals,
         },
     );
     let _ = proto.file.as_str();
@@ -560,6 +657,25 @@ fn parse_bounds(text: &str) -> Option<(f32, f32, f32, f32)> {
         .filter_map(|part| part.trim().parse().ok())
         .collect();
     (parts.len() == 4).then(|| (parts[0], parts[1], parts[2], parts[3]))
+}
+
+/// Путь звука из значения прототипа: строка, `{ path: … }` или `{ collection: … }`
+/// (коллекцию оставляем как есть — клиент ищет её в `SoundCollections`).
+fn sound_path(value: &Value) -> Option<String> {
+    if let Some(text) = value.as_str() {
+        return Some(text.to_string());
+    }
+    value["path"].as_str().map(str::to_string)
+}
+
+/// Урон по типам: `{ types: { Piercing: 16, Heat: 2 } }` → `[("Piercing", 16), …]`.
+fn damage_types(value: &Value) -> Vec<(String, f32)> {
+    let Some(map) = value["types"].as_mapping() else {
+        return Vec::new();
+    };
+    map.iter()
+        .filter_map(|(kind, amount)| Some((kind.as_str()?.to_string(), amount.as_f64()? as f32)))
+        .collect()
 }
 
 /// `serde_yaml_ng::Value` → `ron::Value` (чтобы сохранить неразобранные

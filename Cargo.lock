@@ -8036,6 +8036,7 @@ dependencies = [
  "avian2d",
  "bevy",
  "lightyear",
+ "serde",
  "ssr-core",
  "ssr-protocol",
  "tracing",

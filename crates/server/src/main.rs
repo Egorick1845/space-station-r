@@ -16,6 +16,8 @@ use avian2d::prelude::{
 };
 use bevy::app::ScheduleRunnerPlugin;
 use bevy::prelude::*;
+
+mod weapons;
 use lightyear::connection::server::Start;
 use lightyear::prelude::server::*;
 use lightyear::prelude::*;
@@ -124,6 +126,10 @@ fn main() {
     app.init_resource::<Atmospheres>();
     app.init_resource::<ContentCatalog>();
     app.init_resource::<NetStats>();
+    // Оружие и патроны (W-план): очереди выстрелов, перезарядок и звуков.
+    app.init_resource::<weapons::ShootQueue>();
+    app.init_resource::<weapons::ReloadQueue>();
+    app.init_resource::<weapons::SoundQueue>();
     app.add_systems(Startup, startup);
     app.add_systems(
         Startup,
@@ -156,6 +162,16 @@ fn main() {
             sync_replicated_position,
             update_client_rooms,
             sync_item_rooms,
+            // Оружие (W-план): состояние из прототипа, стрельба, полёт снарядов.
+            // Вложенная группа — у кортежа Bevy лимит 20 систем.
+            (
+                equip_spawned_guns,
+                fire_weapons,
+                move_projectiles,
+                flush_world_sounds,
+                reload_weapons,
+                gun_test,
+            ),
             log_player_position,
             // Атмосфера (T4.3): диффузия, урон от разгерметизации.
             simulate_atmosphere,
@@ -276,6 +292,15 @@ struct ProtoCatalog {
     sizes: std::collections::HashMap<String, String>,
     /// Структуры (не-предметы): коллизия, поверхность, соединение спрайтов.
     structures: std::collections::HashMap<String, StructureInfo>,
+    /// Оружие (`Gun`), патроны (`CartridgeAmmo`), снаряды (`Projectile`),
+    /// ёмкости (`BallisticAmmoProvider`), слоты (`ItemSlots`) — W-план.
+    guns: std::collections::HashMap<String, ssr_core::prototypes::ProtoGun>,
+    cartridges: std::collections::HashMap<String, ssr_core::prototypes::ProtoCartridge>,
+    projectiles: std::collections::HashMap<String, ssr_core::prototypes::ProtoProjectile>,
+    ammo: std::collections::HashMap<String, ssr_core::prototypes::ProtoAmmoProvider>,
+    slots: std::collections::HashMap<String, Vec<ssr_core::prototypes::ProtoItemSlot>>,
+    /// Теги прототипов — по ним магазин находит подходящий патрон.
+    item_tags: std::collections::HashMap<String, Vec<String>>,
 }
 
 /// Данные структуры из прототипа (стол, машина, шкаф).
@@ -306,6 +331,52 @@ impl ProtoCatalog {
     fn structure(&self, id: &str) -> Option<&StructureInfo> {
         self.structures.get(id)
     }
+
+    /// `Gun` прототипа (оружие), `None` — прототип не оружие.
+    fn gun(&self, id: &str) -> Option<&ssr_core::prototypes::ProtoGun> {
+        self.guns.get(id)
+    }
+
+    /// `BallisticAmmoProvider` прототипа (магазин/коробка).
+    fn ammo_provider(&self, id: &str) -> Option<&ssr_core::prototypes::ProtoAmmoProvider> {
+        self.ammo.get(id)
+    }
+
+    /// `CartridgeAmmo` прототипа (патрон).
+    fn cartridge(&self, id: &str) -> Option<&ssr_core::prototypes::ProtoCartridge> {
+        self.cartridges.get(id)
+    }
+
+    /// `Projectile` прототипа (снаряд).
+    fn projectile(&self, id: &str) -> Option<&ssr_core::prototypes::ProtoProjectile> {
+        self.projectiles.get(id)
+    }
+
+    /// `ItemSlots` прототипа: стартовый предмет слота (`gun_chamber`).
+    fn slot_starting_item(&self, id: &str, slot: &str) -> Option<String> {
+        self.slots
+            .get(id)?
+            .iter()
+            .find(|entry| entry.id == slot)?
+            .starting_item
+            .clone()
+    }
+
+    /// Патрон для магазина по его тегам: в сборке `BallisticAmmoProvider.whitelist`
+    /// принимает `CartridgePistol`; ищем первый патрон с общим тегом (нужно для
+    /// ручного снаряжения магазинов — P1 `MayTransfer`).
+    #[allow(dead_code)]
+    fn ammo_tag_round(&self, magazine: &str) -> Option<String> {
+        let tags = self.item_tags.get(magazine)?;
+        self.cartridges
+            .iter()
+            .find(|(id, _)| {
+                self.item_tags
+                    .get(*id)
+                    .is_some_and(|round_tags| round_tags.iter().any(|tag| tags.contains(tag)))
+            })
+            .map(|(id, _)| id.clone())
+    }
 }
 
 /// Проверяет портированные прототипы (`assets/prototypes_ss14.ron`, IMP.2/IMP.3)
@@ -317,18 +388,50 @@ fn load_prototypes(mut commands: Commands) {
         Ok(set) => {
             let mut catalog = ProtoCatalog::default();
             for proto in &set.protos {
-                if proto.abstract_ || proto.kind != "entity" || proto.sprite.is_none() {
+                if proto.abstract_ || proto.kind != "entity" {
                     continue;
                 }
-                if proto
-                    .categories
-                    .iter()
-                    .any(|category| category == "HideSpawnMenu")
-                {
-                    continue;
-                }
+                // Данные оружия/патронов/снарядов/слотов — для ВСЕХ прототипов:
+                // пули и патроны помечены `HideSpawnMenu` (их нельзя поставить из
+                // меню, но стрельба обязана их находить).
                 if let Some(size) = &proto.size {
                     catalog.sizes.insert(proto.id.clone(), size.clone());
+                }
+                if let Some(gun) = &proto.gun {
+                    catalog.guns.insert(proto.id.clone(), gun.clone());
+                }
+                if let Some(cartridge) = &proto.cartridge {
+                    catalog
+                        .cartridges
+                        .insert(proto.id.clone(), cartridge.clone());
+                }
+                if let Some(projectile) = &proto.projectile {
+                    catalog
+                        .projectiles
+                        .insert(proto.id.clone(), projectile.clone());
+                }
+                if let Some(provider) = &proto.ammo_provider {
+                    catalog.ammo.insert(proto.id.clone(), provider.clone());
+                }
+                if !proto.item_slots.is_empty() {
+                    catalog
+                        .slots
+                        .insert(proto.id.clone(), proto.item_slots.clone());
+                }
+                if !proto.tags.is_empty() {
+                    catalog
+                        .item_tags
+                        .insert(proto.id.clone(), proto.tags.clone());
+                }
+                // Дальше — только спавнимые из меню (не abstract, со спрайтом,
+                // без `HideSpawnMenu`) — как `EntitySpawningUIController.BuildEntityList`.
+                if proto.sprite.is_none()
+                    || proto
+                        .categories
+                        .iter()
+                        .any(|category| category == "HideSpawnMenu")
+                {
+                    continue;
                 }
                 // Структура (не предмет): коллизия из `Fixtures`, поверхность из
                 // `PlaceableSurface`, соединение из `IconSmooth` — как у столов
@@ -1408,6 +1511,11 @@ enum DamageSource {
         attacker: Entity,
         weapon: Option<String>,
     },
+    /// Снаряд (W-план): стрелявший и прототип снаряда/оружия.
+    Projectile {
+        shooter: Entity,
+        weapon: Option<String>,
+    },
     /// Среда (T4.3): разгерметизация, нехватка кислорода, урон без убийцы.
     Environment { cause: &'static str },
 }
@@ -1445,6 +1553,10 @@ struct AuxParams<'w, 's> {
     cooldowns: ResMut<'w, ChatCooldowns>,
     clothings: Query<'w, 's, &'static mut Clothing>,
     spawn_cursor: ResMut<'w, SpawnCursor>,
+    /// Заявки на выстрел (W-план) — здесь, чтобы не превысить лимит 16
+    /// параметров у `handle_client_messages`.
+    shoot_queue: ResMut<'w, weapons::ShootQueue>,
+    reload_queue: ResMut<'w, weapons::ReloadQueue>,
 }
 
 /// Индекс из времени: без внешних RNG-зависимостей.
@@ -2276,6 +2388,21 @@ fn handle_client_messages(
                         tracing::info!(item, position = ?position.0, "item dropped on floor");
                     }
                 }
+                ClientMessage::Shoot { dir } => {
+                    let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {
+                        continue;
+                    };
+                    // Стрельбу исполняет `fire_weapons`: здесь только ставим заявку
+                    // (клиент сообщает направление прицела, разброс считает сервер).
+                    tracing::info!(player = ?entry.player, ?dir, "shoot request");
+                    aux.shoot_queue.0.push((entry.player, dir));
+                }
+                ClientMessage::Reload => {
+                    let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {
+                        continue;
+                    };
+                    aux.reload_queue.0.push(entry.player);
+                }
                 ClientMessage::Pickup { item } => {
                     let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {
                         continue;
@@ -3042,9 +3169,14 @@ fn update_client_rooms(
     }
 }
 
-/// Кому `sync_item_rooms` выдаёт комнату видимости: предметам и структурам
-/// (столам) — у остальных сущностей комнату ставит свой код.
-type RoomAssignable = Or<(With<Item>, With<ssr_core::structures::Structure>)>;
+/// Кому `sync_item_rooms` выдаёт комнату видимости: предметам, структурам
+/// (столам), снарядам и звукам — у остальных сущностей комнату ставит свой код.
+type RoomAssignable = Or<(
+    With<Item>,
+    With<ssr_core::structures::Structure>,
+    With<weapons::Projectile>,
+    With<weapons::WorldSound>,
+)>;
 
 /// Выдаёт предметам комнату якоря: держателя (руки/рюкзак), ящика или чанка
 /// под лежащим предметом. Иначе `Rooms::default()` (пустой набор) делает предмет
@@ -3874,6 +4006,10 @@ fn apply_damage(
             DamageSource::Melee { attacker, weapon } => {
                 (Some(*attacker), weapon.as_deref().unwrap_or("fist"))
             }
+            // Снаряд: убийца — стрелявший, «оружие» — прототип снаряда.
+            DamageSource::Projectile { shooter, weapon } => {
+                (Some(*shooter), weapon.as_deref().unwrap_or("projectile"))
+            }
             // Среда: убийцы нет, «оружие» — причина (vacuum/no_oxygen).
             DamageSource::Environment { cause } => (None, *cause),
         };
@@ -4083,4 +4219,349 @@ fn log_player_position(time: Res<Time>, mut next_log: Local<f32>, players: Query
 fn tick_logger(mut state: ResMut<TickState>) {
     state.tick += 1;
     tracing::debug!(tick = state.tick, "server tick");
+}
+
+/// Тайл занят стеной? Снаряд в сборке сталкивается со слоями
+/// `Impassable | BulletImpassable` (`ProjectileSystem.OnStartCollide` требует
+/// hard-фикстуру) — у нас стены это тайлы, проверяем по чанкам карты.
+fn wall_at(map: &GameMap, x: f32, y: f32) -> bool {
+    let tx = (x / TILE_SIZE).floor() as i32;
+    let ty = (y / TILE_SIZE).floor() as i32;
+    let chunk_tiles = ssr_core::tiles::CHUNK_TILES as i32;
+    let coords = (tx.div_euclid(chunk_tiles), ty.div_euclid(chunk_tiles));
+    let Some(chunk) = map.chunks.iter().find(|chunk| chunk.coords == coords) else {
+        return true; // за картой — считаем препятствием
+    };
+    let lx = tx.rem_euclid(chunk_tiles) as u32;
+    let ly = ty.rem_euclid(chunk_tiles) as u32;
+    ssr_core::occluders::is_solid(chunk.get_local(lx, ly))
+}
+
+/// Навешивает оружию состояние `Gun` и магазин, а патронам — `Cartridge`, как
+/// только предмет появился из прототипа (`Added<Item>`). Одна точка — покрывает
+/// меню спавна, админ-команду и стартовое снаряжение.
+fn equip_spawned_guns(
+    mut commands: Commands,
+    catalogs: Res<ProtoCatalog>,
+    items: Query<(Entity, &Item), Added<Item>>,
+) {
+    for (entity, item) in items.iter() {
+        if catalogs.gun(&item.name).is_some() {
+            weapons::attach_gun_with_slots(&mut commands, &catalogs, entity, &item.name);
+        } else if let Some(cartridge) = catalogs.cartridge(&item.name) {
+            commands.entity(entity).insert(weapons::Cartridge {
+                proto: cartridge.proto.clone(),
+                spent: cartridge.spent,
+            });
+        }
+    }
+}
+
+/// Стрельба (W-план) — `AttemptShoot` + `GunSystem.Shoot` сборки в объёме
+/// P0: кулдаун, патронник + магазин (`AutoCycle`), разброс `CurrentAngle`,
+/// спавн снаряда, звук выстрела.
+#[allow(clippy::too_many_arguments)]
+fn fire_weapons(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut queue: ResMut<weapons::ShootQueue>,
+    mut sounds: ResMut<weapons::SoundQueue>,
+    catalogs: Res<ProtoCatalog>,
+    hands: Query<&Hands>,
+    mut guns: Query<&mut weapons::Gun>,
+    mut providers: Query<&mut weapons::AmmoProvider>,
+    players: Query<&PlayerPosition>,
+) {
+    tracing::debug!(queued = queue.0.len(), "fire_weapons tick");
+    if queue.0.is_empty() {
+        return;
+    }
+    let now = time.elapsed_secs_f64();
+    for (player, dir) in std::mem::take(&mut queue.0) {
+        let Ok(player_position) = players.get(player) else {
+            tracing::warn!(?player, "fire: нет позиции игрока");
+            continue;
+        };
+        // Оружие — предмет в АКТИВНОЙ руке (как `HandsSystem` в сборке).
+        let Some(gun_entity) = hands
+            .get(player)
+            .ok()
+            .and_then(|hands| hands.active_item())
+            .and_then(Entity::try_from_bits)
+        else {
+            tracing::warn!(?player, "fire: рука пуста");
+            continue;
+        };
+        let Ok(mut gun) = guns.get_mut(gun_entity) else {
+            tracing::warn!(?gun_entity, "fire: в руке не оружие");
+            continue;
+        };
+        if gun.next_fire > now {
+            tracing::info!(?gun_entity, next_fire = gun.next_fire, now, "fire: кулдаун");
+            continue;
+        }
+        tracing::info!(
+            ?gun_entity,
+            chamber = ?gun.chamber,
+            magazine = ?gun.magazine,
+            fire_rate = gun.fire_rate,
+            "fire: состояние оружия"
+        );
+        // Патронник, затем досыл из магазина (`ChamberMagazineAmmoProvider`).
+        let round = gun.chamber.take();
+        if let Some(magazine) = gun.magazine.and_then(Entity::try_from_bits)
+            && let Ok(mut provider) = providers.get_mut(magazine)
+        {
+            gun.chamber = provider.take_round();
+        }
+        let Some(round) = round else {
+            // Пусто: в сборке popup «No ammo left!» + `SoundEmpty`, кулдаун 0.5 с.
+            sounds.0.push((
+                player_position.0,
+                "/Audio/Weapons/Guns/Empty/empty.ogg".to_string(),
+            ));
+            gun.next_fire = now + 0.5;
+            continue;
+        };
+        let Some(cartridge) = catalogs.cartridge(&round).cloned() else {
+            continue;
+        };
+        let Some(projectile) = catalogs.projectile(&cartridge.proto).cloned() else {
+            continue;
+        };
+        // Разброс: формула `GunSystem.GetRecoilAngle` (`ssr_core::weapons`).
+        let spread = ssr_core::weapons::update_spread(
+            gun.spread,
+            (now - gun.last_fire) as f32,
+            gun.angle_increase,
+            gun.angle_decay,
+            gun.min_angle,
+            gun.max_angle,
+        );
+        let seed = ((now * 1000.0) as u64) ^ player.to_bits();
+        let random = ssr_core::weapons::spread_random(seed);
+        let length = (dir[0] * dir[0] + dir[1] * dir[1]).sqrt().max(1e-4);
+        let aim = (dir[1] / length).atan2(dir[0] / length);
+        let angle = ssr_core::weapons::shot_angle(aim, spread, random);
+        gun.spread = spread;
+        gun.last_fire = gun.next_fire;
+        gun.next_fire = now + 1.0 / gun.fire_rate.max(0.01) as f64;
+        // Снаряд: скорость `GunComponent.ProjectileSpeed` (40 тайлов/с).
+        let speed = ssr_core::weapons::PROJECTILE_SPEED * TILE_SIZE;
+        let (sx, sy) = (player_position.0[0], player_position.0[1]);
+        let dx = sx + angle.cos() * TILE_SIZE * weapons::MUZZLE_OFFSET_TILES;
+        let dy = sy + angle.sin() * TILE_SIZE * weapons::MUZZLE_OFFSET_TILES;
+        commands.spawn((
+            weapons::Projectile {
+                proto: cartridge.proto.clone(),
+                damage: projectile.damage.clone(),
+                velocity: [angle.cos() * speed, angle.sin() * speed],
+                lifetime: if projectile.lifetime > 0.0 {
+                    projectile.lifetime
+                } else {
+                    10.0
+                },
+                shooter: player.to_bits(),
+                impact_effect: projectile.impact_effect.clone(),
+                sound_hit: projectile.sound_hit.clone(),
+            },
+            ItemPosition([dx, dy]),
+            Replicate::to_clients(NetworkTarget::All),
+            Rooms::default(),
+        ));
+        if let Some(sound) = &gun.sound {
+            sounds.0.push(([dx, dy], sound.clone()));
+        }
+        tracing::info!(player = ?player, round = %round, projectile = %cartridge.proto, spread, angle, "shot fired");
+    }
+}
+
+/// Полёт снарядов: стены (тайлы), игроки, время жизни (`TimedDespawn.lifetime`).
+/// Урон идёт тем же путём, что и ближний бой (`DamageEvent`).
+fn move_projectiles(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut projectiles: Query<(Entity, &mut weapons::Projectile, &mut ItemPosition)>,
+    map: Res<GameMap>,
+    players: Query<(Entity, &PlayerPosition, &Health)>,
+    mut damage_events: MessageWriter<DamageEvent>,
+    mut sounds: ResMut<weapons::SoundQueue>,
+) {
+    let dt = time.delta_secs();
+    for (entity, mut projectile, mut position) in projectiles.iter_mut() {
+        position.0[0] += projectile.velocity[0] * dt;
+        position.0[1] += projectile.velocity[1] * dt;
+        projectile.lifetime -= dt;
+        let (x, y) = (position.0[0], position.0[1]);
+        let mut hit = false;
+        for (player, player_position, _) in players.iter() {
+            if player.to_bits() == projectile.shooter {
+                continue; // `IgnoreShooter = true`
+            }
+            let dx = player_position.0[0] - x;
+            let dy = player_position.0[1] - y;
+            if dx * dx + dy * dy < (TILE_SIZE * 0.5) * (TILE_SIZE * 0.5) {
+                let amount: f32 = projectile.damage.iter().map(|(_, value)| value).sum();
+                damage_events.write(DamageEvent {
+                    target: player,
+                    amount: amount.round() as i32,
+                    source: DamageSource::Projectile {
+                        shooter: Entity::try_from_bits(projectile.shooter)
+                            .unwrap_or(Entity::PLACEHOLDER),
+                        weapon: Some(projectile.proto.clone()),
+                    },
+                });
+                hit = true;
+                break;
+            }
+        }
+        if !hit && wall_at(&map, x, y) {
+            hit = true;
+        }
+        if hit || projectile.lifetime <= 0.0 {
+            if hit {
+                if let Some(sound) = &projectile.sound_hit {
+                    sounds.0.push(([x, y], sound.clone()));
+                }
+                tracing::info!(proto = %projectile.proto, x, y, "projectile hit");
+            }
+            commands.entity(entity).despawn();
+        }
+    }
+}
+
+/// Звуки в мире: короткоживущие сущности, которые видит клиент (выстрел,
+/// попадание, пустой магазин).
+fn flush_world_sounds(
+    mut commands: Commands,
+    mut queue: ResMut<weapons::SoundQueue>,
+    time: Res<Time>,
+    mut sounds: Query<(Entity, &mut weapons::WorldSound)>,
+) {
+    for (position, path) in std::mem::take(&mut queue.0) {
+        commands.spawn((
+            weapons::WorldSound {
+                path,
+                position,
+                lifetime: 0.25,
+            },
+            Replicate::to_clients(NetworkTarget::All),
+            Rooms::default(),
+        ));
+    }
+    for (entity, mut sound) in sounds.iter_mut() {
+        sound.lifetime -= time.delta_secs();
+        if sound.lifetime <= 0.0 {
+            commands.entity(entity).despawn();
+        }
+    }
+}
+
+/// Перезарядка (R): в сборке `ItemSlots` оружия принимают магазин/патрон из
+/// активной руки, а `EjectMagazine` отдаёт вставленный магазин в руки
+/// (`SharedGunSystem.Magazine.cs`). У нас: магазин в руке → вставить,
+/// иначе вставленный магазин → вынуть в руку.
+#[allow(clippy::too_many_arguments)]
+fn reload_weapons(
+    mut commands: Commands,
+    mut queue: ResMut<weapons::ReloadQueue>,
+    catalogs: Res<ProtoCatalog>,
+    hands: Query<&Hands>,
+    mut guns: Query<(&mut weapons::Gun, &ItemPosition)>,
+    mut providers: Query<&mut weapons::AmmoProvider>,
+    mut sounds: ResMut<weapons::SoundQueue>,
+    positions: Query<&PlayerPosition>,
+) {
+    if queue.0.is_empty() {
+        return;
+    }
+    for player in std::mem::take(&mut queue.0) {
+        let Ok(hand) = hands.get(player) else {
+            continue;
+        };
+        let Some(gun_entity) = hand.active_item().and_then(Entity::try_from_bits) else {
+            continue;
+        };
+        let Ok((mut gun, _)) = guns.get_mut(gun_entity) else {
+            continue;
+        };
+        let position = positions
+            .get(player)
+            .map(|position| position.0)
+            .unwrap_or([0.0, 0.0]);
+        // 1) Вынуть магазин (если он есть) — он падает игроку под ноги.
+        if let Some(magazine) = gun.magazine.and_then(Entity::try_from_bits) {
+            if let Ok(mut provider) = providers.get_mut(magazine) {
+                // Магазин сохраняет патроны — просто отпускаем предмет.
+                let _ = &mut provider;
+            }
+            commands
+                .entity(magazine)
+                .insert((HeldBy { player: 0 }, ItemPosition(position)));
+            gun.magazine = None;
+            sounds.0.push((
+                position,
+                "/Audio/Weapons/Guns/MagOut/pistol_magout.ogg".into(),
+            ));
+            tracing::info!(player = ?player, "magazine ejected");
+            continue;
+        }
+        // 2) Вставить магазин из руки в оружие нельзя (рука занята оружием) —
+        // поэтому ищем магазин среди предметов, лежащих рядом (упрощение P0).
+        let Some(magazine_proto) = catalogs.slot_starting_item(&gun.proto, "gun_magazine") else {
+            continue;
+        };
+        if let Some(entity) =
+            weapons::spawn_magazine(&mut commands, &catalogs, &magazine_proto, player)
+        {
+            gun.magazine = Some(entity.to_bits());
+            if let Ok(mut provider) = providers.get_mut(entity) {
+                // В сборке магазин приходит пустым, если у `BallisticAmmoProvider`
+                // нет `proto` — патроны пересыпаются вручную (`MayTransfer`).
+                let _ = &mut provider;
+            }
+            sounds.0.push((
+                position,
+                "/Audio/Weapons/Guns/MagIn/pistol_magin.ogg".into(),
+            ));
+            tracing::info!(player = ?player, magazine = %magazine_proto, "magazine inserted");
+        }
+    }
+}
+
+/// Тест-режим `SSR_GUN_TEST=1`: выдаёт первому игроку пистолет MK58 с магазином
+/// (магазин наполняем патронами — в сборке `MagazinePistol` рождается пустым, но
+/// для проверки выстрела нужны патроны) и кладёт оружие в активную руку.
+fn gun_test(
+    mut commands: Commands,
+    catalogs: Res<ProtoCatalog>,
+    players: Res<Players>,
+    mut hands: Query<&mut Hands>,
+    mut done: Local<bool>,
+) {
+    if *done || std::env::var_os("SSR_GUN_TEST").is_none() {
+        return;
+    }
+    let Some(entry) = players.entries.first() else {
+        return;
+    };
+    let player = entry.player;
+    *done = true;
+    let item = commands
+        .spawn((
+            Item {
+                name: "WeaponPistolMk58".to_string(),
+            },
+            HeldBy {
+                player: player.to_bits(),
+            },
+            Replicate::to_clients(NetworkTarget::All),
+            Rooms::default(),
+        ))
+        .id();
+    weapons::attach_gun_with_slots(&mut commands, &catalogs, item, "WeaponPistolMk58");
+    if let Ok(mut hand) = hands.get_mut(player) {
+        let _ = hand.take_in_active(item.to_bits());
+    }
+    tracing::info!(player = ?player, "gun test: пистолет выдан");
 }

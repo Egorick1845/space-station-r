@@ -88,6 +88,144 @@ pub struct Proto {
     /// `Icon.state` — состояние спрайта для иконки в меню спавна (`full` у столов).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon_state: Option<String>,
+    /// `Gun` — параметры стрельбы (скорострельность, режимы, звук).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gun: Option<ProtoGun>,
+    /// `CartridgeAmmo` — патрон: какой снаряд порождает и «стреляный» ли он.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cartridge: Option<ProtoCartridge>,
+    /// `Projectile` — снаряд: урон, эффект попадания, звук, время жизни.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projectile: Option<ProtoProjectile>,
+    /// `BallisticAmmoProvider` — ёмкость магазина/коробки и звуки.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ammo_provider: Option<ProtoAmmoProvider>,
+    /// `MeleeWeapon` — урон и скорость удара в ближнем бою.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub melee: Option<ProtoMelee>,
+    /// `ItemSlots` — слоты оружия (`gun_magazine`, `gun_chamber`, …).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub item_slots: Vec<ProtoItemSlot>,
+    /// `AmmoCounter` — счётчик патронов в HUD.
+    #[serde(default)]
+    pub ammo_counter: bool,
+    /// `MagazineVisuals` — состояние спрайта магазина по числу патронов.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub magazine_visuals: Option<ProtoMagazineVisuals>,
+}
+
+/// `Gun` (`Content.Shared/Weapons/Ranged/Components/GunComponent.cs`): числа из
+/// прототипов (у пистолета `fireRate: 6`, режимы `SemiAuto`/`FullAuto`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProtoGun {
+    /// Выстрелов в секунду (`fireRate`).
+    pub fire_rate: f32,
+    /// Выбранный режим (`selectedMode`).
+    pub selected_mode: String,
+    /// Доступные режимы (`availableModes`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modes: Vec<String>,
+    /// Звук выстрела (`soundGunshot.path`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sound: Option<String>,
+    /// Скорость снаряда в единицах/с (`projectileSpeed`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projectile_speed: Option<f32>,
+    /// Рост угла за выстрел (`angleIncrease`), спад (`angleDecay`) и границы.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub angle_increase: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub angle_decay: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_angle: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_angle: Option<f32>,
+}
+
+/// `CartridgeAmmo` (`Content.Shared/Weapons/Ranged/Components/CartridgeAmmoComponent.cs`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProtoCartridge {
+    /// Прототип снаряда (`proto: BulletPistol`).
+    pub proto: String,
+    /// Стреляная гильза (`spent`) — патрон уже нельзя выстрелить.
+    #[serde(default)]
+    pub spent: bool,
+}
+
+/// `Projectile` (`Content.Shared/Projectiles/ProjectileComponent.cs`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ProtoProjectile {
+    /// Урон по типам (`damage.types`): `[("Piercing", 16)]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub damage: Vec<(String, f32)>,
+    /// Эффект попадания (`impactEffect`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub impact_effect: Option<String>,
+    /// Звук попадания (`soundHit.path`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sound_hit: Option<String>,
+    /// Время жизни снаряда, с (`TimedDespawn.lifetime`, у `BaseBullet` — 10).
+    #[serde(default)]
+    pub lifetime: f32,
+    /// Исчезает при попадании (`deleteOnHit`, по умолчанию true).
+    #[serde(default)]
+    pub delete_on_hit: bool,
+}
+
+/// `BallisticAmmoProvider` (`.../Components/BallisticAmmoProviderComponent.cs`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProtoAmmoProvider {
+    /// Ёмкость (`capacity`, у `MagazinePistol` — 12).
+    pub capacity: u32,
+    /// Прототип, которым наполняется (`proto`), если задан.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proto: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sound_insert: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sound_eject: Option<String>,
+}
+
+/// `MeleeWeapon` (`Content.Shared/Weapons/Melee/MeleeWeaponComponent.cs`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ProtoMelee {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub damage: Vec<(String, f32)>,
+    /// Дальность удара (`range`, по умолчанию 1.5).
+    #[serde(default)]
+    pub range: f32,
+    /// Ударов в секунду (`attackRate`, по умолчанию 1.5).
+    #[serde(default)]
+    pub attack_rate: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sound_hit: Option<String>,
+}
+
+/// Слот оружия из `ItemSlots` (магазин, патронник).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProtoItemSlot {
+    /// Имя слота (`gun_magazine`, `gun_chamber`).
+    pub id: String,
+    /// Стартовый предмет в слоте (`startingItem: MagazinePistol`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starting_item: Option<String>,
+    /// Приоритет (`priority`, у магазина 2, у патронника 1).
+    #[serde(default)]
+    pub priority: i32,
+    /// Теги, которые принимает слот (`whitelist.tags`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub whitelist_tags: Vec<String>,
+}
+
+/// `MagazineVisuals` — состояние спрайта магазина (`mag-0`, `mag-1`, …).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProtoMagazineVisuals {
+    /// База состояния (`magState: mag`).
+    pub mag_state: String,
+    /// Число ступеней (`steps`).
+    pub steps: u32,
+    /// Показывать пустой магазин (`zeroVisible`).
+    pub zero_visible: bool,
 }
 
 /// `IconSmooth` прототипа: соседние структуры с тем же `key` соединяются

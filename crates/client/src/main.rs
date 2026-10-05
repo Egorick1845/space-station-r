@@ -38,6 +38,7 @@ mod settings;
 mod structures;
 mod tiles;
 mod ui_theme;
+mod weapons;
 mod windows;
 mod world_items;
 use ssr_protocol::net::GameChannel;
@@ -406,6 +407,16 @@ fn main() {
             containers::container_close_click,
             containers::container_test_mode,
             structures::render_structures,
+            (
+                weapons::spawn_ammo_counter,
+                weapons::shoot_input,
+                weapons::reload_input,
+                weapons::sync_projectiles,
+                weapons::move_projectile_sprites,
+                weapons::play_world_sounds,
+                weapons::update_ammo_counter,
+                weapons::shoot_test_mode,
+            ),
             world_items::sync_floor_item_icons,
             world_items::floor_item_click,
             // P — копирование сущности под курсором, ЛКМ — размещение копии.

@@ -933,3 +933,92 @@ FOV (стенсил движка). Стена рядом с освещённым
 
 Сверху — прежний шейдер (полоса стены чёрная), снизу — новый: стена перед
 игроком освещена ровно как прилегающий пол, вне видимой зоны остаётся тьма.
+
+## 2026-10-05 (10) — столы, оружие и патроны
+
+Владелец: «Портируй систему столов из сс14», затем «Портируй оружие, патроны и
+прочее из сс14, точь в точь как там». Изучено двумя субагентами (столы; оружие
+и стрельба) — отчёты с точными файлами/числами.
+
+### 1. Столы (`TableBase` в `Resources/Prototypes/.../Furniture/Tables/base_structuretables.yml`)
+
+**Главный факт: `TableSystem`/`TableComponent` в сборке НЕ существует** — стол это
+композиция генерических компонентов: `PlaceableSurface` + `Climbable` +
+`IconSmooth` + `Fixtures` + `Sprite`/`Icon` + `Physics{Static}` + `Damageable` +
+`Destructible` + `Construction` + `FootstepModifier` + `Bonkable` и т.д.
+
+- Импортёр теперь достаёт из прототипов `Icon.state`, `IconSmooth{key, base}`,
+  `PlaceableSurface`, `Fixtures{bounds, hard, density, layer, mask}`, `Climbable`
+  и `Item` (признак предмета) — `Proto.is_item`, `Proto.smooth`, `Proto.surface`,
+  `Proto.fixtures`, `Proto.climbable`, `Proto.icon_state`.
+- Новая структура (`ssr_core::structures::Structure`, реплицируется): спрайт по
+  прототипу, `Fixtures` (`bounds: "-0.45,-0.45,0.45,0.45"`, `hard: true`) →
+  статический коллайдер, `PlaceableSurface` → предметы на столе.
+- **Отрисовка как в движке** (`IconSmoothSystem.SetCornerLayers:86-102`): стол —
+  это ЧЕТЫРЕ слоя-угла (SE/NE/NW/SW), состояние `{base}{флаги угла}`
+  (`state_0`…`state_7`), флаги считаются по 8 соседям
+  (`CalculateCornerFill:430-508`: `CounterClockwise=1, Diagonal=2, Clockwise=4`),
+  смещения направлений слоёв `[0, 2, 3, 1]` (`DirectionOffset`: SE — None,
+  NE — CounterClockwise, NW — Flip, SW — Clockwise). `ssr_core::structures::
+  corner_fills` покрыт тестами (одиночный стол, север/восток/юг/запад,
+  диагонали, все восемь соседей).
+- Предметы на столе рисуются выше (`PlaceableSurface`); z-порядок приведён к
+  `DrawDepth` движка: стол `Objects = 0` (0.45) < ящик (0.7) < предметы
+  `Items = +4` (0.75) < моб `Mobs = +6` (1.0).
+- **Грабли, которые стоили времени**: структуры не реплицировались, потому что
+  `sync_item_rooms` выдавал комнату только сущностям с `HeldBy` — теперь запрос
+  `Or<(With<Item>, With<Structure>, With<Projectile>, With<WorldSound>)>`.
+
+### 2. Оружие, патроны, снаряды (P0 из отчёта)
+
+Импортёр достаёт `Gun`, `CartridgeAmmo`, `Projectile`, `BallisticAmmoProvider`,
+`ItemSlots`, `AmmoCounter`, `MagazineVisuals`, `MeleeWeapon`; сервер держит
+`Gun`/`AmmoProvider`/`Cartridge`/`Projectile`/`WorldSound` (в `ssr_core::weapons`,
+реплицируются), клиент — ввод, спрайты, звуки, счётчик патронов.
+
+- **Формула разброса перенесена дословно** (`Content.Server/Weapons/Ranged/
+  Systems/GunSystem.cs:355-376`): `theta = clamp(CurrentAngle + AngleIncrease −
+  AngleDecay·dt, min(MinAngle,MaxAngle), max(...))`, затем
+  `angle = прицел + theta·random(−0.5…0.5)`; дефолты `AngleIncrease 0.5°`,
+  `AngleDecay 4°`, `MinAngle 1°`, `MaxAngle 2°`, `ProjectileSpeed 40 тайлов/с`
+  (`SharedGunSystem.cs:81`). Всё в `ssr_core::weapons` с тестами.
+- Модель «патронник + магазин» как `ChamberMagazineAmmoProvider`: выстрел берёт
+  патрон из патронника и досылает следующий из магазина; пусто → `empty.ogg` и
+  кулдаун 0.5 с. Магазин — отдельный предмет (`BallisticAmmoProvider`), который
+  наполняется ТОЛЬКО при заданном `proto` (у `MagazinePistol` его нет — магазин
+  рождается пустым, как в сборке).
+- Снаряд: скорость 40 тайлов/с, время жизни 10 с, урон из прототипа
+  (`BulletPistol` — `Piercing: 16`), игнор стрелка (`IgnoreShooter`), попадание
+  в стену (по тайлам карты) и в игрока (`DamageEvent` + `DamageSource::Projectile`).
+- Тест-хуки: сервер `SSR_GUN_TEST=1` (выдаёт MK58 в руку), клиент
+  `SSR_SHOOT_TEST=<сек>` (три выстрела). Проверено логом:
+  `shot fired round=CartridgePistol projectile=BulletPistol spread=1.0
+  angle=-1.1256` → `projectile hit proto=BulletPistol x=585.9 y=723.4` —
+  снаряд пролетел ~6 тайлов и попал в стену; второй и третий выстрел дали
+  «пусто» (в магазине патронов нет) — ровно как в сборке.
+- Ассеты: скопированы `Resources/Audio/Weapons/Guns` (126 файлов, 1.66 МБ);
+  спрайты (`Objects/Weapons/Guns/**`, 138 RSI) уже были импортированы.
+
+### 3. Что осталось по оружию (из отчёта, по приоритетам)
+
+- **P1**: авто/очередь (`FullAuto`/`Burst` — `AutoFire`-тик, `BurstCooldown +
+  BurstCooldownModified`), полный `ChamberMagazine` (затвор, rack, lock слота),
+  `AutoEject`, револьвер (`RevolverAmmoProvider`: барабан, speedloader, Empty/Spin),
+  батареи (`BatteryAmmoProvider`: `shots = charge/FireCost`), `BasicEntityAmmoProvider`,
+  `RefreshModifiers`/`GunRefreshModifiersEvent` (без него `FireRateModified = 0` —
+  оружие не стреляет), `GunWieldBonus`/`Multishot`/`PlayerAccuracyModifier`.
+- **P2**: хитскан (`HitscanAmmo + HitscanBasicRaycast{maxDistance 20, mask Opaque}
+  + HitscanBasicDamage/Visuals/Effects`, прототипы `RedLaser 14`, `RedMediumLaser 17`,
+  `XrayLaser`, `Pulse`), эффекты `muzzle/travel/impact` (анимация 0.48 с),
+  свет мазл-флеша (`radius 2, #cc8e2b, energy 5`, затухание 0.4 с).
+- **P3**: проникание (`PenetrationThreshold = 10`, `Penetratable {15, 0.05}`),
+  `RequireProjectileTarget` + crawl hitzone 0.85 м, `FlyBySound` (0.10, 1.5),
+  вербы/examine, `FireOnDropChance`, апгрейды (`_Lavaland`), `AmmoSelector`.
+- **HUD**: в сборке контрол выбирается по типу провайдера (`MagazineStatusControl`,
+  `ChamberMagazineStatusControl`, `RevolverStatusControl`, `BoxesStatusControl`),
+  текст `x{count:00}`, «No Magazine!», патрон в патроннике `#d7df60`; у нас пока
+  простой текст `x{магазин}{ +1}`.
+- **Столы**: не перенесены `Climbable` (верб «Vault», DoAfter 1.5 с, замена
+  фикстур, транзит 5 ед./с), разбор графом `Table` (ключ/лом/сварка/нож, времена
+  1–3 с, стекло/картон → `TableFrame`), `Destructible`-пороги и стеклянные столы
+  (`GlassTable`: масса > 60 ломает стол, стан 2 с), `FootstepModifier`, `Bonkable`.

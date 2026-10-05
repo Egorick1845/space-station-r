@@ -25,6 +25,7 @@ pub fn register_replication(app: &mut bevy_app::App) {
     use ssr_core::stamina::Stamina;
     use ssr_core::structures::Structure;
     use ssr_core::tiles::TileChunkData;
+    use ssr_core::weapons::{AmmoProvider, Cartridge, Gun, Projectile, WorldSound};
     use ssr_core::{Door, PlayerPosition, Species};
 
     app.component::<PlayerPosition>().replicate();
@@ -55,6 +56,12 @@ pub fn register_replication(app: &mut bevy_app::App) {
     app.component::<Hair>().replicate();
     app.component::<FacialHair>().replicate();
     app.component::<Structure>().replicate();
+    // Оружие/патроны/снаряды (W-план).
+    app.component::<Gun>().replicate();
+    app.component::<AmmoProvider>().replicate();
+    app.component::<Cartridge>().replicate();
+    app.component::<Projectile>().replicate();
+    app.component::<WorldSound>().replicate();
 }
 
 /// Единственный канал игры: надёжный, упорядоченный (рукопожатие, ввод, дельты).
