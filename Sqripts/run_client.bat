@@ -1,16 +1,23 @@
 @echo off
 chcp 65001 >nul
-rem Быстрый запуск игрового клиента Space Station R (T0.2)
+rem [SSR] Build and run the game client. ASCII only (see _build_env.bat).
 setlocal
 cd /d "%~dp0.."
 
-where cargo >nul 2>nul || set "PATH=%USERPROFILE%\.cargo\bin;%PATH%"
-if exist "C:\ss14\tools\w64devkit\w64devkit\bin\dlltool.exe" set "PATH=C:\ss14\tools\w64devkit\w64devkit\bin;%PATH%"
+call "%~dp0_build_env.bat"
 
-echo [SSR] Сборка и запуск клиента...
+echo [SSR] Building and starting client...
 cargo run -p ssr-client
 if errorlevel 1 (
-    echo [SSR] Ошибка сборки/запуска клиента.
+    rem Retry after a full clean of the client artifacts: this heals
+    rem "undefined reference to anon. ... llvm. ..." after an interrupted or
+    rem parallel build.
+    echo [SSR] Build failed - cleaning ssr-client artifacts and retrying...
+    cargo clean -p ssr-client
+    cargo run -p ssr-client
+)
+if errorlevel 1 (
+    echo [SSR] Client build/run failed.
     pause
 )
 endlocal

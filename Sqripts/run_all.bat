@@ -1,28 +1,36 @@
 @echo off
 chcp 65001 >nul
-rem Быстрый запуск всей игры: сервер (в отдельном окне) + клиент.
-rem Для тестовых режимов: set SSR_LOCK_INPUT=1 перед запуском и т.п.
+rem [SSR] Build and run everything: server (separate window) + client. ASCII only.
+rem Test modes: set SSR_LOCK_INPUT=1 etc. before running.
 setlocal
 cd /d "%~dp0.."
 
-where cargo >nul 2>nul || set "PATH=%USERPROFILE%\.cargo\bin;%PATH%"
-if exist "C:\ss14\tools\w64devkit\w64devkit\bin\dlltool.exe" set "PATH=C:\ss14\tools\w64devkit\w64devkit\bin;%PATH%"
+call "%~dp0_build_env.bat"
 
-echo [SSR] Сборка...
+echo [SSR] Building...
 cargo build --workspace
 if errorlevel 1 (
-    echo [SSR] Ошибка сборки.
+    rem Retry after cleaning the crate artifacts: heals
+    rem "undefined reference to anon. ... llvm. ..." after an interrupted or
+    rem parallel build.
+    echo [SSR] Build failed - cleaning crate artifacts and retrying...
+    cargo clean -p ssr-client
+    cargo clean -p ssr-server
+    cargo build --workspace
+)
+if errorlevel 1 (
+    echo [SSR] Build failed.
     pause
     exit /b 1
 )
 
-echo [SSR] Запуск сервера (отдельное окно)...
+echo [SSR] Starting server (separate window)...
 start "SSR server" cmd /k "cd /d %~dp0.. && target\debug\ssr-server.exe"
 timeout /t 2 /nobreak >nul
 
-echo [SSR] Запуск клиента...
+echo [SSR] Starting client...
 target\debug\ssr-client.exe
 
-echo [SSR] Клиент закрыт. Сервер останавливается...
+echo [SSR] Client closed. Stopping server...
 taskkill /IM ssr-server.exe /F >nul 2>nul
 endlocal

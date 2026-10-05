@@ -1,16 +1,20 @@
 @echo off
 chcp 65001 >nul
-rem Быстрый запуск headless-сервера Space Station R (T0.3)
+rem [SSR] Build and run the headless server (T0.3). ASCII only.
 setlocal
 cd /d "%~dp0.."
 
-where cargo >nul 2>nul || set "PATH=%USERPROFILE%\.cargo\bin;%PATH%"
-if exist "C:\ss14\tools\w64devkit\w64devkit\bin\dlltool.exe" set "PATH=C:\ss14\tools\w64devkit\w64devkit\bin;%PATH%"
+call "%~dp0_build_env.bat"
 
-echo [SSR] Сборка и запуск сервера (20 TPS, Ctrl+C для остановки)...
+echo [SSR] Building and starting server (20 TPS, Ctrl+C to stop)...
 cargo run -p ssr-server
 if errorlevel 1 (
-    echo [SSR] Ошибка сборки/запуска сервера.
+    echo [SSR] Build failed - cleaning ssr-server artifacts and retrying...
+    cargo clean -p ssr-server
+    cargo run -p ssr-server
+)
+if errorlevel 1 (
+    echo [SSR] Server build/run failed.
     pause
 )
 endlocal
