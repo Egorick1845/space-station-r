@@ -136,6 +136,8 @@ fn main() {
     app.init_resource::<chat::ChatState>();
     app.init_resource::<windows::WindowPositions>();
     app.init_resource::<settings::Settings>();
+    // Кэш PNG-иконок интерфейса (вербы/категории).
+    app.init_resource::<inventory_ui::IconCache>();
     app.init_resource::<doors::DeniedDoors>();
     // Тайлы со структурами-поверхностями (столы): по ним предметы рисуются выше.
     app.init_resource::<structures::SurfaceTiles>();

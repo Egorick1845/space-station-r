@@ -1004,16 +1004,35 @@ fn ui_open(ui: &InventoryUi) -> bool {
     ui.open
 }
 
+/// Кэш PNG-иконок интерфейса (вербы и категории): в сборке это
+/// `SpriteSpecifier.Texture` — обычный PNG (`Interface/VerbIcons/*.png`),
+/// а не RSI, поэтому `RsiRegistry` их не знает.
+#[derive(Resource, Default)]
+pub struct IconCache(pub std::collections::HashMap<String, Handle<Image>>);
+
+/// Хэндл PNG-иконки по пути из прототипа (`Interface/VerbIcons/…png`).
+pub fn icon_texture(cache: &mut IconCache, assets: &AssetServer, path: &str) -> Handle<Image> {
+    let key = format!("sprites/ss14/{path}");
+    cache
+        .0
+        .entry(key.clone())
+        .or_insert_with(|| assets.load(key))
+        .clone()
+}
+
 /// Меню действий (вербов): строится из ответа сервера, позиционируется у курсора.
 /// Оформление — как `ContextMenuPopup`/`ContextMenuElement` в сборке: строки по
 /// 32 px, иконка 32×32 слева, шрифт по типу верба (`InteractionVerb` — жирный
 /// курсив, `ActivationVerb` — жирный, `AlternativeVerb` — курсив), недоступные
 /// вербы серые с причиной, категории — заголовками с отступом.
+#[allow(clippy::too_many_arguments)]
 pub fn render_action_menu(
     mut commands: Commands,
     menu: Res<ActionMenu>,
     root: Query<Entity, With<ActionMenuRoot>>,
     registry: Res<crate::rsi::RsiRegistry>,
+    assets: Res<AssetServer>,
+    mut icons: ResMut<IconCache>,
     content: Res<crate::content::ClientContent>,
     mut last: Local<Option<(usize, Vec2)>>,
 ) {
@@ -1090,17 +1109,23 @@ pub fn render_action_menu(
                     (Some(message), true) => format!("{} ({message})", option.label),
                     _ => option.label.clone(),
                 };
-                let icon = option
-                    .icon
-                    .as_deref()
-                    .and_then(|path| registry.get(&format!("sprites/ss14/{path}")))
-                    .map(|sprite| {
-                        (
-                            sprite.image.clone(),
-                            sprite.layout.clone(),
-                            sprite.index(0, 0),
-                        )
-                    });
+                // Иконка: `path#state` — RSI (спрайты сущностей), иначе PNG
+                // (`Interface/VerbIcons/*.png` — `SpriteSpecifier.Texture`).
+                let icon = option.icon.as_deref().and_then(|path| {
+                    if path.contains('#') {
+                        registry.get(&format!("sprites/ss14/{path}")).map(|sprite| {
+                            (
+                                sprite.image.clone(),
+                                Some(TextureAtlas {
+                                    layout: sprite.layout.clone(),
+                                    index: sprite.index(0, 0),
+                                }),
+                            )
+                        })
+                    } else {
+                        Some((icon_texture(&mut icons, &assets, path), None))
+                    }
+                });
                 list.spawn((
                     ActionMenuOption(index),
                     Button,
@@ -1123,15 +1148,20 @@ pub fn render_action_menu(
                 ))
                 .with_children(|row| {
                     // Иконка 32×32 (`SpriteView`/`TextureRect` в сборке).
-                    if let Some((image, layout, index)) = icon {
-                        row.spawn((
-                            ImageNode::from_atlas_image(image, TextureAtlas { layout, index }),
-                            Node {
-                                width: px(24),
-                                height: px(24),
-                                ..default()
-                            },
-                        ));
+                    if let Some((image, atlas)) = icon {
+                        let node = Node {
+                            width: px(24),
+                            height: px(24),
+                            ..default()
+                        };
+                        match atlas {
+                            Some(atlas) => {
+                                row.spawn((ImageNode::from_atlas_image(image, atlas), node));
+                            }
+                            None => {
+                                row.spawn((ImageNode::new(image), node));
+                            }
+                        }
                     }
                     let text = Text::new(label);
                     row.spawn((
