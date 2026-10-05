@@ -18,6 +18,9 @@ pub struct ClientContent {
     pub proto_names: HashMap<String, String>,
     /// Размер предмета из прототипа: id → id размера (`Normal`, `Small`, …).
     pub proto_sizes: HashMap<String, String>,
+    /// `IconSmooth` прототипа: id → (ключ соединения, база состояния) — у столов
+    /// `("table", "state_")`, состояния спрайта `state_0`…`state_15`.
+    pub proto_smooth: HashMap<String, (String, String)>,
 }
 
 impl ClientContent {
@@ -94,6 +97,11 @@ pub fn load_content(mut commands: Commands) {
                 }
                 if let Some(size) = proto.size {
                     content.proto_sizes.insert(proto.id.clone(), size);
+                }
+                if let Some(smooth) = proto.smooth {
+                    content
+                        .proto_smooth
+                        .insert(proto.id.clone(), (smooth.key, smooth.base));
                 }
                 content.proto_sprites.insert(proto.id, sprite);
             }

@@ -69,6 +69,48 @@ pub struct Proto {
     /// чтобы ничего не терять при импорте (IMP.3, задача конвертера).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub components: Vec<(String, ron::Value)>,
+    /// Есть ли компонент `Item` (предмет). Иначе прототип — структура
+    /// (`TableSteel`, `Airlock`, …), и спавнить его нужно как структуру.
+    #[serde(default)]
+    pub is_item: bool,
+    /// `IconSmooth` — соединение соседних структур (`key`, `base` состояния).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub smooth: Option<ProtoSmooth>,
+    /// `PlaceableSurface` — на структуру можно класть предметы.
+    #[serde(default)]
+    pub surface: bool,
+    /// `Fixtures` — коллизия структуры (границы в тайлах, слои, плотность).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fixtures: Vec<ProtoFixture>,
+    /// `Climbable` — через структуру можно перелезть (в сборке — `Climbable`).
+    #[serde(default)]
+    pub climbable: bool,
+    /// `Icon.state` — состояние спрайта для иконки в меню спавна (`full` у столов).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_state: Option<String>,
+}
+
+/// `IconSmooth` прототипа: соседние структуры с тем же `key` соединяются
+/// спрайтами `{base}{маска}` (у столов `key: state`, `base: "state_"`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProtoSmooth {
+    pub key: String,
+    pub base: String,
+}
+
+/// Фикстура прототипа (`Fixtures.fixtures.<id>`): форма и слои коллизии.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProtoFixture {
+    /// Границы `PhysShapeAabb.bounds` в тайлах (`-0.45,-0.45,0.45,0.45` у стола).
+    pub bounds: (f32, f32, f32, f32),
+    /// `hard: true` — твёрдая фикстура (блокирует). В сборке по умолчанию `true`.
+    pub hard: bool,
+    #[serde(default)]
+    pub density: f32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layer: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mask: Vec<String>,
 }
 
 /// `Storage` прототипа: сетка и максимальный размер вкладываемого.

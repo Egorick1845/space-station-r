@@ -35,6 +35,7 @@ mod lobby;
 mod power_view;
 mod rsi;
 mod settings;
+mod structures;
 mod tiles;
 mod ui_theme;
 mod windows;
@@ -135,6 +136,8 @@ fn main() {
     app.init_resource::<windows::WindowPositions>();
     app.init_resource::<settings::Settings>();
     app.init_resource::<doors::DeniedDoors>();
+    // Тайлы со структурами-поверхностями (столы): по ним предметы рисуются выше.
+    app.init_resource::<structures::SurfaceTiles>();
     app.init_resource::<crafting::CraftingState>();
     app.init_resource::<hud::HudState>();
     app.init_resource::<hud::Placement>();
@@ -402,6 +405,7 @@ fn main() {
             containers::container_slot_click,
             containers::container_close_click,
             containers::container_test_mode,
+            structures::render_structures,
             world_items::sync_floor_item_icons,
             world_items::floor_item_click,
             // P — копирование сущности под курсором, ЛКМ — размещение копии.

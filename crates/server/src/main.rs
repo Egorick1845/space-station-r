@@ -274,6 +274,21 @@ struct ProtoCatalog {
     ids: std::collections::HashSet<String>,
     /// Размер предмета: id → id размера из `item_size.yml` (`Normal`, `Small`, …).
     sizes: std::collections::HashMap<String, String>,
+    /// Структуры (не-предметы): коллизия, поверхность, соединение спрайтов.
+    structures: std::collections::HashMap<String, StructureInfo>,
+}
+
+/// Данные структуры из прототипа (стол, машина, шкаф).
+#[derive(Clone, Debug, Default)]
+struct StructureInfo {
+    /// `PlaceableSurface` — можно класть предметы.
+    surface: bool,
+    /// `Fixtures` с `hard: true` — есть коллизия.
+    solid: bool,
+    /// Ключ `IconSmooth` — соседние структуры соединяются спрайтами.
+    smooth: Option<String>,
+    /// Полуразмеры коллизии в мировых единицах (из `PhysShapeAabb.bounds`).
+    half: (f32, f32),
 }
 
 impl ProtoCatalog {
@@ -285,6 +300,11 @@ impl ProtoCatalog {
     fn size_cells(&self, id: &str) -> Option<(u8, u8)> {
         let size_id = self.sizes.get(id)?;
         ssr_core::item_size::cells_of(size_id)
+    }
+
+    /// Данные структуры (`None` — прототип не структура).
+    fn structure(&self, id: &str) -> Option<&StructureInfo> {
+        self.structures.get(id)
     }
 }
 
@@ -309,6 +329,34 @@ fn load_prototypes(mut commands: Commands) {
                 }
                 if let Some(size) = &proto.size {
                     catalog.sizes.insert(proto.id.clone(), size.clone());
+                }
+                // Структура (не предмет): коллизия из `Fixtures`, поверхность из
+                // `PlaceableSurface`, соединение из `IconSmooth` — как у столов
+                // (`bounds: "-0.45,-0.45,0.45,0.45"`, `hard: true`).
+                if !proto.is_item {
+                    let fixture = proto
+                        .fixtures
+                        .iter()
+                        .find(|fixture| fixture.hard && fixture.bounds != (-0.5, -0.5, 0.5, 0.5))
+                        .or_else(|| proto.fixtures.iter().find(|fixture| fixture.hard));
+                    let half = fixture
+                        .map(|fixture| {
+                            let (left, bottom, right, top) = fixture.bounds;
+                            (
+                                (right - left).abs() * 0.5 * TILE_SIZE,
+                                (top - bottom).abs() * 0.5 * TILE_SIZE,
+                            )
+                        })
+                        .unwrap_or((TILE_SIZE * 0.45, TILE_SIZE * 0.45));
+                    catalog.structures.insert(
+                        proto.id.clone(),
+                        StructureInfo {
+                            surface: proto.surface,
+                            solid: fixture.is_some(),
+                            smooth: proto.smooth.as_ref().map(|smooth| smooth.key.clone()),
+                            half,
+                        },
+                    );
                 }
                 catalog.ids.insert(proto.id.clone());
             }
@@ -1639,6 +1687,41 @@ fn run_admin_command(
                 },
                 _ => None,
             };
+            // Структура (стол, машина, шкаф): в сборке это сущность с `Fixtures`
+            // (коллизия `bounds: "-0.45,-0.45,0.45,0.45"`), `PlaceableSurface`
+            // (на неё кладут предметы) и `IconSmooth` (соединение соседей) —
+            // спавним её как структуру, а не как «предмет с именем».
+            if catalogs.items.by_id(item_id).is_none()
+                && let Some(info) = prototypes.structure(item_id).cloned()
+            {
+                let mut produced = 0;
+                for index in 0..count {
+                    let spread = (index as f32) * TILE_SIZE * 0.6;
+                    let x = explicit.map_or(base[0] + spread, |(x, _)| x + spread);
+                    let y = explicit.map_or(base[1] - TILE_SIZE * 0.8, |(_, y)| y);
+                    let mut entity = commands.spawn((
+                        ssr_core::structures::Structure {
+                            proto: item_id.to_string(),
+                            smooth: info.smooth.clone(),
+                            surface: info.surface,
+                            solid: info.solid,
+                        },
+                        ItemPosition([x, y]),
+                        Replicate::to_clients(NetworkTarget::All),
+                        Rooms::default(),
+                    ));
+                    if info.solid {
+                        entity.insert((
+                            RigidBody::Static,
+                            Collider::rectangle(info.half.0 * 2.0, info.half.1 * 2.0),
+                            Position(Vector::new(x, y)),
+                            Rotation::default(),
+                        ));
+                    }
+                    produced += 1;
+                }
+                return format!("размещено структур {produced}× {item_id}");
+            }
             if on_floor {
                 let mut produced = 0;
                 for index in 0..count {
@@ -2959,20 +3042,35 @@ fn update_client_rooms(
     }
 }
 
+/// Кому `sync_item_rooms` выдаёт комнату видимости: предметам и структурам
+/// (столам) — у остальных сущностей комнату ставит свой код.
+type RoomAssignable = Or<(With<Item>, With<ssr_core::structures::Structure>)>;
+
 /// Выдаёт предметам комнату якоря: держателя (руки/рюкзак), ящика или чанка
 /// под лежащим предметом. Иначе `Rooms::default()` (пустой набор) делает предмет
 /// невидимым всем клиентам — иконки в UI и модель в руке не приходят (T-мех).
+/// Структуры (столы) идут тем же путём: без комнаты они не реплицируются.
+#[allow(clippy::type_complexity)]
 fn sync_item_rooms(
     mut commands: Commands,
-    items: Query<(Entity, &HeldBy, Option<&ItemPosition>, Option<&ItemRoom>)>,
+    items: Query<
+        (
+            Entity,
+            Option<&HeldBy>,
+            Option<&ItemPosition>,
+            Option<&ItemRoom>,
+        ),
+        RoomAssignable,
+    >,
     holders: Query<&ItemRoom, With<PlayerPosition>>,
     containers: Query<(&Inventory, &ItemRoom), With<Container>>,
     mut chunk_rooms: ResMut<ChunkRooms>,
     mut allocator: ResMut<RoomAllocator>,
 ) {
     for (entity, held, position, current) in items.iter() {
-        let room = if held.player != 0 {
-            Entity::try_from_bits(held.player)
+        let holder = held.filter(|held| held.player != 0).map(|held| held.player);
+        let room = if let Some(holder_bits) = holder {
+            Entity::try_from_bits(holder_bits)
                 .and_then(|holder| holders.get(holder).ok())
                 .copied()
         } else if let Some(position) = position {

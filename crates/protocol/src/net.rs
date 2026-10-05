@@ -23,6 +23,7 @@ pub fn register_replication(app: &mut bevy_app::App) {
     use ssr_core::power::{Cable, Consumer, Generator, Light, Powered};
     use ssr_core::roles::PlayerRole;
     use ssr_core::stamina::Stamina;
+    use ssr_core::structures::Structure;
     use ssr_core::tiles::TileChunkData;
     use ssr_core::{Door, PlayerPosition, Species};
 
@@ -53,6 +54,7 @@ pub fn register_replication(app: &mut bevy_app::App) {
     app.component::<PlayerName>().replicate();
     app.component::<Hair>().replicate();
     app.component::<FacialHair>().replicate();
+    app.component::<Structure>().replicate();
 }
 
 /// Единственный канал игры: надёжный, упорядоченный (рукопожатие, ввод, дельты).

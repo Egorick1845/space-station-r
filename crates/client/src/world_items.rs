@@ -18,8 +18,10 @@ use crate::rsi::RsiRegistry;
 #[derive(Component)]
 pub struct FloorItemIcon;
 
-/// Слой отрисовки: над тайлами и кабелями, под дверями (0.5) и игроком (1.0).
-const FLOOR_ITEM_Z: f32 = 0.45;
+/// Слой отрисовки: в сборке предмет — `DrawDepth.Items = +4`, выше столов и
+/// ящиков (`Objects = 0`), но ниже мобов (`Mobs = +6`). У нас из этого порядка:
+/// структуры 0.45, ящики 0.7, предметы 0.75, игрок 1.0.
+const FLOOR_ITEM_Z: f32 = 0.75;
 
 /// Синхронизирует иконки: предмет с мировой позицией без владельца показывается,
 /// поднятый или убранный в рюкзак — скрывается.
@@ -29,6 +31,7 @@ pub fn sync_floor_item_icons(
     mut icons: Query<(&mut Transform, &mut Visibility), With<FloorItemIcon>>,
     registry: Res<RsiRegistry>,
     content: Res<ClientContent>,
+    surfaces: Res<crate::structures::SurfaceTiles>,
 ) {
     for (entity, item, position, held) in items.iter() {
         let on_floor = position.filter(|_| held.player == 0);
@@ -36,6 +39,17 @@ pub fn sync_floor_item_icons(
             (Some(position), Ok((mut transform, mut visibility))) => {
                 transform.translation.x = position.0[0];
                 transform.translation.y = position.0[1];
+                // Предмет на структуре с `PlaceableSurface` (стол) рисуется выше
+                // неё, на полу — под ней (как `PlaceableSurface` в сборке).
+                let on_surface = surfaces.0.contains(&crate::structures::tile_of(position.0));
+                let z = if on_surface {
+                    crate::structures::SURFACE_ITEM_Z
+                } else {
+                    FLOOR_ITEM_Z
+                };
+                if transform.translation.z != z {
+                    transform.translation.z = z;
+                }
                 if *visibility != Visibility::Inherited {
                     *visibility = Visibility::Inherited;
                 }
@@ -43,6 +57,12 @@ pub fn sync_floor_item_icons(
             (Some(position), Err(_)) => {
                 let Some(sprite) = item_icon(&registry, &content, &item.name) else {
                     continue;
+                };
+                let on_surface = surfaces.0.contains(&crate::structures::tile_of(position.0));
+                let z = if on_surface {
+                    crate::structures::SURFACE_ITEM_Z
+                } else {
+                    FLOOR_ITEM_Z
                 };
                 commands.entity(entity).insert((
                     Sprite {
@@ -53,7 +73,7 @@ pub fn sync_floor_item_icons(
                         }),
                         ..default()
                     },
-                    Transform::from_xyz(position.0[0], position.0[1], FLOOR_ITEM_Z),
+                    Transform::from_xyz(position.0[0], position.0[1], z),
                     Visibility::Inherited,
                     FloorItemIcon,
                 ));

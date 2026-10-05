@@ -19,7 +19,9 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 
 use serde_yaml_ng::Value;
-use ssr_core::prototypes::{Proto, ProtoLight, ProtoSet, ProtoStack, ProtoStorage};
+use ssr_core::prototypes::{
+    Proto, ProtoFixture, ProtoLight, ProtoSet, ProtoSmooth, ProtoStack, ProtoStorage,
+};
 
 /// Максимум итераций разрешения наследования (защита от глубоких цепочек).
 const MAX_DEPTH: usize = 64;
@@ -277,6 +279,12 @@ fn resolve(
     let mut body_type = None;
     let mut light = None;
     let mut components = Vec::new();
+    let mut is_item = false;
+    let mut smooth = None;
+    let mut surface = false;
+    let mut fixtures: Vec<ProtoFixture> = Vec::new();
+    let mut climbable = false;
+    let mut icon_state = None;
     for (name, value) in &merged {
         match name.as_str() {
             "Sprite" => {
@@ -309,6 +317,44 @@ fn resolve(
             "Item" => {
                 // `ItemComponent.Size` по умолчанию `Small` (`ItemComponent.cs:23`).
                 size = Some(value["size"].as_str().unwrap_or("Small").to_string());
+                is_item = true;
+            }
+            "Icon" => {
+                // Состояние иконки для меню спавна (у столов `full`, тогда как в
+                // мире состояние даёт `IconSmooth`).
+                if let Some(state) = value["state"].as_str() {
+                    icon_state = Some(state.to_string());
+                }
+            }
+            "IconSmooth" => {
+                if let Some(key) = value["key"].as_str() {
+                    smooth = Some(ProtoSmooth {
+                        key: key.to_string(),
+                        base: value["base"].as_str().unwrap_or_default().to_string(),
+                    });
+                }
+            }
+            "PlaceableSurface" => surface = true,
+            "Climbable" => climbable = true,
+            "Fixtures" => {
+                if let Some(map) = value["fixtures"].as_mapping() {
+                    for (_name, fixture) in map {
+                        // `shape: !type:PhysShapeAabb { bounds: "-0.45,-0.45,0.45,0.45" }`
+                        let shape = untag(&fixture["shape"]);
+                        let bounds = shape["bounds"]
+                            .as_str()
+                            .and_then(parse_bounds)
+                            .unwrap_or((-0.5, -0.5, 0.5, 0.5));
+                        fixtures.push(ProtoFixture {
+                            bounds,
+                            // `Fixture.Hard` по умолчанию `true` (`Fixture.cs:85`).
+                            hard: fixture["hard"].as_bool().unwrap_or(true),
+                            density: fixture["density"].as_f64().unwrap_or(0.0) as f32,
+                            layer: string_list(&fixture["layer"]),
+                            mask: string_list(&fixture["mask"]),
+                        });
+                    }
+                }
             }
             "Clothing" => {
                 equip = value["slot"].as_str().map(str::to_string);
@@ -415,6 +461,12 @@ fn resolve(
             body_type,
             light,
             components,
+            is_item,
+            smooth,
+            surface,
+            fixtures,
+            climbable,
+            icon_state,
         },
     );
     let _ = proto.file.as_str();
@@ -479,6 +531,35 @@ fn merge_value(parent: &Value, child: &Value) -> Value {
         }
         _ => child.clone(),
     }
+}
+
+/// Снимает YAML-тег (`!type:PhysShapeAabb`) — значения читаются из `.value`.
+fn untag(value: &Value) -> &Value {
+    match value {
+        Value::Tagged(tagged) => &tagged.value,
+        other => other,
+    }
+}
+
+/// Строковый список значения (`layer: [TableLayer]` или одна строка).
+fn string_list(value: &Value) -> Vec<String> {
+    match value {
+        Value::String(text) => vec![text.clone()],
+        Value::Sequence(list) => list
+            .iter()
+            .filter_map(|item| item.as_str().map(str::to_string))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// `"-0.45,-0.45,0.45,0.45"` → кортеж границ фикстуры.
+fn parse_bounds(text: &str) -> Option<(f32, f32, f32, f32)> {
+    let parts: Vec<f32> = text
+        .split(',')
+        .filter_map(|part| part.trim().parse().ok())
+        .collect();
+    (parts.len() == 4).then(|| (parts[0], parts[1], parts[2], parts[3]))
 }
 
 /// `serde_yaml_ng::Value` → `ron::Value` (чтобы сохранить неразобранные
