@@ -335,3 +335,25 @@ WizDen-CraftingMenu здесь нет.
 
 Каждая механика: перенос → тесты на формулы/данные → живая проверка
 (`SSR_*_TEST` + скриншот/лог) → коммит по-русски → отметка здесь и в PROGRESS.md.
+
+## 10. Новые пункты владельца (2026-10-05, второй список)
+
+Источник жалоб: «Полёт через гост сейчас работает не так как в сс14, летать должен
+именно призрак, у игрока должен быть афк индикатор (ssd), нет анимации бега, нет
+анимации ударов, все окна со скроллом мигают при прокрутке. Не работает поиск в
+спавн меню, спавн меню в целом работает очень плохо. Сделай начальную карту Dev
+как в самой сс14, сделай роли как в сс14, там капитан и т.д, сделай систему
+визоров должности, здоровья и т.д.»
+
+| № | Пункт | Факты сборки | Статус |
+|---|---|---|---|
+| 10.1 | Призрак — отдельная сущность `MobObserver`, а не игрок: `GhostSystem.SpawnGhost` спавнит `GameTicker.ObserverPrototypeName = "MobObserver"`, майнд переезжает (`_minds.Visit/TransferTo`), у обсервера свои компоненты (`Physics: KinematicController`, `bodyStatus: InAir`, `MovementIgnoreGravity`, `CanMoveInAir`, фикстура с `layer: GhostImpassable`, `mask` не задан; `Eye { drawFov: false }`, `Examiner`, `CollectiveMind`, `Speech: Dead`) | `Content.Server/Ghost/GhostSystem.cs:488-540`, `Entities/Mobs/Player/observer.yml` | ⏳ |
+| 10.2 | Индикатор AFK/SSD у игрока: в сборке `SSDIndicator`-оверлей — если игрок не двигался дольше `SSDThreshold`, над спрайтом рисуется значок; сервер помечает состояние | `Content.Client/Overlays/SSDIndicatorSystem.cs`, `Content.Shared/CCVar` | ⏳ |
+| 10.3 | Анимация бега: `FootWalkAnimation` (у нас есть) + спринт-модификатор; в сборке ещё `SpriteMovementAnimation`/`Wielded`-поза; проверить, что фаза шага ускоряется при Shift и виден бег | `Content.Client/Footsteps`? `humanoid` (`foot_walk_animation`) | 🔄 есть скелет, нужна проверка/ускорение |
+| 10.4 | Анимация ударов: `MeleeWeaponComponent.Animation = "WeaponArcThrust"/"WeaponArcSlash"`, `MissAnimation`, `WideAnimation`, `DisarmAnimation`; на клиенте `MeleeWeaponSystem` рисует дугу поверх персонажа (`Effects/arcs.rsi`) на время удара | `Content.Shared/Weapons/Melee/MeleeWeaponComponent.cs:112-126`, `Content.Client/Weapons/Melee/MeleeWeaponSystem.cs` | ⏳ |
+| 10.5 | Мигание окон со скроллом: список пересобирался на каждую прокрученную долю пикселя. Исправлено: подпись окна — НОМЕР первой строки, дробный сдвиг делает отдельная система `spawn_scroll_offset` через `UiTransform` | — | ✅ (клиент) |
+| 10.6 | Поиск в спавн-меню: фильтр работает, но счётчик совпадений и предел прокрутки считали только 42 предмета каталога, а не 14 тысяч строк списка — прокрутка «упиралась». Исправлено: `spawn_matched_count` считает то же, что отрисовка | — | ✅ (клиент) |
+| 10.7 | Спавн-меню в целом: список, категории, вкладки, иконки состояния, избранное, режим размещения по клику — как `EntitySpawningUIController` (`F5`), тайлы `F6`, декали `F8`, sandbox `B` | `Content.Client/UserInterface/Systems/Sandbox/SandboxUIController.cs` | 🔄 |
+| 10.8 | Начальная карта Dev как в сборке: `Resources/Maps/Dev/*.yml` (v7) — нужен парсер карт SS14 (п.9.3) и тайлдефы (п.9.4) | `Resources/Maps/Dev/`, `MapLoader.cs` | ⏳ (зависит от 9.3/9.4) |
+| 10.9 | Роли как в сборке: прототипы `type: job` (капитан, инженер, СБ…): `id`, `name`, `icon`, `access`, `startingGear`, `weight`, `departments`; импортёр сейчас `job` не читает | `Resources/Prototypes/Roles/Jobs/**` | ⏳ |
+| 10.10 | Визоры/индикаторы должности и здоровья: иконка должности на ID и в HUD, полоски здоровья над персонажем (`HealthBars`), статус-иконки (кровотечение, стан, крит), как `JobIcon`, `HealthIcon`, `StatusIcon` в сборке | `Content.Client/Overlays/StatusEffects`, `Content.Shared/StatusEffect` | ⏳ |

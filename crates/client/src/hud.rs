@@ -1031,9 +1031,15 @@ pub fn hud_hotkeys(
         }
         tracing::info!(combat = state.combat, "combat mode toggled");
     }
+    // Q — положить предмет из руки у курсора, Ctrl+Q — бросить (DropHand +
+    // ThrowItemInHand в keybinds.yml:188-190,232-235).
     if keys.just_pressed(KeyCode::KeyQ) {
+        let target = cursor_world(&windows, &camera)
+            .map(|world| [world.x, world.y])
+            .unwrap_or_default();
+        let throw = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
         for mut sender in senders.iter_mut() {
-            sender.send::<GameChannel>(ClientMessage::DropHand);
+            sender.send::<GameChannel>(ClientMessage::DropHand { target, throw });
         }
     }
     // E — действие: дверь/ящик/предмет на полу под курсором; иначе применить
@@ -1079,8 +1085,13 @@ pub fn hud_hotkeys(
                 tracing::info!(combat = state.combat, "action: combat toggled by hotkey");
             }
             HudAction::Drop => {
+                // Кнопка «выбросить»: кладём под себя (сервер зажимает точку
+                // к игроку), параметров курсора здесь нет.
                 for mut sender in senders.iter_mut() {
-                    sender.send::<GameChannel>(ClientMessage::DropHand);
+                    sender.send::<GameChannel>(ClientMessage::DropHand {
+                        target: [0.0, 0.0],
+                        throw: false,
+                    });
                 }
             }
             HudAction::Examine => tracing::info!("осмотр: наведите курсор и нажмите E"),
@@ -1171,8 +1182,13 @@ pub fn hud_click(
             }
             HudAction::Examine => tracing::info!("осмотр: наведите курсор и нажмите E"),
             HudAction::Drop => {
+                // Кнопка «выбросить»: кладём под себя (сервер зажимает точку
+                // к игроку), параметров курсора здесь нет.
                 for mut sender in senders.iter_mut() {
-                    sender.send::<GameChannel>(ClientMessage::DropHand);
+                    sender.send::<GameChannel>(ClientMessage::DropHand {
+                        target: [0.0, 0.0],
+                        throw: false,
+                    });
                 }
             }
             HudAction::Admin(command) => {
@@ -1554,18 +1570,33 @@ pub(crate) fn spawn_content_h(total: usize) -> f32 {
 }
 
 /// Сколько предметов проходит фильтр поиска (для полосы прокрутки и колеса).
+/// Считает ТО ЖЕ, что и отрисовка списка: наш каталог + импортированные
+/// прототипы сборки (у которых есть спрайт и нет `HideSpawnMenu`).
 pub(crate) fn spawn_matched_count(search: &str, content: &ClientContent) -> usize {
     let query = search.to_lowercase();
-    content
-        .items
-        .items
-        .iter()
-        .filter(|item| {
-            query.is_empty()
-                || format!("{} {}", item.id.to_lowercase(), item.name.to_lowercase())
-                    .contains(&query)
-        })
-        .count()
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut total = 0usize;
+    for item in content.items.items.iter() {
+        if query.is_empty()
+            || format!("{} {}", item.id.to_lowercase(), item.name.to_lowercase()).contains(&query)
+        {
+            seen.insert(item.id.as_str());
+            total += 1;
+        }
+    }
+    for id in content.proto_sprites.keys() {
+        if seen.contains(id.as_str()) {
+            continue;
+        }
+        let name = content.proto_names.get(id).map(String::as_str).unwrap_or(id);
+        if !query.is_empty()
+            && !format!("{} {}", id.to_lowercase(), name.to_lowercase()).contains(&query)
+        {
+            continue;
+        }
+        total += 1;
+    }
+    total
 }
 
 /// Догоняет цель прокрутки экспонентой (`LerpAnimate(rate: 15)` в движке).
@@ -1575,8 +1606,32 @@ pub fn spawn_scroll_anim(time: Res<Time>, mut state: ResMut<HudState>) {
     state.spawn_scroll += (state.spawn_scroll_target - state.spawn_scroll) * k;
 }
 
+/// Внутренний контейнер списка спавн-меню (сдвигается при прокрутке).
+#[derive(Component)]
+pub struct SpawnListInner;
+
+/// Покадровый сдвиг списка при прокрутке БЕЗ пересборки строк: раньше сдвиг
+/// входил в подпись окна и каждая прокрученная доля пикселя пересобирала список
+/// целиком — окна мигали (жалоба владельца «все окна со скроллом мигают»).
+pub fn spawn_scroll_offset(
+    state: Res<HudState>,
+    content: Res<ClientContent>,
+    mut inner: Query<&mut UiTransform, With<SpawnListInner>>,
+) {
+    if inner.is_empty() {
+        return;
+    }
+    let total = spawn_matched_count(&state.search, &content);
+    let max_scroll = (spawn_content_h(total) - spawn_view_h()).max(0.0);
+    let scroll = state.spawn_scroll.clamp(0.0, max_scroll);
+    let offset = scroll - (scroll / SPAWN_ROW_STEP).floor() * SPAWN_ROW_STEP;
+    for mut transform in inner.iter_mut() {
+        transform.translation = Val2::new(Val::Px(0.0), Val::Px(-offset));
+    }
+}
+
 /// Отпечаток состояния спавн-меню (открыто, поиск, спрайты, режим размещения).
-type SpawnMenuSignature = (bool, String, u32, Option<String>, i32);
+type SpawnMenuSignature = (bool, String, u32, Option<String>, usize);
 
 /// Перерисовывает спавн-меню (F5) по образцу `EntitySpawnWindow.xaml`:
 /// окно 350×400 у левого края, поле поиска с кнопкой «Очистить», список
@@ -1598,9 +1653,10 @@ pub fn render_spawn_menu(
         state.search.clone(),
         registry.generation(),
         placement.item.clone(),
-        // Округляем: анимация приближается к цели асимптотически, без округления
-        // окно перерисовывалось бы каждый кадр вечно.
-        state.spawn_scroll.round() as i32,
+        // Только НОМЕР первой видимой строки: дробный сдвиг применяет отдельная
+        // система (`spawn_scroll_offset`) — иначе список мигал (пересборка на
+        // каждую прокрученную долю пикселя).
+        (state.spawn_scroll / SPAWN_ROW_STEP).floor() as usize,
     );
     if last.as_ref() == Some(&signature) {
         return;
@@ -1743,6 +1799,10 @@ pub fn render_spawn_menu(
                 })
                 .with_children(|list| {
                     list.spawn((
+                        // Маркер для покадрового сдвига списка: сдвиг делается
+                        // `UiTransform`-ом БЕЗ пересборки строк, иначе список
+                        // мигал при прокрутке (полная пересборка каждый кадр).
+                        SpawnListInner,
                         Node {
                             position_type: PositionType::Absolute,
                             left: px(0),
@@ -2252,17 +2312,11 @@ pub fn menu_scroll(
     if !state.spawn_open && !state.warp_open {
         return;
     }
-    let query = state.search.to_lowercase();
-    let total = content
-        .items
-        .items
-        .iter()
-        .filter(|item| {
-            query.is_empty()
-                || format!("{} {}", item.id.to_lowercase(), item.name.to_lowercase())
-                    .contains(&query)
-        })
-        .count();
+    // Счётчик совпадений — ТОТ ЖЕ, что у отрисовки списка (наш каталог +
+    // импортированные прототипы). Раньше здесь считались только 42 предмета
+    // каталога, поэтому полоса прокрутки и предел прокрутки не совпадали с
+    // реальным списком на 14 тысяч строк — список «не листался».
+    let total = spawn_matched_count(&state.search, &content);
     let max_scroll = (spawn_content_h(total) - spawn_view_h()).max(0.0);
     for event in wheel.read() {
         // Шаг 50 px за щелчок, как `ScrollContainer.ScrollSpeedY`.

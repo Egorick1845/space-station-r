@@ -618,7 +618,7 @@ pub fn render_inventory_panel(
                     }
                     // Предметы: рамка по футпринту (`Storage/piece_*`) и спрайт ×2
                     // по центру занятой площади (ItemGridPiece.cs).
-                    for (bits, x, y, w, h) in ssr_core::inventory::item_layout(&inventory.cells) {
+                    for (bits, x, y, w, h) in ssr_core::inventory::item_layout(inventory.cols, &inventory.cells) {
                         let Some(sprite) = sprites.icon(bits) else {
                             continue;
                         };
@@ -1233,7 +1233,12 @@ pub fn hands_ui_click(
         let item = state.item_in_hand(slot.0);
         if is_active && item.is_some() {
             for mut sender in senders.iter_mut() {
-                sender.send::<GameChannel>(ClientMessage::DropHand);
+                // Цель — центр игрока: клик по слоту кладёт предмет под себя
+                // (DropHand зажимает точку к игроку на сервере).
+                sender.send::<GameChannel>(ClientMessage::DropHand {
+                    target: [0.0, 0.0],
+                    throw: false,
+                });
             }
             tracing::info!("hand item stow sent");
         } else if !is_active {
