@@ -204,6 +204,7 @@ pub fn sync_bodies(
     mut commands: Commands,
     registry: Res<RsiRegistry>,
     own: Res<OwnPlayerEntity>,
+    settings: Res<crate::settings::Settings>,
     species: Query<&Species>,
     q: BodyQueries,
 ) {
@@ -231,14 +232,15 @@ pub fn sync_bodies(
         let sex = sexes.get(entity).copied().unwrap_or_default();
         format!("{}{}", species_of(entity), sex.part_suffix())
     };
-    // Призраки видны только призракам и админам: в сборке живые не видят
-    // призраков вне PostRound (`GhostSystem.OnGhostStartup` перекладывает слои
-    // видимости `Ghost`/`Normal`, показ включается `showghosts`).
+    // Призраки видны только призракам и при `showghosts on`: в сборке живые не
+    // видят призраков вне PostRound (`GhostSystem.OnGhostStartup` перекладывает
+    // слои видимости `Ghost`/`Normal`, показ включается командой `showghosts`).
     let own_is_ghost = own
         .0
         .map(|entity| ghosts.get(entity).is_ok())
         .unwrap_or(false);
-    let ghost_visible = |entity: Entity| own_is_ghost || ghosts.get(entity).is_err();
+    let show_all = own_is_ghost || settings.show_ghosts;
+    let ghost_visible = |entity: Entity| show_all || ghosts.get(entity).is_err();
 
     if let Some(own_entity) = own.0 {
         let species_id = species_of(own_entity);

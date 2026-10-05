@@ -391,6 +391,11 @@ fn light_apply_fov_cs(@builtin(global_invocation_id) id: vec3<u32>) {
     // Глубина стены от глаза по этому направлению (с интерполяцией бинов).
     let wall_dist = fov_depth(rel);
     var occlusion = chebyshev(vec2<f32>(wall_dist, wall_dist * wall_dist + 0.25), our_dist);
+    // `Eye.DrawFov = false` (призрак, `observer.yml`): проход FOV не гасит свет —
+    // параметр `fov_range` приходит как 1.0, и видимость считается полной.
+    if (params.fov_range > 0.5) {
+        occlusion = 1.0;
+    }
     // Просачивание света на стены (`wall-bleed-blur.swsl`): видимая грань стены
     // освещается светом соседних НЕ-стеновых текселей, поэтому стена рядом с
     // освещённым полом видна, а глубина стены (там и соседи — стена) остаётся

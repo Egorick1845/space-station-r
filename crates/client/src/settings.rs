@@ -29,6 +29,9 @@ pub struct Settings {
     pub combat_indicators: bool,
     /// Процедурная анимация шага (`accessibility.foot_walk_animation`, default true).
     pub foot_walk_animation: bool,
+    /// Показывать призраков живым (команда `showghosts` в сборке).
+    #[serde(default)]
+    pub show_ghosts: bool,
 }
 
 impl Default for Settings {
@@ -45,6 +48,7 @@ impl Default for Settings {
             // `accessibility.foot_walk_animation = true`.
             combat_indicators: true,
             foot_walk_animation: true,
+            show_ghosts: false,
         }
     }
 }

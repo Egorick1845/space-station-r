@@ -1944,10 +1944,9 @@ fn run_admin_command(
             format!("телепорт к {target_name}")
         }
         "ghost" => {
-            // Призрак: летает сквозь стены, без коллизии (механики владельца).
-            commands
-                .entity(player)
-                .insert((Ghost, ColliderDisabled, KnockedDown { seconds: 0.0 }));
+            // Призрак: летает сквозь стены (у `MobObserver` маска коллизии 0),
+            // но НЕ лежит — `KnockedDown` не выдаём (обсервер не prone).
+            commands.entity(player).insert((Ghost, ColliderDisabled));
             "режим призрака включён (полёт сквозь стены)".to_string()
         }
         "unghost" => {

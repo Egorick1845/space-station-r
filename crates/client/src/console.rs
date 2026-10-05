@@ -231,6 +231,21 @@ fn run_command(command: &str, console: &mut Console, cmd: &mut ConsoleCommands) 
             console.push("  haircolor <r> <g> <b>");
         }
         "clear" => console.lines.clear(),
+        // `showghosts <on|off>` — показ призраков живым (в сборке команда
+        // `ShowGhostsCommand`, `Content.Server/Administration/Commands/ShowGhostsCommand.cs`).
+        "showghosts" => {
+            let value = matches!(argument, "on" | "true" | "1");
+            cmd.settings.show_ghosts = value;
+            cmd.settings.save();
+            console.push(format!(
+                "показ призраков: {}",
+                if value {
+                    "включён"
+                } else {
+                    "выключен"
+                }
+            ));
+        }
         "volume" => match argument.parse::<f32>() {
             Ok(value) => {
                 cmd.settings.volume = value.clamp(0.0, 1.0);

@@ -317,3 +317,33 @@ pub fn verb_test_mode(
     }
     tracing::info!("verb test: вербы запрошены");
 }
+
+/// Тест-режим `SSR_GHOST_TEST=<сек>`: клиент через N секунд просит сервер
+/// включить призрака (`ghost`) — проверка режима скриншотом (нет тьмы FOV,
+/// скорость 8/12, сквозь стены).
+pub fn ghost_test_mode(
+    time: Res<Time>,
+    mut state: Local<(f32, bool)>,
+    mut senders: Query<&mut MessageSender<ClientMessage>, With<Connected>>,
+) {
+    let Ok(value) = std::env::var("SSR_GHOST_TEST") else {
+        return;
+    };
+    let Ok(delay) = value.parse::<f32>() else {
+        return;
+    };
+    if state.1 {
+        return;
+    }
+    state.0 += time.delta_secs();
+    if state.0 < delay {
+        return;
+    }
+    state.1 = true;
+    for mut sender in senders.iter_mut() {
+        sender.send::<ssr_protocol::net::GameChannel>(ClientMessage::Admin {
+            command: "ghost".to_string(),
+        });
+    }
+    tracing::info!("ghost test: команда ghost отправлена");
+}

@@ -209,6 +209,9 @@ pub struct LightScene {
     pub viewport: (f32, f32),
     /// Позиция глаза (свой игрок) — центр карты FOV.
     pub eye: (f32, f32),
+    /// `Eye.DrawFov == false` (`observer.yml`: у призрака `drawFov: false`) —
+    /// проход FOV не гасит свет, призрак видит всю освещённую геометрию.
+    pub no_fov: bool,
     /// Подпись геометрии: 0 — сцена ещё не собиралась.
     pub generation: u64,
 }
@@ -282,6 +285,7 @@ pub fn update_lighting(
     chunks: Query<&TileChunkData>,
     lamps: Query<(&Light, &ItemPosition, Option<&Powered>)>,
     doors: Query<&ssr_core::Door>,
+    ghosts: Query<&ssr_core::mechanics::Ghost>,
     light_map: Option<ResMut<LightMap>>,
     scene: Option<ResMut<LightScene>>,
     mut images: ResMut<Assets<Image>>,
@@ -427,6 +431,12 @@ pub fn update_lighting(
         scene.camera = (center.0 - viewport.0 * 0.5, center.1 - viewport.1 * 0.5);
         scene.viewport = viewport;
         scene.eye = center;
+        // `Eye.DrawFov`: у призрака (`observer.yml`, `Incorporeal`) FOV выключен —
+        // он видит всю освещённую геометрию, а не только видимую из точки глаза.
+        scene.no_fov = own
+            .0
+            .map(|entity| ghosts.get(entity).is_ok())
+            .unwrap_or(false);
     }
     if !tile_changed && !geometry_changed && map.ready {
         return;

@@ -418,6 +418,7 @@ fn main() {
                 weapons::shoot_test_mode,
                 weapons::spawn_menu_test,
                 weapons::verb_test_mode,
+                weapons::ghost_test_mode,
             ),
             world_items::sync_floor_item_icons,
             world_items::floor_item_click,

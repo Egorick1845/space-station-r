@@ -303,7 +303,9 @@ pub fn pack_scene(scene: &crate::lighting::LightScene, tile: f32) -> PackedScene
         map_size: [LIGHT_MAP_SIZE.0 as f32, LIGHT_MAP_SIZE.1 as f32],
         viewport: [scene.viewport.0, scene.viewport.1],
         eye: [scene.eye.0, scene.eye.1],
-        fov_range: 0.0,
+        // `fov_range` используется как флаг «FOV выключен» (`Eye.DrawFov = false`
+        // у призрака): 1.0 — проход FOV не гасит свет.
+        fov_range: if scene.no_fov { 1.0 } else { 0.0 },
         ambient: 0.082,
         blur_radius: 0.0,
         blur_boost: 1.0,
