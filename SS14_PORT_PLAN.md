@@ -25,23 +25,54 @@ v289.0.3). Правило: только перенос из сборки, с у�
 
 ---
 
-## 1. Аура/видимость: стены и двери не видны сквозь стены ⏳
+## 1. Аура/видимость: стены и двери не видны сквозь стены 🔄 (hard FOV готов)
 
 **Проблема владельца:** сквозь стены видны другие стены и двери.
 
-Факты сборки: сущности рисуются с умножением на карту света, а зона вне FOV
-становится чёрной; контекстное меню фильтруется `ExamineSystem.CanExamine`
-(`Content.Client/Examine/ExamineSystem.cs`) и тегом `HideContextMenu`.
+Причина (найдена в нашем коде, заход 2026-10-06):
+1. `assets/shaders/light.wgsl`, `light_apply_fov_cs` (строка `occlusion = 1.0;`
+   в ветке стен): стеновым текселям маска видимости глаза НЕ применяется —
+   стена/дверь за другой стеной не затемняется вовсе, её яркость определяет
+   только wall-bleed от соседей.
+2. Там же: `alpha = max(1 − luminance, 1 − occlusion)` — ambient (0.082) входит
+   в карту света, поэтому «тьма» вне FOV полупрозрачна и за ней проступает
+   геометрия.
+3. Мягкая видимость VSM (Chebyshev с дисперсией) даёт частичную видимость за
+   краем окклюдера; на CPU стеновые тексели берут максимум видимости 4 соседей
+   (`lighting.rs`, «просачивание видимости») — стена за стеной подсвечивается.
 
-План:
-1. Воспроизвести кадр: игрок у стены, за ней дверь/стена — сверить, что именно
-   видно (тёмно-серое vs полная яркость).
-2. Если виноват ambient/мягкая видимость — в `light_apply_fov_cs` при
-   `occlusion < 1` доводить альфу до 1 (полная тьма вне FOV), как
-   `fov-lighting.swsl` + `occludeColor = Color.Black`.
-3. Если виноват z-порядок (двери 1.5, оверлей 2.01) — проверить, что оверлей
-   рисуется после всех мировых спрайтов при любом рендер-графе.
-4. Добавить фильтр сущностей по FOV для клика/контекстного меню (аналог
+Факты сборки (как делает SS14, `Robust.Client/Graphics/Clyde/Clyde.LightRendering.cs`,
+шейдеры `fov-lighting.swsl`, `fov.swsl`):
+- **Два прохода FOV.** (а) `ApplyLightingFovToBuffer` — по световому буферу:
+  пиксели за стеной заливаются `occludeColor = Color.Black` с альфой
+  `1 − occlusion`, полностью видимые — discard; стенсил помечает затенённые
+  пиксели, и лампы рисуются ТОЛЬКО в видимой области (за стеной света нет
+  вообще). (б) **Hard FOV** `ApplyFovToBuffer` — по финальному фреймбуферу
+  (`Clyde.HLR.cs:740-745`): шейдер `fov.swsl` заливает всё, что за первой
+  стеной, непрозрачным чёрным (`alpha = 1.0`), карта глубины рендерится второй
+  раз с front-face culling — «смотрим внутрь стен» (bias −0.75/32).
+- `LightManager.DrawHardFov = true` по умолчанию ⇒ стена за стеной в SS14
+  полностью чёрная. BlurOntoWalls/MergeWallLayer дают «дыхание света» только на
+  стенах в поле зрения (их свет-буфер перезаписывается размытым светом ×1.1).
+- Сервер может перекрасить «туман войны» через реплицируемый CVar
+  `render.fov_color` (по умолчанию чёрный).
+- Контекстное меню фильтруется `ExamineSystem.CanExamine`
+  (`Content.Client/Examine/ExamineSystem.cs`) и тегом `HideContextMenu`.
+
+План фикса (1:1):
+1. ✅ Дальняя граница тела стены: в `fov_map_cs` карта `fov_far` (2048 бинов,
+   `ssr_core::light::first_body_exit` — slab-тесты по тайлам стен, кластер
+   сомкнутых тайлов расширяется) — аналог front-culled карты движка.
+2. ✅ `light_apply_fov_cs`: hard FOV — точка за выходом из первого тела стены
+   (`dist > far − 0.75`) получает rgb = 0, alpha = 1 — непрозрачный чёрный
+   (оверлей-умножение даёт чистый чёрный); alpha только от итогового цвета.
+   Проверено в игре: за стеной и слева от стены — чистый чёрный, пол виден
+   только через дверной проём; свет на видимых стенах (wall-bleed) остался.
+3. ✅ CPU-путь `lighting.rs`: те же правила (карта `far_map` по тайлам стен +
+   закрытым дверям; скрытые hard FOV тексели = 0, просачивание видимости на
+   них не действует; у призрака FOV по-прежнему выключен).
+4. ⏳ Серверный CVar `render.fov_color` (реплицируемый) — цвет тумана войны.
+5. ⏳ Фильтр сущностей по FOV для клика/контекстного меню (аналог
    `CanExamine`): сущности за стеной не должны попадать в меню вербов
    (`EntityMenuUIController.TryGetEntityMenuEntities`).
 
@@ -184,16 +215,123 @@ Adminbus, Atmos, Round, Server, PanicBunker, Players, Objects), `AdminFlags`
 5. ⏳ Стаки (`StackComponent`: count/max, слияние при вставке и по клику, спрайт
    по числу, подпись «Count: N»).
 
+## 10. Крафт-меню 1:1 (ConstructionMenu) 🔄
+
+Сборка: `Content.Client/Construction/UI/ConstructionMenu.xaml(.cs)`,
+`ConstructionMenuPresenter.cs` (667 строк), контроллер
+`Content.Client/UserInterface/Systems/Crafting/CraftingUIController.cs`,
+стили `Content.Client/Stylesheets/StyleNano.cs` (строки 238-269, 686-721),
+`Content.Client/Stylesheets/Sheetlets/ListContainerSheetlet.cs`,
+локаль `Resources/Locale/en-US/construction/ui/construction-menu.ftl`.
+
+В этой сборке (Goobstation-форк) окно называется **ConstructionMenu** — нового
+WizDen-CraftingMenu здесь нет.
+
+Спецификация окна:
+- `DefaultWindow` 560×450, MinSize 560×320, заголовок «Construction».
+- Левая колонка (MinWidth 243, margin 0 0 5 0): `LineEdit SearchBar`
+  (placeholder «Search») + `OptionButton OptionCategories` (MinSize 130×0) +
+  `ListContainer Recipes` (Group, Toggle) — список рецептов. Альтернативный
+  вид (скрыт по умолчанию): Grid 5 колонок.
+- RecipeRow: `EntityPrototypeView` 32×32 (Stretch Fill, Scale 2, margin 0 2) +
+  `Label` с именем (margin 5 0), tooltip — описание; стиль
+  `list-container-button`: фон #373744, hover/pressed #4B4B56, disabled
+  #0A0A0C; фон списка Color(55,55,68), выбранная строка Color(75,75,86).
+- Рецепты НЕ фильтруются по крафтабельности; сортировка по алфавиту.
+- Категории: OptionButton = «All» + «Favorites» (если есть) + уникальные
+  категории, отсортированные по локали; смена категории очищает поиск; поиск
+  фильтрует по имени без учёта регистра. В Goob: CVar `AutoFocusSearchOnBuildMenu`.
+- Правая колонка: ряд `MenuGridViewButton` («Grid View») + `FavoriteButton`;
+  шапка — иконка рецепта (Stretch Fill, margin 0 0 10 0) + `TargetName` +
+  `TargetDesc` (RichTextLabel); `RecipeStepList` (ItemList) — шаги с иконками,
+  отступы `PadLeft`; внизу `BuildButton` (toggle, VerticalExpand, ratio 0.5) и
+  ряд `EraseButton` (0.7) + `ClearButton` (0.3) — «Eraser Mode»/«Clear All»
+  относятся к строительным призракам.
+- Цвета StyleNano: NanoGold #A88B5E, PanelDark #1E1E22, GoodGreenFore #31843E,
+  DisabledFore #5A5A5A, ButtonColorDefault #464966, Hovered #575b7f, Pressed
+  #3e6c45, Disabled #30313c.
+
+У нас: рецепты из `assets/prototypes/recipes.ron` (input→output, система
+`ssr_core::recipes`), клиентское окно `crates/client/src/crafting.rs` — сейчас
+плоский текстовый список без иконок/категорий/поиска.
+
+Шаги:
+1. ✅ Окно DefaultWindow 560×450 (`hud::window_header`/`window_body`), по центру
+   экрана, перетаскивание (`WindowKind::Craft`, позиция запоминается).
+2. ✅ Поле категории `category: Option<String>` в `Recipe` (+ recipes.ron:
+   «Материалы»/«Инструменты»/«Разное»).
+3. ✅ Левая колонка: поиск (клик включает ввод) + выпадающий список категорий
+   («Все» + уникальные, смена категории очищает поиск) + список рецептов с
+   иконками RSI 32×32 и именем по алфавиту; фон строк #373744, hover/выбор
+   #4B4B56; колёсо и перетаскиваемый граббер скроллбара.
+4. ✅ Правая колонка: иконка+имя (NanoGold)+«Результат: …», шаги (входы →
+   «Получится: …») с иконками предметов и отступом результата, кнопка
+   «Создать» (Enabled при крафтабельности, шлёт `ClientMessage::Craft`) +
+   «Режим ластика»/«Очистить всё» disabled-заглушки + «Сеткой» заглушка.
+5. ⏳ Grid view 5 колонок как рабочий toggle (низкий приоритет).
+6. ⏳ Tooltip строки = описание рецепта (в рецептах пока нет поля description).
+
+## 11. Верхняя панель 1:1 (GameTopMenuBar) 🔄
+
+Сборка: `Content.Client/UserInterface/Systems/MenuBar/Widgets/GameTopMenuBar.xaml(.cs)`,
+`GameTopMenuBarUIController.cs` (10 контроллеров LoadButtons/UnloadButtons),
+`Content.Client/UserInterface/Controls/MenuButton.cs`,
+`Content.Client/Stylesheets/Sheetlets/MenuButtonSheetlet.cs`,
+`Content.Client/UserInterface/Screens/DefaultGameScreen.xaml`.
+
+Спецификация:
+- Anchor TopLeft, margin 10; `HorizontalContainer` SeparationOverride 5.
+- Кнопки по порядку (все ToggleMode): EscapeButton — hamburger.svg.192dpi.png,
+  MinSize 70×64, ButtonOpenRight; GuidebookButton — information.svg.192dpi.png;
+  CharacterButton — character.svg.192dpi.png; EmotesButton — emotes.svg;
+  CraftingButton — hammer.svg; ActionButton — fist.svg; LanguageButton —
+  `_EinsteinEngines/Interface/language.png`; AdminButton — gavel.svg;
+  SandboxButton — sandbox.svg; AHelpButton — info.svg, ButtonOpenLeft; все
+  остальные MinSize 42×64.
+- Кнопка = ContainerButton с вертикальным BoxContainer: иконка (TextureScale
+  0.5, VertPad 4, центр) + Label с горячей клавишей (`BoundKeyHelper.
+  ShortKeyName`, шрифт notoSansDisplayBold14, стиль topButtonLabel).
+- Цвета иконки/текста (MenuButton.cs:18-20): Normal #99a7b3, Hover #acbac6,
+  Pressed #75838e. Патч текстуры кнопки margin 10 (атлас-полосы
+  ButtonOpenRight/ButtonOpenLeft/ButtonSquare).
+- Каждая кнопка напрямую открывает своё окно (выпадающих меню нет): Escape →
+  EscapeMenu, Character → окно персонажа, Crafting → ConstructionMenu,
+  Admin → админ-меню, Sandbox → окно сандбокса; Action → меню действий,
+  Emotes → меню эмоций, Language → меню языка, Guidebook → гайдбук,
+  AHelp → окно обращений к админам.
+- В DefaultGameScreen чат — TopRight margin 10 (MinSize 465×225), алерты —
+  TopRight под чатом.
+
+У нас: `crates/client/src/hud.rs` `spawn_hud` — 4 кнопки (Esc/G/F5/F7) без
+порядка и размеров сборки; ActionsBar (боевой режим/осмотр/выбросить) уже как
+в сборке.
+
+Шаги:
+1. ✅ 10 кнопок в порядке сборки с иконками из `Interface/*.svg.192dpi.png`
+   (language.png импортирован из `_EinsteinEngines/Interface` сборки), размеры
+   70×64/42×64, gap 5, anchor TopLeft margin 10, подписи клавиш.
+2. ✅ Клавиши: сверены с `Resources/keybinds.yml` сборки (Character U→у нас I,
+   Emotes Y, Language L, Guidebook Numpad0→«Num0», AHelp F1, Sandbox B→у нас
+   F5-спавн); у нас Escape → Escape-меню, Character → окно персонажа (I),
+   Crafting → G, Admin → F7, Sandbox → F5 (спавн-меню).
+3. ✅ Guidebook/Emotes/Action/Language/AHelp — кнопки тогглятся и открывают
+   окно-заглушку «В разработке» до появления настоящих окон (Esc их закрывает).
+4. ✅ Toggle-подсветка кнопки, пока её окно открыто (`topbar_toggle_tint`);
+   hover/press — через `hud_button_tint`.
+5. ⏳ Bold-шрифт подписей (NotoSans-Bold из сборки, если есть в Resources/Fonts).
+
 ---
 
 ## Порядок работ (по зависимостям и жалобам владельца)
 
 1. **Аура/видимость** (п.1) — визуальный дефект, виден сразу.
-2. **Призрак** (п.2) + **системный чат** (п.3) — быстрые, закрывают жалобы.
-3. **Вербы добьём** (п.6: PNG-иконки, подменю, подтверждения, консольные команды).
-4. **VV** (п.4) → **админ-панель** (п.5) — «с дебагом и админ панелью».
-5. **Столы/конструкции** (п.7) → **оружие P1/P2** (п.8).
-6. **Прототипы/карты/тайлы** (п.9) — самый крупный блок, идёт параллельно.
+2. **Крафт-меню** (п.10) и **верхняя панель** (п.11) — выглядят не как в SS14
+   (жалоба владельца 2026-10-06).
+3. **Призрак** (п.2) + **системный чат** (п.3) — быстрые, закрывают жалобы.
+4. **Вербы добьём** (п.6: PNG-иконки, подменю, подтверждения, консольные команды).
+5. **VV** (п.4) → **админ-панель** (п.5) — «с дебагом и админ панелью».
+6. **Столы/конструкции** (п.7) → **оружие P1/P2** (п.8).
+7. **Прототипы/карты/тайлы** (п.9) — самый крупный блок, идёт параллельно.
 
 Каждая механика: перенос → тесты на формулы/данные → живая проверка
 (`SSR_*_TEST` + скриншот/лог) → коммит по-русски → отметка здесь и в PROGRESS.md.
