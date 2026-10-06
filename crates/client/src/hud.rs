@@ -1560,118 +1560,34 @@ const SPAWN_LIST_W: f32 = SPAWN_WINDOW_W - 2.0 * crate::ui_theme::WINDOW_CONTENT
 const SPAWN_ROW_STEP: f32 = 34.0;
 
 /// Высота вьюпорта списка спавн-меню (последний зазор не считаем).
-pub(crate) fn spawn_view_h() -> f32 {
-    SPAWN_MENU_ROWS as f32 * SPAWN_ROW_STEP - 2.0
+/// Кэш отфильтрованного списка спавна: фильтр+сортировка 14k позиций —
+/// один раз на смену поиска/спрайтов, а не на каждый кадр и каждый символ
+/// (раньше то же считалось в render, spawn_scroll_offset, menu_scroll и_drag).
+#[derive(Resource, Default)]
+pub struct SpawnListCache {
+    key: (String, u32),
+    /// (id, имя) всех подходящих позиций, отсортировано по имени.
+    pub items: Vec<(String, String)>,
 }
 
-/// Высота контента списка спавн-меню.
-pub(crate) fn spawn_content_h(total: usize) -> f32 {
-    total as f32 * SPAWN_ROW_STEP
-}
-
-/// Сколько предметов проходит фильтр поиска (для полосы прокрутки и колеса).
-/// Считает ТО ЖЕ, что и отрисовка списка: наш каталог + импортированные
-/// прототипы сборки (у которых есть спрайт и нет `HideSpawnMenu`).
-pub(crate) fn spawn_matched_count(search: &str, content: &ClientContent) -> usize {
-    let query = search.to_lowercase();
-    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    let mut total = 0usize;
-    for item in content.items.items.iter() {
-        if query.is_empty()
-            || format!("{} {}", item.id.to_lowercase(), item.name.to_lowercase()).contains(&query)
-        {
-            seen.insert(item.id.as_str());
-            total += 1;
-        }
-    }
-    for id in content.proto_sprites.keys() {
-        if seen.contains(id.as_str()) {
-            continue;
-        }
-        let name = content.proto_names.get(id).map(String::as_str).unwrap_or(id);
-        if !query.is_empty()
-            && !format!("{} {}", id.to_lowercase(), name.to_lowercase()).contains(&query)
-        {
-            continue;
-        }
-        total += 1;
-    }
-    total
-}
-
-/// Догоняет цель прокрутки экспонентой (`LerpAnimate(rate: 15)` в движке).
-pub fn spawn_scroll_anim(time: Res<Time>, mut state: ResMut<HudState>) {
-    use crate::ui_theme as ui;
-    let k = 1.0 - (-ui::SCROLLBAR_ANIM_RATE * time.delta_secs()).exp();
-    state.spawn_scroll += (state.spawn_scroll_target - state.spawn_scroll) * k;
-}
-
-/// Внутренний контейнер списка спавн-меню (сдвигается при прокрутке).
-#[derive(Component)]
-pub struct SpawnListInner;
-
-/// Покадровый сдвиг списка при прокрутке БЕЗ пересборки строк: раньше сдвиг
-/// входил в подпись окна и каждая прокрученная доля пикселя пересобирала список
-/// целиком — окна мигали (жалоба владельца «все окна со скроллом мигают»).
-pub fn spawn_scroll_offset(
+/// Пересобирает кэш при смене поиска или поколения спрайтов.
+pub fn update_spawn_list_cache(
     state: Res<HudState>,
-    content: Res<ClientContent>,
-    mut inner: Query<&mut UiTransform, With<SpawnListInner>>,
-) {
-    if inner.is_empty() {
-        return;
-    }
-    let total = spawn_matched_count(&state.search, &content);
-    let max_scroll = (spawn_content_h(total) - spawn_view_h()).max(0.0);
-    let scroll = state.spawn_scroll.clamp(0.0, max_scroll);
-    let offset = scroll - (scroll / SPAWN_ROW_STEP).floor() * SPAWN_ROW_STEP;
-    for mut transform in inner.iter_mut() {
-        transform.translation = Val2::new(Val::Px(0.0), Val::Px(-offset));
-    }
-}
-
-/// Отпечаток состояния спавн-меню (открыто, поиск, спрайты, режим размещения).
-type SpawnMenuSignature = (bool, String, u32, Option<String>, usize);
-
-/// Перерисовывает спавн-меню (F5) по образцу `EntitySpawnWindow.xaml`:
-/// окно 350×400 у левого края, поле поиска с кнопкой «Очистить», список
-/// строк «иконка 32×32 + имя», снизу — подсказка режима размещения.
-#[allow(clippy::too_many_arguments)]
-pub fn render_spawn_menu(
-    mut commands: Commands,
-    state: Res<HudState>,
-    placement: Res<Placement>,
     content: Res<ClientContent>,
     registry: Res<crate::rsi::RsiRegistry>,
-    theme: Res<crate::ui_theme::UiTheme>,
-    root: Query<Entity, With<SpawnMenuRoot>>,
-    mut last: Local<Option<SpawnMenuSignature>>,
+    mut cache: ResMut<SpawnListCache>,
 ) {
-    use crate::ui_theme as ui;
-    let signature = (
-        state.spawn_open,
-        state.search.clone(),
-        registry.generation(),
-        placement.item.clone(),
-        // Только НОМЕР первой видимой строки: дробный сдвиг применяет отдельная
-        // система (`spawn_scroll_offset`) — иначе список мигал (пересборка на
-        // каждую прокрученную долю пикселя).
-        (state.spawn_scroll / SPAWN_ROW_STEP).floor() as usize,
-    );
-    if last.as_ref() == Some(&signature) {
+    let key = (state.search.clone(), registry.generation());
+    if cache.key == key {
         return;
     }
-    *last = Some(signature);
-    for entity in root.iter() {
-        commands.entity(entity).despawn();
-    }
-    if !state.spawn_open {
-        return;
-    }
-    let query = state.search.to_lowercase();
-    // Список — как `EntitySpawnWindow` в сборке: ВСЕ сущности, у которых есть
-    // спрайт (наш каталог + импортированные прототипы `prototypes_ss14.ron`),
-    // а не только ручной набор предметов.
+    cache.key = key;
+    cache.items = spawn_matched_items(&state.search, &content);
+}
+
+/// Полный отфильтрованный список позиций спавна (наш каталог + прототипы).
+fn spawn_matched_items(search: &str, content: &ClientContent) -> Vec<(String, String)> {
+    let query = search.to_lowercase();
     let mut matched: Vec<(String, String)> = content
         .items
         .items
@@ -1704,6 +1620,93 @@ pub fn render_spawn_menu(
         matched.push((id.clone(), name));
     }
     matched.sort_by(|a, b| a.1.cmp(&b.1));
+    matched
+}
+
+pub(crate) fn spawn_view_h() -> f32 {
+    SPAWN_MENU_ROWS as f32 * SPAWN_ROW_STEP - 2.0
+}
+
+/// Высота контента списка спавн-меню.
+pub(crate) fn spawn_content_h(total: usize) -> f32 {
+    total as f32 * SPAWN_ROW_STEP
+}
+
+/// Сколько предметов проходит фильтр поиска (для полосы прокрутки и колеса).
+/// Считает ТО ЖЕ, что и отрисовка списка: наш каталог + импортированные
+/// Догоняет цель прокрутки экспонентой (`LerpAnimate(rate: 15)` в движке).
+pub fn spawn_scroll_anim(time: Res<Time>, mut state: ResMut<HudState>) {
+    use crate::ui_theme as ui;
+    let k = 1.0 - (-ui::SCROLLBAR_ANIM_RATE * time.delta_secs()).exp();
+    state.spawn_scroll += (state.spawn_scroll_target - state.spawn_scroll) * k;
+}
+
+/// Внутренний контейнер списка спавн-меню (сдвигается при прокрутке).
+#[derive(Component)]
+pub struct SpawnListInner;
+
+/// Покадровый сдвиг списка при прокрутке БЕЗ пересборки строк: раньше сдвиг
+/// входил в подпись окна и каждая прокрученная доля пикселя пересобирала список
+/// целиком — окна мигали (жалоба владельца «все окна со скроллом мигают»).
+pub fn spawn_scroll_offset(
+    state: Res<HudState>,
+    cache: Res<SpawnListCache>,
+    mut inner: Query<&mut UiTransform, With<SpawnListInner>>,
+) {
+    if inner.is_empty() {
+        return;
+    }
+    let total = cache.items.len();
+    let max_scroll = (spawn_content_h(total) - spawn_view_h()).max(0.0);
+    let scroll = state.spawn_scroll.clamp(0.0, max_scroll);
+    let offset = scroll - (scroll / SPAWN_ROW_STEP).floor() * SPAWN_ROW_STEP;
+    for mut transform in inner.iter_mut() {
+        transform.translation = Val2::new(Val::Px(0.0), Val::Px(-offset));
+    }
+}
+
+/// Отпечаток состояния спавн-меню (открыто, поиск, спрайты, режим размещения).
+type SpawnMenuSignature = (bool, String, u32, Option<String>, usize);
+
+/// Перерисовывает спавн-меню (F5) по образцу `EntitySpawnWindow.xaml`:
+/// окно 350×400 у левого края, поле поиска с кнопкой «Очистить», список
+/// строк «иконка 32×32 + имя», снизу — подсказка режима размещения.
+#[allow(clippy::too_many_arguments)]
+pub fn render_spawn_menu(
+    mut commands: Commands,
+    state: Res<HudState>,
+    placement: Res<Placement>,
+    content: Res<ClientContent>,
+    registry: Res<crate::rsi::RsiRegistry>,
+    theme: Res<crate::ui_theme::UiTheme>,
+    cache: Res<SpawnListCache>,
+    root: Query<Entity, With<SpawnMenuRoot>>,
+    mut last: Local<Option<SpawnMenuSignature>>,
+) {
+    use crate::ui_theme as ui;
+    let signature = (
+        state.spawn_open,
+        state.search.clone(),
+        registry.generation(),
+        placement.item.clone(),
+        // Только НОМЕР первой видимой строки: дробный сдвиг применяет отдельная
+        // система (`spawn_scroll_offset`) — иначе список мигал (пересборка на
+        // каждую прокрученную долю пикселя).
+        (state.spawn_scroll / SPAWN_ROW_STEP).floor() as usize,
+    );
+    if last.as_ref() == Some(&signature) {
+        return;
+    }
+    *last = Some(signature);
+    for entity in root.iter() {
+        commands.entity(entity).despawn();
+    }
+    if !state.spawn_open {
+        return;
+    }
+    // Список — как `EntitySpawnWindow` в сборке: ВСЕ сущности со спрайтом,
+    // из КЭША (фильтр 14k считается один раз на смену поиска).
+    let mut matched: Vec<(String, String)> = cache.items.clone();
     let total = matched.len();
     // Прокрутка непрерывная, как в `EntitySpawnWindow`/`ScrollContainer`.
     let view_h = spawn_view_h();
@@ -1758,7 +1761,9 @@ pub fn render_spawn_menu(
                 .with_children(|row| {
                     let (mut field, field_bg) = glass_field();
                     field.flex_grow = 1.0;
-                    row.spawn((field, field_bg)).with_child((
+                    // Button обязателен: без него bevy_ui не считает Interaction
+                    // и клик по полю не включал ввод (поиск был мёртв).
+                    row.spawn((MenuSearchButton, Button, field, field_bg)).with_child((
                         Text::new(if state.search.is_empty() {
                             "поиск".to_string()
                         } else {
@@ -2254,6 +2259,8 @@ pub fn render_admin_menu(
 pub fn spawn_menu_input(
     mut events: MessageReader<KeyboardInput>,
     keys: Res<ButtonInput<KeyCode>>,
+    console: Res<Console>,
+    chat: Res<crate::chat::ChatState>,
     mut state: ResMut<HudState>,
     search_clicks: Query<&Interaction, (Changed<Interaction>, With<MenuSearchButton>)>,
 ) {
@@ -2267,6 +2274,14 @@ pub fn spawn_menu_input(
         }
     }
     if !state.search_focused {
+        // Чистим накопившиеся события, иначе при получении фокуса в поиск
+        // вольются нажатия последних кадров (как в appearance_search_input).
+        events.clear();
+        return;
+    }
+    // Текст набирается в консоли или чате — в поиск не попадает.
+    if console.open || chat.focused {
+        events.clear();
         return;
     }
     if keys.just_pressed(KeyCode::F5) || keys.just_pressed(KeyCode::Escape) {
@@ -2303,7 +2318,7 @@ pub fn menu_scroll(
     mut wheel: MessageReader<bevy::input::mouse::MouseWheel>,
     mut state: ResMut<HudState>,
     chat: Res<crate::chat::ChatState>,
-    content: Res<ClientContent>,
+    cache: Res<SpawnListCache>,
 ) {
     if chat.focused {
         wheel.clear();
@@ -2312,11 +2327,8 @@ pub fn menu_scroll(
     if !state.spawn_open && !state.warp_open {
         return;
     }
-    // Счётчик совпадений — ТОТ ЖЕ, что у отрисовки списка (наш каталог +
-    // импортированные прототипы). Раньше здесь считались только 42 предмета
-    // каталога, поэтому полоса прокрутки и предел прокрутки не совпадали с
-    // реальным списком на 14 тысяч строк — список «не листался».
-    let total = spawn_matched_count(&state.search, &content);
+    // Число строк — из кэша (фильтр 14k считается один раз на смену поиска).
+    let total = cache.items.len();
     let max_scroll = (spawn_content_h(total) - spawn_view_h()).max(0.0);
     for event in wheel.read() {
         // Шаг 50 px за щелчок, как `ScrollContainer.ScrollSpeedY`.

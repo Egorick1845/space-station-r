@@ -174,7 +174,6 @@ type CraftSignature = (
     String,
     bool,
     Option<String>,
-    i32,
     u32,
     Vec<bool>,
 );
@@ -208,7 +207,6 @@ pub fn render_crafting(
         state.category.clone(),
         state.cats_open,
         state.selected.clone(),
-        state.scroll.round() as i32,
         registry.generation(),
         craftable.clone(),
     );
@@ -543,6 +541,7 @@ fn left_column(
             })
             .with_children(|list| {
                 list.spawn((
+                    CraftListInner,
                     Node {
                         position_type: PositionType::Absolute,
                         left: px(0),
@@ -929,6 +928,30 @@ pub fn craft_scroll_wheel(
 pub fn craft_scroll_anim(time: Res<Time>, mut state: ResMut<CraftingState>) {
     let k = 1.0 - (-ui::SCROLLBAR_ANIM_RATE * time.delta_secs()).exp();
     state.scroll += (state.scroll_target - state.scroll) * k;
+}
+
+/// Внутренний контейнер списка рецептов (сдвигается при прокрутке).
+#[derive(Component)]
+pub struct CraftListInner;
+
+/// Покадровый сдвиг списка рецептов БЕЗ пересборки окна: scroll больше не в
+/// сигнатуре, поэтому анимация прокрутки не мигает (жалоба владельца).
+pub fn craft_scroll_apply(
+    state: Res<CraftingState>,
+    content: Res<ClientContent>,
+    mut inner: Query<&mut UiTransform, With<CraftListInner>>,
+) {
+    if inner.is_empty() {
+        return;
+    }
+    let max_scroll = (matched_count(&state, &content) as f32 * RECIPE_ROW_STEP
+        - list_view_h())
+    .max(0.0);
+    let scroll = state.scroll.clamp(0.0, max_scroll);
+    let offset = scroll - (scroll / RECIPE_ROW_STEP).floor() * RECIPE_ROW_STEP;
+    for mut transform in inner.iter_mut() {
+        transform.translation = Val2::new(Val::Px(0.0), Val::Px(-offset));
+    }
 }
 
 /// Тест T5.2: SSR_CRAFT_TEST=1 — через 5 с крафтит прутья, через 8 с — кабель.

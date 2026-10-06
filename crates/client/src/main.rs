@@ -142,6 +142,7 @@ fn main() {
     // Тайлы со структурами-поверхностями (столы): по ним предметы рисуются выше.
     app.init_resource::<structures::SurfaceTiles>();
     app.init_resource::<crafting::CraftingState>();
+    app.init_resource::<hud::SpawnListCache>();
     app.init_resource::<hud::HudState>();
     app.init_resource::<hud::Placement>();
     app.init_resource::<lighting::LightScene>();
@@ -153,13 +154,6 @@ fn main() {
     app.add_systems(Update, rsi::load_requested_rsi);
     // Боевой режим: иконка кнопки действия и маркер у курсора.
     app.add_systems(Update, (hud::sync_combat_button, hud::combat_cursor_marker));
-    // Спавн-меню: прокрутка догоняет цель (rate 15, как ScrollBar в SS14),
-    // а дробный сдвиг списка применяется к `UiTransform` без пересборки строк
-    // (иначе список мигал при прокрутке).
-    app.add_systems(
-        Update,
-        (hud::spawn_scroll_anim, hud::spawn_scroll_offset),
-    );
     // Кадр мира как в SS14: ограничение видимой области (ScalingViewport).
     app.add_systems(Update, fit_world_viewport);
     // Окно выбора внешности (P) — отдельной группой: у кортежей есть предел.
@@ -292,6 +286,18 @@ fn main() {
             crafting::craft_input,
             crafting::craft_scroll_wheel,
             crafting::craft_scroll_anim,
+        )
+            .run_if(in_game),
+    );
+    // Кэш списка спавна и покадровые сдвиги скроллов — отдельно (предел
+    // размера кортежа систем).
+    app.add_systems(
+        Update,
+        (
+            hud::update_spawn_list_cache,
+            crafting::craft_scroll_apply,
+            hud::spawn_scroll_anim,
+            hud::spawn_scroll_offset,
         )
             .run_if(in_game),
     );

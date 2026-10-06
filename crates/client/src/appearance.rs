@@ -509,6 +509,7 @@ pub fn appearance_scrollbar_drag(
     mut state: ResMut<AppearanceUi>,
     mut hud: ResMut<crate::hud::HudState>,
     mut craft: ResMut<crate::crafting::CraftingState>,
+    cache: Res<crate::hud::SpawnListCache>,
     content: Res<crate::content::ClientContent>,
     grabbers: Query<(&Interaction, &crate::hud::ScrollbarGrabber), Changed<Interaction>>,
     windows: Query<&Window>,
@@ -552,7 +553,7 @@ pub fn appearance_scrollbar_drag(
             list_view_h(BEARD_ROWS),
         ),
         ScrollList::SpawnMenu => (
-            crate::hud::spawn_content_h(crate::hud::spawn_matched_count(&hud.search, &content)),
+            crate::hud::spawn_content_h(cache.items.len()),
             crate::hud::spawn_view_h(),
         ),
         ScrollList::CraftMenu => (
@@ -722,8 +723,13 @@ fn style_list(
 
 /// Применяет прокрутку сдвигом готовых строк и двигает грабберы — без
 /// пересборки окна, поэтому при прокрутке ничего не мигает.
+#[allow(clippy::too_many_arguments)]
 pub fn appearance_scroll_apply(
     state: Res<AppearanceUi>,
+    hud: Res<crate::hud::HudState>,
+    craft: Res<crate::crafting::CraftingState>,
+    cache: Res<crate::hud::SpawnListCache>,
+    content: Res<crate::content::ClientContent>,
     mut inners: Query<(&ScrollInner, &mut UiTransform)>,
     mut grabbers: Query<(&crate::hud::ScrollbarGrabber, &mut Node)>,
 ) {
@@ -737,16 +743,33 @@ pub fn appearance_scroll_apply(
         transform.translation = Val2::new(Val::Px(0.0), Val::Px(-scroll));
     }
     for (grabber, mut node) in grabbers.iter_mut() {
-        let (rows, visible, scroll) = match grabber.list {
-            ScrollList::AppearanceHair => (hair_count(&state.search), HAIR_ROWS, state.hair_scroll),
-            ScrollList::AppearanceBeard => {
-                (beard_count(&state.search), BEARD_ROWS, state.beard_scroll)
-            }
-            ScrollList::SpawnMenu | ScrollList::CraftMenu => continue,
+        // (высота контента, высота вьюпорта, прокрутка)
+        let (content_h, view_h, scroll) = match grabber.list {
+            ScrollList::AppearanceHair => (
+                list_content_h(hair_count(&state.search)),
+                list_view_h(HAIR_ROWS),
+                state.hair_scroll,
+            ),
+            ScrollList::AppearanceBeard => (
+                list_content_h(beard_count(&state.search)),
+                list_view_h(BEARD_ROWS),
+                state.beard_scroll,
+            ),
+            // Спавн-меню и крафт: граббер тоже двигается ПОКАДРОВО — раньше
+            // он прыгал раз в строку (окна с ним не пересобираются).
+            ScrollList::SpawnMenu => (
+                crate::hud::spawn_content_h(cache.items.len()),
+                crate::hud::spawn_view_h(),
+                hud.spawn_scroll,
+            ),
+            ScrollList::CraftMenu => (
+                crate::crafting::matched_count(&craft, &content) as f32
+                    * crate::crafting::RECIPE_ROW_STEP,
+                crate::crafting::list_view_h(),
+                craft.scroll,
+            ),
         };
         // Геометрия граббера — как в `ScrollBar.cs`.
-        let view_h = list_view_h(visible);
-        let content_h = list_content_h(rows);
         let track = (view_h - ui::SCROLLBAR_MIN_GRABBER).max(0.0);
         let scroll = scroll.clamp(0.0, (content_h - view_h).max(0.0));
         let ratio = (scroll / content_h).clamp(0.0, 1.0);
