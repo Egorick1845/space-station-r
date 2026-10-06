@@ -157,6 +157,16 @@ pub struct WorldSound {
     pub lifetime: f32,
 }
 
+/// Одноразовый визуальный эффект в мире (дуга удара — `WeaponArc` в сборке):
+/// спрайт с флипбуком, деспавнится сервером по lifetime.
+#[derive(Component, Serialize, Deserialize, Clone, Debug)]
+pub struct WorldEffect {
+    pub position: [f32; 2],
+    /// Ключ RSI стейта (`sprites/ss14/Effects/arcs.rsi#fist`).
+    pub key: String,
+    pub lifetime: f32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

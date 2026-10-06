@@ -17,7 +17,7 @@ use lightyear::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::Rooms;
-pub use ssr_core::weapons::{AmmoProvider, Cartridge, Gun, Projectile, WorldSound};
+pub use ssr_core::weapons::{AmmoProvider, Cartridge, Gun, Projectile, WorldEffect, WorldSound};
 
 /// Очередь выстрелов: сообщения клиентов разбираются в одном месте, а стрельбу
 /// (с проверками и тратой патрона) делает отдельная система.

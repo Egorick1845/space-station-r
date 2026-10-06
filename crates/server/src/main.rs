@@ -176,6 +176,7 @@ fn main() {
                 move_projectiles,
                 move_thrown,
                 flush_world_sounds,
+                flush_world_effects,
                 reload_weapons,
                 gun_test,
             ),
@@ -3686,6 +3687,7 @@ type RoomAssignable = Or<(
     With<ssr_core::structures::Structure>,
     With<weapons::Projectile>,
     With<weapons::WorldSound>,
+    With<weapons::WorldEffect>,
 )>;
 
 /// Выдаёт предметам комнату якоря: держателя (руки/рюкзак), ящика или чанка
@@ -4447,9 +4449,21 @@ fn process_actions(
                     amount: damage,
                     source: DamageSource::Melee {
                         attacker: player,
-                        weapon,
+                        weapon: weapon.clone(),
                     },
                 });
+                // Дуга удара в точке цели (`WeaponArc` в сборке: fist — кулак,
+                // claw — предмет). Видна всем, деспавнится по lifetime.
+                let arc_state = if weapon.is_some() { "claw" } else { "fist" };
+                commands.spawn((
+                    ssr_core::weapons::WorldEffect {
+                        position: target_position.0,
+                        key: format!("sprites/ss14/Effects/arcs.rsi#{arc_state}"),
+                        lifetime: 0.4,
+                    },
+                    Replicate::to_clients(NetworkTarget::All),
+                    Rooms::default(),
+                ));
                 // Атакующему — подтверждение удара (звук попадания, T5.3).
                 if let Some(link) = players
                     .entries
@@ -5428,6 +5442,21 @@ fn flush_world_sounds(
     for (entity, mut sound) in sounds.iter_mut() {
         sound.lifetime -= time.delta_secs();
         if sound.lifetime <= 0.0 {
+            commands.entity(entity).despawn();
+        }
+    }
+}
+
+/// Деспавн дуг удара по времени жизни (сущность реплицируется — клиенты
+/// уберут спрайт вместе с ней).
+fn flush_world_effects(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut effects: Query<(Entity, &mut weapons::WorldEffect)>,
+) {
+    for (entity, mut effect) in effects.iter_mut() {
+        effect.lifetime -= time.delta_secs();
+        if effect.lifetime <= 0.0 {
             commands.entity(entity).despawn();
         }
     }

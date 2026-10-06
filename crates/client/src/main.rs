@@ -444,6 +444,7 @@ fn main() {
                 weapons::shoot_input,
                 weapons::reload_input,
                 weapons::sync_projectiles,
+                weapons::sync_melee_arcs,
                 weapons::move_projectile_sprites,
                 weapons::play_world_sounds,
                 weapons::update_ammo_counter,

@@ -804,6 +804,9 @@ pub fn sync_worn_clothes(
     facings: Query<&Facing>,
     worn: Query<(Entity, &WornLayer)>,
     mut last: Local<std::collections::HashMap<Entity, WornSignature>>,
+    mut images: ResMut<Assets<Image>>,
+    layouts: Res<Assets<TextureAtlasLayout>>,
+    mut halves: Local<HalvesCache>,
 ) {
     for (entity, clothing, hair, beard) in clothings.iter() {
         let facing = facings
@@ -929,6 +932,46 @@ pub fn sync_worn_clothes(
                     layout: sprite.layout.clone(),
                     index: sprite.index(facing.min(3), 0),
                 });
+                // Обувь — ДВЕ половинки с ключами l_foot/r_foot: в сборке обувь
+                // режется на левую/правую (`FootWalkAnimationSystem`, шейдер
+                // SpriteFootHalfClip) и половинки двигаются с ногами — иначе
+                // ходьба в обуви невидима (ноги скрыты комбинезоном).
+                if *slot == ssr_core::clothing::ClothingSlot::Shoes {
+                    for right_side in [false, true] {
+                        let Some((atlas_index, image)) = shoe_half(
+                            &registry,
+                            &mut images,
+                            &layouts,
+                            &mut halves,
+                            &key,
+                            facing,
+                            right_side,
+                        ) else {
+                            continue;
+                        };
+                        let mut half_sprite = Sprite::from_image(image);
+                        half_sprite.texture_atlas = Some(TextureAtlas {
+                            layout: sprite.layout.clone(),
+                            index: atlas_index,
+                        });
+                        parent.spawn((
+                            HumanoidPart {
+                                owner: visual,
+                                key: if right_side { "r_foot" } else { "l_foot" }.to_string(),
+                            },
+                            WornLayer { owner: visual },
+                            half_sprite,
+                            // Половинка центрируется на своей стороне кадра.
+                            Transform::from_xyz(
+                                if right_side { 0.25 } else { -0.25 },
+                                0.0,
+                                slot.layer_z() - 1.0,
+                            ),
+                        ));
+                    }
+                    spawned += 2;
+                    continue;
+                }
                 parent.spawn((
                     HumanoidPart { owner: visual, key },
                     WornLayer { owner: visual },
@@ -1252,3 +1295,66 @@ pub fn sync_overheads(
 /// Заполнение полоски здоровья (обновляется по здоровью).
 #[derive(Component)]
 pub struct HealthBarFill;
+
+/// Половинка кадра обуви (в сборке — шейдер `SpriteFootHalfClip`; у нас —
+/// CPU-нарезка кадра RSI на левую/правую половину, кэш по ключу и стороне).
+#[allow(clippy::too_many_arguments)]
+/// Кэш нарезанных половинок обуви: (ключ RSI, направление, правая?) →
+/// (индекс ячейки атласа, половинчатое изображение).
+pub type HalvesCache =
+    std::collections::HashMap<(String, u32, bool), (usize, Handle<Image>)>;
+
+fn shoe_half(
+    registry: &RsiRegistry,
+    images: &mut Assets<Image>,
+    layouts: &Assets<TextureAtlasLayout>,
+    halves: &mut HalvesCache,
+    key: &str,
+    facing: u32,
+    right: bool,
+) -> Option<(usize, Handle<Image>)> {
+    let cache_key = (key.to_string(), facing.min(3), right);
+    if let Some(cached) = halves.get(&cache_key) {
+        return Some(cached.clone());
+    }
+    let sprite = registry.get(key)?;
+    let image = images.get(&sprite.image)?.clone();
+    let atlas = layouts.get(&sprite.layout)?;
+    let index = sprite.index(facing.min(3), 0);
+    let rect = *atlas.textures.get(index)?;
+    let (iw, ih) = (image.width() as usize, image.height() as usize);
+    let data = image.data.as_ref()?;
+    let x0 = rect.min.x as usize;
+    let x1 = (rect.max.x as usize).min(iw);
+    let y0 = rect.min.y as usize;
+    let y1 = (rect.max.y as usize).min(ih);
+    let mid = (x0 + x1) / 2;
+    let (cx0, cx1) = if right { (mid, x1) } else { (x0, mid) };
+    if cx1 <= cx0 || y1 <= y0 {
+        return None;
+    }
+    // Новое изображение размером с ВЕСЬ атлас (layout переиспользуется),
+    // в кадре заполнена только своя половина — остальное прозрачно.
+    let mut out = vec![0u8; data.len()];
+    for y in y0..y1 {
+        for x in cx0..cx1 {
+            let src = ((y * iw) + x) * 4;
+            let dst = src; // координаты те же — атлас один в один
+            out[dst..dst + 4].copy_from_slice(&data[src..src + 4]);
+        }
+    }
+    let handle = images.add(Image::new(
+        bevy::render::render_resource::Extent3d {
+            width: iw as u32,
+            height: ih as u32,
+            depth_or_array_layers: 1,
+        },
+        bevy::render::render_resource::TextureDimension::D2,
+        out,
+        bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
+        bevy::asset::RenderAssetUsages::default(),
+    ));
+    let entry = (index, handle.clone());
+    halves.insert(cache_key, entry);
+    Some((index, handle))
+}

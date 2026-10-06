@@ -10,7 +10,7 @@ use bevy::prelude::*;
 use lightyear::prelude::{Connected, MessageSender};
 
 use ssr_core::inventory::{Hands, ItemPosition};
-use ssr_core::weapons::{AmmoProvider, Gun, Projectile, WorldSound};
+use ssr_core::weapons::{AmmoProvider, Gun, Projectile, WorldEffect, WorldSound};
 
 use crate::content::ClientContent;
 use crate::hud::HudState;
@@ -346,4 +346,73 @@ pub fn ghost_test_mode(
         });
     }
     tracing::info!("ghost test: команда ghost отправлена");
+}
+
+/// Локальный спрайт дуги удара, привязанный к реплицированному эффекту.
+#[derive(Component)]
+pub struct MeleeArcVisual {
+    effect: Entity,
+    key: String,
+    elapsed: f32,
+    frame: u32,
+}
+
+/// Спавнит спрайт дуги удара для каждого WorldEffect и убирает его вместе
+/// с эффектом; кадры — флипбук по `delays` из meta.json (4×0.1 с).
+pub fn sync_melee_arcs(
+    mut commands: Commands,
+    registry: Res<RsiRegistry>,
+    effects: Query<(Entity, &WorldEffect), Added<WorldEffect>>,
+    mut visuals: Query<(Entity, &mut MeleeArcVisual, &mut Sprite)>,
+    alive: Query<(), With<WorldEffect>>,
+    time: Res<Time>,
+) {
+    for (entity, effect) in effects.iter() {
+        let Some(sprite) = registry.get(&effect.key) else {
+            continue;
+        };
+        let mut component = Sprite::from_image(sprite.image.clone());
+        component.texture_atlas = Some(TextureAtlas {
+            layout: sprite.layout.clone(),
+            index: sprite.index(0, 0),
+        });
+        commands.spawn((
+            MeleeArcVisual {
+                effect: entity,
+                key: effect.key.clone(),
+                elapsed: 0.0,
+                frame: 0,
+            },
+            component,
+            Transform::from_xyz(effect.position[0], effect.position[1], 1.3),
+        ));
+    }
+    // Дуга живёт пока жив эффект; кадры — по delays RSI.
+    let dt = time.delta_secs();
+    for (entity, mut arc, mut image) in visuals.iter_mut() {
+        if !alive.contains(arc.effect) {
+            commands.entity(entity).despawn();
+            continue;
+        }
+        let Some(sprite) = registry.get(&arc.key) else {
+            continue;
+        };
+        arc.elapsed += dt;
+        let frames = sprite
+            .frames_per_direction
+            .first()
+            .copied()
+            .unwrap_or(1)
+            .max(1);
+        let delays = sprite.delays.first().map(Vec::as_slice).unwrap_or(&[]);
+        let (elapsed, frame) =
+            crate::hud::advance_alert_frame(arc.elapsed, arc.frame, delays, frames);
+        arc.elapsed = elapsed;
+        if frame != arc.frame {
+            arc.frame = frame;
+            if let Some(atlas) = image.texture_atlas.as_mut() {
+                atlas.index = sprite.index(0, frame);
+            }
+        }
+    }
 }
