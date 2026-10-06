@@ -451,6 +451,17 @@ fn main() {
         )
             .run_if(in_game),
     );
+    // Окно хранилища предмета (StorageWindow) — отдельной группой (предел
+    // размера кортежа систем).
+    app.add_systems(
+        Update,
+        (
+            containers::render_storage_window,
+            containers::storage_window_click,
+            containers::flush_interact_requests,
+        )
+            .run_if(in_game),
+    );
     // Лобби — только в релизной сборке (в dev сразу в игру; для отладки
     // лобби в dev: SSR_LOBBY=1; тестовый обход лобби: SSR_AUTO_PLAY=1).
     let force_lobby = std::env::var_os("SSR_LOBBY").is_some();

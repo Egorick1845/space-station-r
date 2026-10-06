@@ -547,3 +547,288 @@ pub struct ContainerTestState {
     closed: bool,
     take_after_close: bool,
 }
+
+/// Окно хранилища предмета (`StorageWindow` в сборке): пояс/сумка с сеткой
+/// из прототипа `Storage.grid`. Клик по занятой клетке — предмет в активную
+/// руку; клик по пустой клетке с предметом в руке — в хранилище.
+#[derive(Component)]
+pub struct StorageWindowRoot {
+    /// bits серверной сущности хранилища (пояса).
+    #[allow(dead_code)]
+    pub container: u64,
+}
+
+/// Ячейка окна хранилища.
+#[derive(Component, Clone, Copy)]
+pub struct StorageCell {
+    /// bits серверной сущности хранилища.
+    pub container: u64,
+    /// Индекс клетки (якорь).
+    pub slot: u8,
+}
+
+/// Кнопка-крестик закрытия окна хранилища (тот же тоггл, что и верб).
+#[derive(Component)]
+pub struct CloseStorageButton {
+    pub container: u64,
+}
+
+/// Событие-запрос: один Interact по сущности (крестик окна хранилища).
+#[derive(Event, bevy::ecs::message::Message)]
+pub struct RequestInteractOnce {
+    pub entity: u64,
+}
+
+/// Отпечаток окна хранилища: bits пояса, клетки, спрайты.
+type StorageSignature = Option<(u64, Vec<Option<u64>>, u32)>;
+
+/// Рисует окно открытого хранилища надетого предмета (носитель — свой игрок).
+#[allow(clippy::too_many_arguments)]
+pub fn render_storage_window(
+    mut commands: Commands,
+    own: Res<crate::inventory_ui::OwnPlayerEntity>,
+    clothings: Query<&ssr_core::clothing::Clothing>,
+    storages: Query<&ssr_core::inventory::ItemStorage>,
+    inventories: Query<&Inventory>,
+    items: Query<&ssr_core::inventory::Item>,
+    entity_map: Option<Res<ServerEntityMap>>,
+    registry: Res<RsiRegistry>,
+    theme: Res<crate::ui_theme::UiTheme>,
+    content: Res<crate::content::ClientContent>,
+    roots: Query<Entity, With<StorageWindowRoot>>,
+    mut last: Local<Option<StorageSignature>>,
+) {
+    use crate::ui_theme as ui;
+    // Клиентская сущность по серверным bits.
+    let resolve = |bits: u64, map: Option<&ServerEntityMap>| -> Option<Entity> {
+        let server = Entity::try_from_bits(bits)?;
+        map?.to_client().get(&server).copied()
+    };
+    // Хранилище своего игрока: первый надетый предмет с открытым ItemStorage.
+    let mut open_storage: Option<u64> = None;
+    if let Some(own_entity) = own.0
+        && let Ok(clothing) = clothings.get(own_entity)
+    {
+        for (_, bits) in &clothing.slots {
+            let Some(client_entity) = resolve(*bits, entity_map.as_deref()) else {
+                continue;
+            };
+            if storages
+                .get(client_entity)
+                .is_ok_and(|storage| storage.open)
+            {
+                open_storage = Some(*bits);
+                break;
+            }
+        }
+    }
+    let signature = open_storage.map(|bits| {
+        let cells = resolve(bits, entity_map.as_deref())
+            .and_then(|client| inventories.get(client).ok())
+            .map(|inv| inv.cells.clone())
+            .unwrap_or_default();
+        (bits, cells, registry.generation())
+    });
+    if last.as_ref() == Some(&signature) {
+        return;
+    }
+    *last = Some(signature.clone());
+
+    for entity in roots.iter() {
+        commands.entity(entity).despawn();
+    }
+    let Some((bits, ..)) = signature else {
+        return;
+    };
+    let Some(container_client) = resolve(bits, entity_map.as_deref()) else {
+        return;
+    };
+    let Ok(inventory) = inventories.get(container_client) else {
+        return;
+    };
+    let cols = inventory.cols.max(1) as usize;
+    let rows = inventory.cells.len().div_ceil(cols).max(1);
+    let name = items
+        .get(container_client)
+        .map(|item| item.name.clone())
+        .unwrap_or_else(|_| "Хранилище".to_string());
+    // Клетки окна 32×32 (клетка хранилища в сборке 16 px при масштабе ×2).
+    let cell = 32.0;
+    let grid_w = cols as f32 * cell;
+    // Окно над панелью рук по центру (в сборке StorageWindow открывается у
+    // нижнего края, левее хотбара).
+    commands
+        .spawn((
+            StorageWindowRoot { container: bits },
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Percent(50.0),
+                bottom: px(90.0),
+                width: px(grid_w + 2.0 * ui::WINDOW_CONTENT_MARGIN + 42.0),
+                flex_direction: FlexDirection::Column,
+                ..default()
+            },
+            UiTransform::from_translation(Val2::new(Val::Percent(-50.0), Val::Percent(0.0))),
+        ))
+        .with_children(|window| {
+            crate::hud::window_header(window, &theme, &name);
+            let (mut body, background) = crate::hud::window_body();
+            body.max_height = Val::Auto;
+            window
+                .spawn((body, background))
+                .with_children(|body| {
+                    body.spawn(Node {
+                        flex_direction: FlexDirection::Row,
+                        align_items: AlignItems::FlexStart,
+                        column_gap: px(6),
+                        ..default()
+                    })
+                    .with_children(|row| {
+                        // Сетка хранилища.
+                        row.spawn(Node {
+                            flex_direction: FlexDirection::Column,
+                            ..default()
+                        })
+                        .with_children(|grid| {
+                            for y in 0..rows {
+                                grid.spawn(Node {
+                                    flex_direction: FlexDirection::Row,
+                                    ..default()
+                                })
+                                .with_children(|line| {
+                                    for x in 0..cols {
+                                        let slot = (y * cols + x) as u8;
+                                        let item_bits = inventory
+                                            .cells
+                                            .get(slot as usize)
+                                            .copied()
+                                            .flatten();
+                                        let mut cell_node = line.spawn((
+                                            StorageCell {
+                                                container: bits,
+                                                slot,
+                                            },
+                                            Button,
+                                            Node {
+                                                width: px(cell),
+                                                height: px(cell),
+                                                align_items: AlignItems::Center,
+                                                justify_content: JustifyContent::Center,
+                                                ..default()
+                                            },
+                                            BackgroundColor(ui::GLASS_LINEEDIT),
+                                        ));
+                                        if let Some(bits) = item_bits
+                                            && let Some(client_entity) =
+                                                resolve(bits, entity_map.as_deref())
+                                            && let Ok(item) = items.get(client_entity)
+                                            && let Some(icon) = crate::inventory_ui::item_icon(
+                                                &registry, &content, &item.name,
+                                            )
+                                        {
+                                            cell_node.with_child((
+                                                crate::inventory_ui::icon_node(icon),
+                                                Node {
+                                                    width: px(28),
+                                                    height: px(28),
+                                                    ..default()
+                                                },
+                                            ));
+                                        }
+                                    }
+                                });
+                            }
+                        });
+                        // Сайдбар: красный крестик закрывает окно (как у ящика).
+                        row.spawn((
+                            CloseStorageButton { container: bits },
+                            Button,
+                            Node {
+                                width: px(36),
+                                height: px(rows as f32 * cell),
+                                align_items: AlignItems::Center,
+                                justify_content: JustifyContent::Center,
+                                ..default()
+                            },
+                            BackgroundColor(ui::GLASS_BUTTON),
+                        ))
+                        .with_child((
+                            crate::ui_theme::stretched(&theme.storage_exit),
+                            Node {
+                                width: px(28),
+                                height: px(28),
+                                ..default()
+                            },
+                        ));
+                    });
+                });
+        });
+}
+
+/// Клики по окну хранилища: предмет — в руку, пусто + предмет в руке — в пояс.
+#[allow(clippy::type_complexity)]
+pub fn storage_window_click(
+    cells: Query<
+        '_,
+        '_,
+        (&'static Interaction, &'static StorageCell),
+        (Changed<Interaction>, With<Button>),
+    >,
+    close: Query<(&Interaction, &CloseStorageButton), Changed<Interaction>>,
+    own: Res<crate::inventory_ui::OwnPlayerEntity>,
+    hands: Query<&Hands>,
+    mut senders: Query<&mut MessageSender<ClientMessage>, With<Connected>>,
+    mut events: MessageWriter<RequestInteractOnce>,
+) {
+    let active_bits = own
+        .0
+        .and_then(|entity| hands.get(entity).ok())
+        .and_then(|hands| hands.active_item());
+    for (interaction, cell) in cells.iter() {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        if let Some(item) = active_bits {
+            // Клик с предметом в руке — положить (сервер ищет первое место,
+            // как перетаскивание в сборке).
+            for mut sender in senders.iter_mut() {
+                sender.send::<GameChannel>(ClientMessage::StoragePut {
+                    container: cell.container,
+                    item,
+                });
+            }
+            tracing::info!(container = cell.container, item, "storage put sent");
+        } else {
+            for mut sender in senders.iter_mut() {
+                sender.send::<GameChannel>(ClientMessage::StorageTake {
+                    container: cell.container,
+                    slot: cell.slot,
+                });
+            }
+            tracing::info!(container = cell.container, slot = cell.slot, "storage take sent");
+        }
+    }
+    for (interaction, button) in close.iter() {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        // Крестик закрывает хранилище тем же Interact-тогглом.
+        events.write(RequestInteractOnce {
+            entity: button.container,
+        });
+    }
+}
+
+/// Исполняет отложенный Interact из UI (крестик окна хранилища): Interact
+/// адресуется СЕРВЕРНЫМИ bits, окно их уже хранит.
+pub fn flush_interact_requests(
+    mut events: MessageReader<RequestInteractOnce>,
+    mut senders: Query<&mut MessageSender<ClientMessage>, With<Connected>>,
+) {
+    for event in events.read() {
+        for mut sender in senders.iter_mut() {
+            sender.send::<GameChannel>(ClientMessage::Interact { entity: event.entity });
+        }
+        tracing::info!(entity = event.entity, "storage close sent");
+    }
+}
