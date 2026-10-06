@@ -26,7 +26,9 @@ use ssr_core::clothing::{Clothing, ClothingSlot};
 use ssr_core::inventory::{
     Container, Hands, Health, HeldBy, Inventory, Item, ItemPosition, ItemStorage, SLOT_ANY,
 };
-use ssr_core::mechanics::{FacialHair, Hair, Sex, facial_hair_style_names, hair_style_names};
+use ssr_core::mechanics::{
+        FacialHair, Hair, PlayerName, Sex, facial_hair_style_names, hair_style_names,
+    };
 use ssr_core::mechanics::{Ghost, KNOCKDOWN_SECS, KnockedDown, Sprinting};
 use ssr_core::power::{Cable, Consumer, Generator, Light, Powered};
 use ssr_core::roles::{Access, PlayerRole, RoleSet};
@@ -165,6 +167,7 @@ fn main() {
             sync_replicated_position,
             update_client_rooms,
             sync_item_rooms,
+            sync_ssd_body_rooms,
             // Оружие (W-план): состояние из прототипа, стрельба, полёт снарядов.
             // Вложенная группа — у кортежа Bevy лимит 20 систем.
             (
@@ -1510,7 +1513,10 @@ fn load_map(
 struct PlayerEntry {
     link: Entity,
     name: String,
+    /// Сущность ПОД УПРАВЛЕНИЕМ (призрак-наблюдатель или тело).
     player: Entity,
+    /// Тело игрока (при ghost остаётся на месте со спрайтом SSD).
+    body: Entity,
     chunk: (i32, i32),
     rooms: Vec<RoomId>,
 }
@@ -1527,13 +1533,12 @@ impl Players {
             .find(|e| e.link.to_bits() == link_bits)
     }
 
-    fn remove_by_link(&mut self, link_bits: u64) -> Option<(String, Entity)> {
+    fn remove_by_link(&mut self, link_bits: u64) -> Option<PlayerEntry> {
         let index = self
             .entries
             .iter()
             .position(|e| e.link.to_bits() == link_bits)?;
-        let entry = self.entries.remove(index);
-        Some((entry.name, entry.player))
+        Some(self.entries.remove(index))
     }
 }
 
@@ -1626,6 +1631,10 @@ struct AuxParams<'w, 's> {
     system_chat: ResMut<'w, SystemChatQueue>,
     /// Хранилища предметов (пояса/сумки) — проверка доступа из сообщений.
     item_storages: Query<'w, 's, &'static ItemStorage>,
+    /// Наблюдатели-призраки (возврат в тело по команде unghost).
+    observers: Query<'w, 's, &'static GhostObserver>,
+    /// Спящие тела (Ssd) — кандидаты на переподключение.
+    sleeping: Query<'w, 's, (Entity, &'static PlayerName), With<ssr_core::mechanics::Ssd>>,
 }
 
 /// Индекс из времени: без внешних RNG-зависимостей.
@@ -1714,11 +1723,19 @@ fn on_link_disconnected(
     mut system_chat: ResMut<SystemChatQueue>,
 ) {
     let bits = trigger.entity.to_bits();
-    if let Some((name, entity)) = players.remove_by_link(bits) {
-        // despawn реплицируется: у клиентов сущность игрока удалится (T1.3).
-        commands.entity(entity).despawn();
-        system_chat.0.push(format!("{name} отключился"));
-        tracing::info!(name, "Player disconnected");
+    if let Some(entry) = players.remove_by_link(bits) {
+        // Наблюдатель (призрак) под управлением — деспавн.
+        if entry.player != entry.body {
+            commands.entity(entry.player).despawn();
+        }
+        // ТЕЛО ОСТАЁТСЯ (SS14: отключившийся игрок «спит» с иконкой SSD):
+        // ввод снят, управление никому не принадлежит до переподключения.
+        commands
+            .entity(entry.body)
+            .remove::<PlayerInput>()
+            .insert(ssr_core::mechanics::Ssd);
+        system_chat.0.push(format!("{} отключился", entry.name));
+        tracing::info!(name = entry.name, body = ?entry.body, "Player disconnected");
     } else {
         tracing::debug!(link = ?trigger.entity, "link disconnected before handshake");
     }
@@ -1813,10 +1830,12 @@ fn run_admin_command(
     command: &str,
     player: Entity,
     link: Entity,
-    players: &Players,
+    players: &mut Players,
     commands: &mut Commands,
     inventories: &mut Query<&mut Inventory>,
     positions: &Query<&PlayerPosition>,
+    observers: &Query<&GhostObserver>,
+    senders: &mut Query<(Entity, &mut MessageSender<ServerMessage>), With<Connected>>,
     catalogs: &ContentCatalog,
     prototypes: &ProtoCatalog,
 ) -> String {
@@ -1997,16 +2016,26 @@ fn run_admin_command(
             format!("телепорт к {target_name}")
         }
         "ghost" => {
-            // Призрак: летает сквозь стены (у `MobObserver` маска коллизии 0),
-            // но НЕ лежит — `KnockedDown` не выдаём (обсервер не prone).
-            commands.entity(player).insert((Ghost, ColliderDisabled));
-            "режим призрака включён (полёт сквозь стены)".to_string()
+            // Управление переходит наблюдателю, тело остаётся (Ssd).
+            if let Some(entry) = players.entry_by_link_mut(link.to_bits()) {
+                let observer = become_ghost(commands, entry, positions);
+                send_welcome(entry.link, observer, senders);
+                "режим призрака включён (полёт сквозь стены)".to_string()
+            } else {
+                "игрок не найден".to_string()
+            }
         }
         "unghost" => {
-            commands
-                .entity(player)
-                .remove::<(Ghost, ColliderDisabled, KnockedDown)>();
-            "режим призрака выключен".to_string()
+            if let Some(entry) = players.entry_by_link_mut(link.to_bits()) {
+                if return_to_body(commands, entry, observers) {
+                    send_welcome(entry.link, entry.player, senders);
+                    "режим призрака выключен".to_string()
+                } else {
+                    "призрак не активен".to_string()
+                }
+            } else {
+                "игрок не найден".to_string()
+            }
         }
         other => format!("неизвестная команда: {other} (tp/spawn/kick/heal/ghost/unghost)"),
     }
@@ -2031,6 +2060,93 @@ fn item_size_of(
         return cells;
     }
     catalogs.items.size_of(&item.name)
+}
+
+/// Призрак-наблюдатель (SS14 `MobObserver`, `observer.yml`): ОТДЕЛЬНАЯ
+/// сущность, на которую переносится управление. Тело остаётся на месте и
+/// «спит» (Ssd). Хранит биты тела для возврата.
+#[derive(Component)]
+struct GhostObserver {
+    body: Entity,
+}
+
+/// Стать призраком: спавн наблюдателя + перенос управления, тело «спит».
+/// Единая точка для команды `ghost` и верба `aghost` (раньше верб снимал
+/// Ghost без ColliderDisabled — тело продолжало летать сквозь стены).
+fn become_ghost(
+    commands: &mut Commands,
+    entry: &mut PlayerEntry,
+    positions: &Query<&PlayerPosition>,
+) -> Entity {
+    let Ok(position) = positions.get(entry.player) else {
+        return entry.player;
+    };
+    let body = entry.body;
+    let spawn = position.0;
+    let observer = commands
+        .spawn((
+            Ghost,
+            GhostObserver { body },
+            // Наблюдатель летает (Kinematic без коллайдера — сквозь стены),
+            // скорости 8/12 из observer.yml читает система движения.
+            PlayerPosition([spawn[0], spawn[1]]),
+            PlayerInput::default(),
+            MoveVel::default(),
+            RigidBody::Kinematic,
+            Position(Vector::new(spawn[0], spawn[1])),
+            Rotation::default(),
+            LinearVelocity(Vector::ZERO),
+            Replicate::to_clients(NetworkTarget::All),
+            Rooms::default(),
+        ))
+        .id();
+    // Тело остаётся: ввод снят (не двигается), SSD включён.
+    commands
+        .entity(body)
+        .remove::<PlayerInput>()
+        .insert(ssr_core::mechanics::Ssd);
+    entry.player = observer;
+    tracing::info!(name = entry.name, body = ?body, observer = ?observer, "ghost observer spawned");
+    observer
+}
+
+/// Вернуться в тело: управление обратно, наблюдатель деспавнится, SSD снят.
+fn return_to_body(
+    commands: &mut Commands,
+    entry: &mut PlayerEntry,
+    observers: &Query<&GhostObserver>,
+) -> bool {
+    if entry.player == entry.body {
+        return false;
+    }
+    let Ok(observer) = observers.get(entry.player) else {
+        return false;
+    };
+    let body = observer.body;
+    commands.entity(entry.player).despawn();
+    commands
+        .entity(body)
+        .remove::<ssr_core::mechanics::Ssd>()
+        .insert(PlayerInput::default());
+    entry.player = body;
+    // Welcome с битами тела шлёт вызывающий (у него своя форма запроса senders).
+    tracing::info!(name = entry.name, body = ?body, "returned to body");
+    true
+}
+
+/// Welcome с новой сущностью под управлением (OwnPlayerEntity клиента
+/// переключится): общий для unghost/aghost/переподключения.
+fn send_welcome(
+    link: Entity,
+    entity: Entity,
+    senders: &mut Query<(Entity, &mut MessageSender<ServerMessage>), With<Connected>>,
+) {
+    if let Ok((_, mut sender)) = senders.get_mut(link) {
+        sender.send::<GameChannel>(ServerMessage::Welcome {
+            player_entity: entity.to_bits(),
+            protocol_version: PROTOCOL_VERSION,
+        });
+    }
 }
 
 /// Обработчик всех сообщений клиентов: одна точка приёма (MessageReceiver
@@ -2494,10 +2610,12 @@ fn handle_client_messages(
                         &command,
                         player,
                         link_entity,
-                        &players,
+                        &mut players,
                         &mut commands,
                         &mut inventories,
                         &positions,
+                        &aux.observers,
+                        &mut senders,
                         &content.catalogs,
                         &content.prototypes,
                     );
@@ -3088,6 +3206,39 @@ fn handle_client_messages(
     }
 
     for (link_entity, name) in connected {
+        // Переподключение: если тело этого имени «спит» (Ssd) — возвращаем
+        // управление В НЕГО (SS14: Mind переносится, тело не деспавнится).
+        let reused = aux
+            .sleeping
+            .iter()
+            .find(|(entity, player_name)| {
+                player_name.0 == name
+                    // Тело не под управлением другого наблюдателя.
+                    && !players.entries.iter().any(|entry| entry.body == *entity)
+            })
+            .map(|(entity, _)| entity);
+        if let Some(body) = reused {
+            commands
+                .entity(body)
+                .remove::<ssr_core::mechanics::Ssd>()
+                .insert(PlayerInput::default());
+            players.entries.push(PlayerEntry {
+                link: link_entity,
+                name: name.clone(),
+                player: body,
+                body,
+                chunk: (0, 0),
+                rooms: Vec::new(),
+            });
+            if let Ok((_, mut sender)) = senders.get_mut(link_entity) {
+                sender.send::<GameChannel>(ServerMessage::Welcome {
+                    player_entity: body.to_bits(),
+                    protocol_version: PROTOCOL_VERSION,
+                });
+            }
+            tracing::info!(name, body = ?body, "player reconnected into body");
+            continue;
+        }
         // Точка спавна — до создания сущности (id игрока сразу известен и нужен
         // демо-предметам: commands отложены, но id уже зарезервирован).
         let spawn = if map.spawn_points.is_empty() {
@@ -3122,6 +3273,8 @@ fn handle_client_messages(
         commands.entity(player).insert(Species {
             id: species.clone(),
         });
+        // Имя на теле — переподключение находит СВОЁ тело (SS14: Mind).
+        commands.entity(player).insert(PlayerName(name.clone()));
         tracing::info!(name, spawn = ?spawn, species = %species, "player spawned");
 
         // Роль (T4.2): SSR_ROLE=<id> — фиксированная (тесты/отладка), иначе
@@ -3266,6 +3419,7 @@ fn handle_client_messages(
             link: link_entity,
             name,
             player,
+            body: player,
             chunk: (0, 0),
             rooms: Vec::new(),
         });
@@ -3576,6 +3730,36 @@ fn sync_item_rooms(
     }
 }
 
+/// Спящие тела (Ssd) остаются видимыми: их комнаты больше не обновляет
+/// `update_client_rooms` (управление ушло к наблюдателю), поэтому комната
+/// интереса держится по СВОЕМУ чанку — как у предметов.
+fn sync_ssd_body_rooms(
+    mut commands: Commands,
+    bodies: Query<
+        (
+            Entity,
+            &PlayerPosition,
+            Option<&ItemRoom>,
+        ),
+        With<ssr_core::mechanics::Ssd>,
+    >,
+    mut chunk_rooms: ResMut<ChunkRooms>,
+    mut allocator: ResMut<RoomAllocator>,
+) {
+    for (entity, position, current) in bodies.iter() {
+        let room = ItemRoom(chunk_rooms.room_for(
+            chunk_coords(position.0[0], position.0[1]),
+            &mut allocator,
+        ));
+        if current == Some(&room) {
+            continue;
+        }
+        commands
+            .entity(entity)
+            .insert((room, Rooms::single(room.0)));
+    }
+}
+
 /// Нагрузочный тест T1.4: SSR_LOAD_TEST=1 расставляет 1000 сущностей сеткой
 /// 32 юнита (чанки −20..20 × −12..12). Критерий: клиент видит < 100 из 1000.
 fn spawn_load_test(
@@ -3660,6 +3844,8 @@ struct ActionQueries<'w, 's> {
     prototypes: Res<'w, ProtoCatalog>,
     /// Призраки — проверка состояния для админ-верба `aghost`.
     ghosts: Query<'w, 's, &'static Ghost>,
+    /// Наблюдатели — возврат в тело (верб aghost).
+    observers: Query<'w, 's, &'static GhostObserver>,
 }
 
 /// Доступ к двери (T4.2): дверь без ключа открыта всем, с ключом — только
@@ -3742,7 +3928,7 @@ fn process_actions(
     floor_positions: Query<(Entity, &ItemPosition)>,
     items: Query<&Item>,
     mut senders: Query<&mut MessageSender<ServerMessage>, With<Connected>>,
-    players: Res<Players>,
+    mut players: ResMut<Players>,
     mut damage_events: MessageWriter<DamageEvent>,
 ) {
     if queue.0.is_empty() {
@@ -4287,15 +4473,31 @@ fn process_actions(
             // Админ-верб «Стать призраком» (`aghost`): переводим игрока в
             // состояние призрака — сквозь стены и невидимым для живых.
             ActionKind::AdminGhost => {
+                // Единая модель с командой ghost: наблюдатель + тело в SSD.
+                // Раньше верб снимал только Ghost — ColliderDisabled оставался
+                // и «вернувшееся» тело продолжало летать сквозь стены.
+                let Some(entry) = players.entries.iter_mut().find(|entry| entry.player == player)
+                else {
+                    continue;
+                };
                 if world.ghosts.get(player).is_ok() {
-                    commands.entity(player).remove::<Ghost>();
+                    if return_to_body(&mut commands, entry, &world.observers) {
+                        for mut sender in senders.iter_mut() {
+                            sender.send::<GameChannel>(ServerMessage::Welcome {
+                                player_entity: entry.player.to_bits(),
+                                protocol_version: PROTOCOL_VERSION,
+                            });
+                        }
+                    }
                     tracing::info!(?player, "aghost: вернулся в тело");
                 } else {
-                    // В сборке призрак не сталкивается со стенами: у фикстуры
-                    // `MobObserver` слой `GhostImpassable`, а маска не задана
-                    // (`CollisionMask = 0`). У нас тело игрока — динамическое, и
-                    // проход сквозь стены даёт `ColliderDisabled`.
-                    commands.entity(player).insert((Ghost, ColliderDisabled));
+                    let observer = become_ghost(&mut commands, entry, &positions);
+                    for mut sender in senders.iter_mut() {
+                        sender.send::<GameChannel>(ServerMessage::Welcome {
+                            player_entity: observer.to_bits(),
+                            protocol_version: PROTOCOL_VERSION,
+                        });
+                    }
                     tracing::info!(?player, "aghost: стал призраком");
                 }
             }

@@ -32,6 +32,11 @@ pub struct PlayerName(pub String);
 #[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
 pub struct Ghost;
 
+/// «Спит» (SSDIndicator в сборке, спрайт `Effects/ssd.rsi#default0`): тело
+/// без управления — призрак ушёл или клиент отключился. Иконку рисует клиент.
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+pub struct Ssd;
+
 /// Пол персонажа: влияет только на части тела `head/chest/groin` — как
 /// `HumanoidVisualLayersExtension.HasSexMorph` в SS14 (только эти три слоя
 /// имеют варианты `_m`/`_f`; у Unsexed остаётся мужской арт).

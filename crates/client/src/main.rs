@@ -143,6 +143,9 @@ fn main() {
     app.init_resource::<structures::SurfaceTiles>();
     app.init_resource::<crafting::CraftingState>();
     app.init_resource::<hud::SpawnListCache>();
+    // Канал событий UI -> мир (крестик окна хранилища): без регистрации
+    // MessageReader паникует «Message not initialized».
+    app.init_resource::<bevy::ecs::message::Messages<containers::RequestInteractOnce>>();
     app.init_resource::<hud::HudState>();
     app.init_resource::<hud::Placement>();
     app.init_resource::<lighting::LightScene>();

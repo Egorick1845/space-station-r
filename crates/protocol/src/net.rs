@@ -21,7 +21,9 @@ pub fn register_replication(app: &mut bevy_app::App) {
     use ssr_core::inventory::{
         Container, Hands, Health, HeldBy, Inventory, Item, ItemPosition, ItemStorage,
     };
-    use ssr_core::mechanics::{FacialHair, Ghost, Hair, KnockedDown, PlayerName, Sex, Sprinting};
+    use ssr_core::mechanics::{
+        FacialHair, Ghost, Hair, KnockedDown, PlayerName, Sex, Sprinting, Ssd,
+    };
     use ssr_core::power::{Cable, Consumer, Generator, Light, Powered};
     use ssr_core::roles::PlayerRole;
     use ssr_core::stamina::Stamina;
@@ -55,6 +57,7 @@ pub fn register_replication(app: &mut bevy_app::App) {
     app.component::<Powered>().replicate();
     app.component::<KnockedDown>().replicate();
     app.component::<Ghost>().replicate();
+    app.component::<Ssd>().replicate();
     app.component::<PlayerName>().replicate();
     app.component::<Hair>().replicate();
     app.component::<FacialHair>().replicate();
