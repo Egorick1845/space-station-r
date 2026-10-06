@@ -186,6 +186,9 @@ fn main() {
         Update,
         (humanoid::sync_stun_stars, humanoid::animate_stun_stars),
     );
+    // Визоры над головой: должность, SSD, полоска здоровья.
+    app.add_systems(Startup, humanoid::setup_health_bar);
+    app.add_systems(Update, humanoid::sync_overheads);
     // Space — спринт-тоггл (PORT_PLAN 2.2).
     app.add_systems(Update, hud::sprint_hotkey);
     // Алерт выносливости (PORT_PLAN 1.5): 7 уровней, иконки из сборки.

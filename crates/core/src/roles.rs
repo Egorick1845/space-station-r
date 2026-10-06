@@ -14,15 +14,26 @@ use std::path::Path;
 pub struct Role {
     pub id: String,
     pub name: String,
+    /// Иконка профессии над головой (состояние `job_icons.rsi`, как `icon`
+    /// у JobPrototype в сборке).
+    #[serde(default)]
+    pub icon: String,
     /// Стартовый инвентарь: имена предметов.
     #[serde(default)]
     pub items: Vec<String>,
+    /// Приоритет раздачи (JobPrototype.weight в сборке; больше — раньше).
+    #[serde(default)]
+    pub weight: i32,
     /// Доступы: ключи дверей ("general", "engineering", ...).
     #[serde(default)]
     pub access: Vec<String>,
     /// Антагонист с целью (T4.2: предатель).
     #[serde(default)]
     pub antagonist: bool,
+    /// Стартовая одежда по слотам (startingGear.equipment в сборке):
+    /// (id слота, предмет).
+    #[serde(default)]
+    pub gear: Vec<(String, String)>,
     /// Текст цели антагониста.
     #[serde(default)]
     pub goal: String,
@@ -52,6 +63,9 @@ impl RoleSet {
 pub struct PlayerRole {
     pub id: String,
     pub name: String,
+    /// Иконка профессии над головой (`job_icons.rsi#<state>`).
+    #[serde(default)]
+    pub icon: String,
     pub antagonist: bool,
     pub goal: String,
 }
@@ -76,9 +90,13 @@ mod tests {
             "минимум: ассистент, инженер, предатель"
         );
 
-        let engineer = set.by_id("engineer").expect("engineer");
+        let engineer = set.by_id("station-engineer").expect("station-engineer");
         assert!(engineer.access.contains(&"engineering".to_string()));
-        assert!(!engineer.items.is_empty());
+        assert!(!engineer.gear.is_empty(), "у профессии есть startingGear");
+        // Раздача по весу: капитан раньше ассистента.
+        let mut list = set.roles.clone();
+        list.sort_by_key(|role| -role.weight);
+        assert_eq!(list[0].id, "captain", "капитан — наивысший weight");
 
         let traitor = set.by_id("traitor").expect("traitor");
         assert!(traitor.antagonist);

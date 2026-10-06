@@ -3283,7 +3283,10 @@ fn handle_client_messages(
             .ok()
             .and_then(|id| content.roles.0.by_id(&id).cloned())
             .or_else(|| {
-                let list = &content.roles.0.roles;
+                // Round-robin по весу профессий (JobPrototype.weight: больше —
+                // раньше в раздаче).
+                let mut list = content.roles.0.roles.clone();
+                list.sort_by_key(|role| -role.weight);
                 if list.is_empty() {
                     return None;
                 }
@@ -3322,27 +3325,33 @@ fn handle_client_messages(
             }
         }
         commands.entity(player).insert(inventory);
-        // Одежда: стартовый комплект как у инженера в SS14 — рюкзак, комбинезон,
-        // ботинки, перчатки, каска, противогаз и гарнитура (без рюкзака окно
-        // инвентаря не открыть, а без остального нечего снимать и надевать).
+        // Одежда — из роли (startingGear.equipment в сборке): слоты → предметы.
+        // Пояс с хранилищем получает ItemStorage из прототипа автоматически.
+        let gear: Vec<(String, String)> = role
+            .as_ref()
+            .map(|role| role.gear.clone())
+            .unwrap_or_else(|| {
+                [
+                    ("back", "Backpack"),
+                    ("jumpsuit", "JumpsuitEngineering"),
+                    ("shoes", "ShoesBlack"),
+                    ("gloves", "GlovesYellow"),
+                    ("head", "HardhatWhite"),
+                    ("ears", "Headset"),
+                    ("belt", "ClothingBeltUtility"),
+                    ("eyes", "ClothingEyesGlasses"),
+                    ("id", "IDCardEngineer"),
+                ]
+                .iter()
+                .map(|(slot, item)| ((*slot).to_string(), (*item).to_string()))
+                .collect()
+            });
         let mut clothing = Clothing::default();
-        for worn_name in [
-            "Backpack",
-            "JumpsuitEngineering",
-            "ShoesBlack",
-            "GlovesYellow",
-            "HardhatWhite",
-            "GasMask",
-            "Headset",
-            "ClothingBeltUtility",
-            "ClothingOuterCoatLab",
-            "ClothingEyesGlasses",
-            "IDCardEngineer",
-        ] {
+        for (slot_id, worn_name) in &gear {
             let item = commands
                 .spawn((
                     Item {
-                        name: worn_name.to_string(),
+                        name: worn_name.clone(),
                     },
                     HeldBy {
                         player: player_bits,
@@ -3351,12 +3360,17 @@ fn handle_client_messages(
                     Rooms::default(),
                 ))
                 .id();
-            let Some(slot) = content
-                .catalogs
-                .items
-                .slot_of(worn_name)
-                .and_then(ClothingSlot::from_id)
+            // Слот — из роли, иначе из каталога предметов.
+            let Some(slot) = ClothingSlot::from_id(slot_id)
+                .or_else(|| {
+                    content
+                        .catalogs
+                        .items
+                        .slot_of(worn_name)
+                        .and_then(ClothingSlot::from_id)
+                })
             else {
+                tracing::warn!(item = %worn_name, slot = %slot_id, "gear: unknown slot");
                 continue;
             };
             clothing.equip(slot, item.to_bits());
@@ -3399,6 +3413,7 @@ fn handle_client_messages(
                 PlayerRole {
                     id: role.id.clone(),
                     name: role.name.clone(),
+                    icon: role.icon.clone(),
                     antagonist: role.antagonist,
                     goal: role.goal.clone(),
                 },

@@ -1035,3 +1035,220 @@ mod tests {
         assert!(angle.abs() < 1e-6, "встал обратно");
     }
 }
+
+/// Иконка профессии над головой (`ShowJobIconsSystem` в сборке: состояние
+/// `job_icons.rsi#<JobName>`; у нас — реплицированное `PlayerRole.icon`).
+#[derive(Component)]
+pub struct JobIconOverlay {
+    owner: Entity,
+    state: String,
+}
+
+/// SSD-иконка над головой (`SSDIndicatorComponent`: спит/отвалившийся игрок,
+/// спрайт `Effects/ssd.rsi#default0` — скопирован из сборки).
+#[derive(Component)]
+pub struct SsdOverlay {
+    owner: Entity,
+}
+
+/// Полоска здоровья над головой (упрощённый `EntityHealthBarOverlay`).
+#[derive(Component)]
+pub struct HealthBarOverlay {
+    owner: Entity,
+}
+
+const OVERHEAD_Y: f32 = 0.38;
+const OVERHEAD_Z: f32 = 0.6;
+const JOB_ICONS_PREFIX: &str = "sprites/ss14/Interface/Misc/job_icons.rsi#";
+const SSD_ICON_KEY: &str = "sprites/ss14/Effects/ssd.rsi#default0";
+const HEALTH_BAR_WIDTH: f32 = 0.5;
+const HEALTH_BAR_HEIGHT: f32 = 0.045;
+
+/// Белая текстура полоски здоровья (цвет — тонировкой спрайта).
+#[derive(Resource)]
+pub struct HealthBarTexture(pub Handle<Image>);
+
+/// Создаёт текстуру полоски один раз.
+pub fn setup_health_bar(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
+    let handle = images.add(Image::new_fill(
+        bevy::render::render_resource::Extent3d {
+            width: 2,
+            height: 2,
+            depth_or_array_layers: 1,
+        },
+        bevy::render::render_resource::TextureDimension::D2,
+        &[255, 255, 255, 255],
+        bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
+        bevy::asset::RenderAssetUsages::default(),
+    ));
+    commands.insert_resource(HealthBarTexture(handle));
+}
+
+/// Визоры над головой: должность (`PlayerRole.icon`), SSD (`Ssd`) и полоска
+/// здоровья. Детские спрайты — по образцу `sync_stun_stars`.
+#[allow(clippy::too_many_arguments)]
+pub fn sync_overheads(
+    mut commands: Commands,
+    registry: Res<RsiRegistry>,
+    own: Res<OwnPlayerEntity>,
+    players: Query<Entity, With<crate::Player>>,
+    visuals: Query<(Entity, &RemotePlayerVisual)>,
+    roles: Query<&ssr_core::roles::PlayerRole>,
+    ssds: Query<&ssr_core::mechanics::Ssd>,
+    healths: Query<&ssr_core::inventory::Health>,
+    jobs: Query<(Entity, &JobIconOverlay)>,
+    ssd_icons: Query<(Entity, &SsdOverlay)>,
+    bars: Query<(Entity, &HealthBarOverlay)>,
+    bar_texture: Option<Res<HealthBarTexture>>,
+    childrens: Query<&Children>,
+    mut fills: Query<(Entity, &mut Sprite), With<HealthBarFill>>,
+) {
+    // (сущность визора, сущность с ДАННЫМИ): свой игрок смотрит в себя,
+    // удалённый визуал — в реплицированное тело.
+    let mut owners: Vec<(Entity, Entity)> = players
+        .iter()
+        .filter_map(|entity| own.0.filter(|data| data == &entity).map(|data| (entity, data)))
+        .collect();
+    owners.extend(
+        visuals
+            .iter()
+            .map(|(entity, visual)| (entity, visual.player)),
+    );
+
+    // --- Должность: состояние из PlayerRole.icon ---
+    for (owner, data) in owners.iter() {
+        let state = roles
+            .get(*data)
+            .map(|role| role.icon.clone())
+            .unwrap_or_default();
+        let existing = jobs.iter().find(|(_, overlay)| overlay.owner == *owner);
+        if state.is_empty() {
+            if let Some((entity, _)) = existing {
+                commands.entity(entity).despawn();
+            }
+            continue;
+        }
+        if existing.as_ref().is_some_and(|(_, overlay)| overlay.state == state) {
+            continue;
+        }
+        if let Some((entity, _)) = existing {
+            commands.entity(entity).despawn();
+        }
+        let Some(sprite) = registry.get(&format!("{JOB_ICONS_PREFIX}{state}")) else {
+            continue;
+        };
+        let mut component = Sprite::from_image(sprite.image.clone());
+        component.texture_atlas = Some(TextureAtlas {
+            layout: sprite.layout.clone(),
+            index: sprite.index(0, 0),
+        });
+        let state_clone = state.clone();
+        commands.entity(*owner).with_children(move |parent| {
+            parent.spawn((
+                JobIconOverlay {
+                    owner: *owner,
+                    state: state_clone,
+                },
+                component,
+                Transform::from_xyz(0.28, OVERHEAD_Y, OVERHEAD_Z),
+            ));
+        });
+    }
+
+    // --- SSD ---
+    for (owner, data) in &owners {
+        let sleeping = ssds.contains(*data);
+        let existing = ssd_icons.iter().find(|(_, overlay)| overlay.owner == *owner);
+        if !sleeping {
+            if let Some((entity, _)) = existing {
+                commands.entity(entity).despawn();
+            }
+            continue;
+        }
+        if existing.is_some() {
+            continue;
+        }
+        let Some(sprite) = registry.get(SSD_ICON_KEY) else {
+            continue;
+        };
+        let mut component = Sprite::from_image(sprite.image.clone());
+        component.texture_atlas = Some(TextureAtlas {
+            layout: sprite.layout.clone(),
+            index: sprite.index(0, 0),
+        });
+        commands.entity(*owner).with_children(|parent| {
+            parent.spawn((
+                SsdOverlay { owner: *owner },
+                component,
+                Transform::from_xyz(-0.28, OVERHEAD_Y, OVERHEAD_Z),
+            ));
+        });
+    }
+
+    // --- Полоска здоровья ---
+    let Some(texture) = bar_texture else {
+        return;
+    };
+    for (owner, data) in &owners {
+        let fraction = healths
+            .get(*data)
+            .ok()
+            .map(|health| {
+                (health.current as f32 / health.max.max(1) as f32).clamp(0.0, 1.0)
+            });
+        let existing = bars.iter().find(|(_, overlay)| overlay.owner == *owner);
+        let Some(fraction) = fraction else {
+            if let Some((entity, _)) = existing {
+                commands.entity(entity).despawn();
+            }
+            continue;
+        };
+        // Полностью здоровый — без полоски (раненые показывают её сами).
+        if fraction >= 0.999 {
+            if let Some((entity, _)) = existing {
+                commands.entity(entity).despawn();
+            }
+            continue;
+        }
+        let color = Color::srgb(1.0 - fraction, fraction * 0.85, 0.1);
+        match existing {
+            Some((_, _)) => {
+                // Обновление ширины/цвета заполнения у существующей полоски.
+                for child in childrens.get(*owner).map(|c| c.to_vec()).unwrap_or_default() {
+                    if let Ok((_, mut sprite)) = fills.get_mut(child) {
+                        sprite.custom_size =
+                            Some(Vec2::new(HEALTH_BAR_WIDTH * fraction, HEALTH_BAR_HEIGHT));
+                        sprite.color = color;
+                    }
+                }
+            }
+            None => {
+                let mut background = Sprite::from_image(texture.0.clone());
+                background.custom_size = Some(Vec2::new(HEALTH_BAR_WIDTH, HEALTH_BAR_HEIGHT));
+                background.color = Color::srgba(0.0, 0.0, 0.0, 0.55);
+                let mut fill = Sprite::from_image(texture.0.clone());
+                fill.custom_size = Some(Vec2::new(
+                    HEALTH_BAR_WIDTH * fraction,
+                    HEALTH_BAR_HEIGHT,
+                ));
+                fill.color = color;
+                commands.entity(*owner).with_children(move |parent| {
+                    parent.spawn((
+                        HealthBarOverlay { owner: *owner },
+                        background,
+                        Transform::from_xyz(0.0, OVERHEAD_Y + 0.06, OVERHEAD_Z),
+                    ));
+                    parent.spawn((
+                        HealthBarFill,
+                        fill,
+                        Transform::from_xyz(0.0, OVERHEAD_Y + 0.06, OVERHEAD_Z + 0.01),
+                    ));
+                });
+            }
+        }
+    }
+}
+
+/// Заполнение полоски здоровья (обновляется по здоровью).
+#[derive(Component)]
+pub struct HealthBarFill;
