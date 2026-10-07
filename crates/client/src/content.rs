@@ -71,6 +71,18 @@ pub fn load_content(mut commands: Commands) {
             }
         }
     }
+    // Русские имена (import-names: ru-RU .ftl → names_ru.ron) — перекрывают
+    // английские `name` из YAML прототипов.
+    let names_ru: HashMap<String, String> =
+        std::fs::read_to_string(ssr_core::assets_root().join("prototypes/names_ru.ron"))
+            .ok()
+            .and_then(|text| ron::from_str(&text).ok())
+            .unwrap_or_default();
+    let ru_count = names_ru.len();
+    for (id, name) in names_ru {
+        content.proto_names.insert(id, name);
+    }
+
     // Импортированные прототипы сборки (19k+ сущностей). Нужны для меню спавна:
     // берём спавнимые (не abstract, без категории `HideSpawnMenu` — как
     // `EntitySpawningUIController.BuildEntityList:203-211`) и только со спрайтом.
@@ -115,6 +127,7 @@ pub fn load_content(mut commands: Commands) {
                 items = content.items.items.len(),
                 recipes = content.recipes.recipes.len(),
                 protos = content.proto_sprites.len(),
+                ru = ru_count,
                 hidden,
                 ms = started.elapsed().as_millis() as u64,
                 "content catalog loaded (client)"

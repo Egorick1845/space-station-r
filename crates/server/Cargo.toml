@@ -13,3 +13,4 @@ serde = { workspace = true }
 avian2d = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+ron = { workspace = true }

@@ -648,10 +648,12 @@ pub fn render_storage_window(
     };
     let cols = inventory.cols.max(1) as usize;
     let rows = inventory.cells.len().div_ceil(cols).max(1);
+    // Заголовок окна — русское имя (id → имя прототипа/каталога).
     let name = items
         .get(container_client)
         .map(|item| item.name.clone())
-        .unwrap_or_else(|_| "Хранилище".to_string());
+        .map(|raw| content.display_name(&raw))
+        .unwrap_or("Хранилище".to_string());
     // Клетки окна 32×32 (клетка хранилища в сборке 16 px при масштабе ×2).
     let cell = 32.0;
     let grid_w = cols as f32 * cell;

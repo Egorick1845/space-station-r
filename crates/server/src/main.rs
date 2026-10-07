@@ -291,6 +291,16 @@ fn spawn_containers(
     tracing::info!(count = spots.len(), "containers spawned");
 }
 
+impl ProtoCatalog {
+    /// Русское имя прототипа (для текстов игроку: осмотр, вербы).
+    pub fn display_name(&self, id: &str) -> String {
+        self.names
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| id.to_string())
+    }
+}
+
 /// Спавнимые прототипы сборки (IMP.2/IMP.3): id → размер предмета (`itemSize`).
 /// Из этого набора работает команда `spawn` и меню спавна — «как можно больше
 /// сущностей», а не только наш ручной каталог предметов.
@@ -314,6 +324,8 @@ struct ProtoCatalog {
     item_tags: std::collections::HashMap<String, Vec<String>>,
     /// Storage прототипов (StorageComponent): пояс, сумка, коробка.
     storages: std::collections::HashMap<String, ssr_core::prototypes::ProtoStorage>,
+    /// Русские имена сущностей (id → имя) из локали сборки (ru-RU .ftl).
+    names: std::collections::HashMap<String, String>,
 }
 
 /// Данные структуры из прототипа (стол, машина, шкаф).
@@ -409,7 +421,18 @@ fn load_prototypes(mut commands: Commands) {
     let path = ssr_core::assets_root().join("prototypes_ss14.ron");
     match ssr_core::prototypes::ProtoSet::load(&path) {
         Ok(set) => {
-            let mut catalog = ProtoCatalog::default();
+            // Русские имена (import-names: ru-RU .ftl → names_ru.ron).
+            let names_ru: std::collections::HashMap<String, String> =
+                std::fs::read_to_string(
+                    ssr_core::assets_root().join("prototypes/names_ru.ron"),
+                )
+                .ok()
+                .and_then(|text| ron::from_str(&text).ok())
+                .unwrap_or_default();
+            let mut catalog = ProtoCatalog {
+                names: names_ru,
+                ..Default::default()
+            };
             for proto in &set.protos {
                 if proto.abstract_ || proto.kind != "entity" {
                     continue;
@@ -1796,6 +1819,7 @@ fn describe_target(
     doors: &Query<&mut Door>,
     atmospheres: &Atmospheres,
     catalogs: &ContentCatalog,
+    prototypes: &ProtoCatalog,
 ) -> String {
     // Объект под курсором: предмет, ящик, дверь или генератор.
     if entity_bits != 0
@@ -1805,7 +1829,7 @@ fn describe_target(
             let proto = catalogs.items.by_id(&item.name);
             let name = proto
                 .map(|item| item.name.clone())
-                .unwrap_or_else(|| item.name.clone());
+                .unwrap_or_else(|| prototypes.display_name(&item.name));
             let tags = proto
                 .map(|item| item.tags.join(", "))
                 .filter(|tags| !tags.is_empty())
@@ -1938,6 +1962,32 @@ fn run_admin_command(
                     let spread = (index as f32) * TILE_SIZE * 0.6;
                     let x = explicit.map_or(base[0] + spread, |(x, _)| x + spread);
                     let y = explicit.map_or(base[1] - TILE_SIZE * 0.8, |(_, y)| y);
+                    // Шлюз из спавн-меню — НАСТОЯЩАЯ ДВЕРЬ на центре тайла
+                    // (жалоба владельца: шлюзы не закреплялись за тайлом и не
+                    // работали как двери).
+                    if item_id.contains("Airlock") {
+                        let tx = (x / TILE_SIZE).floor() * TILE_SIZE + TILE_SIZE / 2.0;
+                        let ty = (y / TILE_SIZE).floor() * TILE_SIZE + TILE_SIZE / 2.0;
+                        commands.spawn((
+                            ssr_core::Door {
+                                open: false,
+                                position: [tx, ty],
+                                access: None,
+                            },
+                            DoorAuto {
+                                close_in: AUTO_CLOSE_SECS,
+                            },
+                            Consumer {
+                                draw_kw: ssr_core::power::DOOR_DRAW_KW,
+                            },
+                            Powered(true),
+                            ItemPosition([tx, ty]),
+                            Replicate::to_clients(NetworkTarget::All),
+                            Rooms::default(),
+                        ));
+                        produced += 1;
+                        continue;
+                    }
                     let mut entity = commands.spawn((
                         ssr_core::structures::Structure {
                             proto: item_id.to_string(),
@@ -1949,11 +1999,18 @@ fn run_admin_command(
                         Replicate::to_clients(NetworkTarget::All),
                         Rooms::default(),
                     ));
+                    // Структуры закрепляются за тайлом: позиция — центр тайла
+                    // (в SS14 маппинг по сетке).
+                    let (sx, sy) = (
+                        (x / TILE_SIZE).floor() * TILE_SIZE + TILE_SIZE / 2.0,
+                        (y / TILE_SIZE).floor() * TILE_SIZE + TILE_SIZE / 2.0,
+                    );
+                    entity.insert(ItemPosition([sx, sy]));
                     if info.solid {
                         entity.insert((
                             RigidBody::Static,
                             Collider::rectangle(info.half.0 * 2.0, info.half.1 * 2.0),
-                            Position(Vector::new(x, y)),
+                            Position(Vector::new(sx, sy)),
                             Rotation::default(),
                         ));
                     }
@@ -3916,6 +3973,28 @@ fn spawn_map_entities(
             lights += 1;
             continue;
         }
+        // Шлюзы карты — настоящие двери на центре тайла.
+        if id.contains("Airlock") {
+            commands.spawn((
+                ssr_core::Door {
+                    open: false,
+                    position: [*x, *y],
+                    access: None,
+                },
+                DoorAuto {
+                    close_in: AUTO_CLOSE_SECS,
+                },
+                Consumer {
+                    draw_kw: ssr_core::power::DOOR_DRAW_KW,
+                },
+                Powered(true),
+                ItemPosition([*x, *y]),
+                Replicate::to_clients(NetworkTarget::All),
+                Rooms::single(room.0),
+            ));
+            structures += 1;
+            continue;
+        }
         if let Some(info) = prototypes.structure(id).cloned() {
             let mut entity = commands.spawn((
                 ssr_core::structures::Structure {
@@ -4097,6 +4176,7 @@ fn process_actions(
                     &doors,
                     &world.atmospheres,
                     &world.catalogs,
+                    &world.prototypes,
                 );
                 tracing::info!(?player, %text, "examine");
                 if let Some(link) = players
@@ -4206,8 +4286,9 @@ fn process_actions(
                                     .get(item_entity)
                                     .map(|item| item.name.clone())
                                     .unwrap_or_default();
+                                let item_display = world.prototypes.display_name(&item_name);
                                 let mut unequip = ActionOption {
-                                    label: format!("Снять: {item_name}"),
+                                    label: format!("Снять: {item_display}"),
                                     action: ActionKind::Unequip {
                                         slot: slot.id().to_string(),
                                     },
@@ -4224,7 +4305,7 @@ fn process_actions(
                                 }
                                 options.push(unequip);
                                 options.push(ActionOption {
-                                    label: format!("Осмотреть: {item_name}"),
+                                    label: format!("Осмотреть: {item_display}"),
                                     action: ActionKind::Examine {
                                         entity: *item_bits,
                                     },
@@ -4466,6 +4547,7 @@ fn process_actions(
                     &doors,
                     &world.atmospheres,
                     &world.catalogs,
+                    &world.prototypes,
                 );
                 tracing::info!(?player, %text, "examine (verb)");
                 if let Some(link) = players

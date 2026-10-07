@@ -1258,6 +1258,7 @@ pub fn world_click(
     windows: Query<&Window>,
     camera: Single<(&Camera, &GlobalTransform), With<Camera2d>>,
     own: Res<OwnPlayerEntity>,
+    positions: Query<&PlayerPosition>,
     hands: Query<&Hands>,
     visuals: Query<(&RemotePlayerVisual, &Transform)>,
     containers: Query<(
@@ -1328,7 +1329,7 @@ pub fn world_click(
             tracing::info!(bits, "actions requested (item)");
             return;
         }
-        let target = player_under_cursor(&visuals, world);
+        let target = player_under_cursor(&visuals, &own, &positions, world);
         let (entity, tx, ty) = match target {
             Some((player_entity, _)) => {
                 let bits = entity_map
@@ -1394,7 +1395,11 @@ pub fn world_click(
     let active_item = own_hands(&own, &hands).and_then(|h| h.active_item());
 
     // 1) Игрок под курсором: атака; с Ctrl — передать предмет из руки.
-    if let Some((target_entity, _)) = player_under_cursor(&visuals, world) {
+    if let Some((target_entity, _)) = player_under_cursor(&visuals, &own, &positions, world) {
+        // ЛКМ по СЕБЕ не бьёт (иначе каждый клик по своему телу — урон себе).
+        if own.0 == Some(target_entity) {
+            return;
+        }
         let Some(map) = entity_map.as_deref() else {
             return;
         };
@@ -1469,17 +1474,30 @@ fn container_under_cursor(
     best.map(|(entity, _)| entity)
 }
 
-/// Ближайший другой игрок под точкой клика.
+/// Ближайший игрок под точкой клика — ВКЛЮЧАЯ СВОЕГО (вербы экипировки «Снять»
+/// у себя открываются ПКМ по своему телу; раньше тело не имело визуала в
+/// списке, и ПКМ по себе давала только вербы тайла).
+#[allow(clippy::type_complexity)]
 fn player_under_cursor(
     visuals: &Query<(&RemotePlayerVisual, &Transform)>,
+    own: &OwnPlayerEntity,
+    positions: &Query<&PlayerPosition>,
     world: Vec2,
 ) -> Option<(Entity, f32)> {
     let mut best: Option<(Entity, f32)> = None;
-    for (visual, transform) in visuals.iter() {
-        let distance = transform.translation.truncate().distance(world);
-        if distance <= 32.0 && best.is_none_or(|(_, d)| distance < d) {
-            best = Some((visual.player, distance));
+    let mut consider = |entity: Entity, point: Vec2| {
+        let distance = point.distance(world);
+        if distance <= 32.0 && best.as_ref().is_none_or(|(_, d)| distance < *d) {
+            best = Some((entity, distance));
         }
+    };
+    if let Some(own_entity) = own.0
+        && let Ok(position) = positions.get(own_entity)
+    {
+        consider(own_entity, Vec2::from_array(position.0));
+    }
+    for (visual, transform) in visuals.iter() {
+        consider(visual.player, transform.translation.truncate());
     }
     best
 }
