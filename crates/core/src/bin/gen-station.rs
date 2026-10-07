@@ -240,6 +240,7 @@ fn main() {
 
     let layout = MapLayout {
         name: "station".into(),
+        entities: Vec::new(),
         spawn_points: spawns.iter().map(|(tx, ty)| center(*tx, *ty)).collect(),
         doors: all_doors.iter().map(|(tx, ty)| center(*tx, *ty)).collect(),
         door_access: vec![

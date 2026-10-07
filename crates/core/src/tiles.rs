@@ -191,6 +191,10 @@ pub struct MapFile {
     /// Генераторы (T4.4): (x, y, кВт).
     #[serde(default)]
     pub generators: Vec<(f32, f32, f32)>,
+    /// Сущности карты из сборки: (id прототипа, x, y) — лампы, столы, шкафы,
+    /// предметы. Спавнит сервер тем же правилом, что команда `spawn`.
+    #[serde(default)]
+    pub entities: Vec<(String, f32, f32)>,
     /// Лампы (T4.4): центры тайлов.
     #[serde(default)]
     pub lights: Vec<(f32, f32)>,
@@ -214,6 +218,9 @@ pub struct MapLayout {
     pub door_access: Vec<DoorAccess>,
     pub cables: Vec<(f32, f32)>,
     pub generators: Vec<(f32, f32, f32)>,
+    /// Сущности карты (save): (прототип, x, y).
+    #[serde(default)]
+    pub entities: Vec<(String, f32, f32)>,
     pub lights: Vec<(f32, f32)>,
 }
 
@@ -241,6 +248,7 @@ impl MapFile {
             cables,
             generators,
             lights,
+            entities,
         } = layout;
         let file = Self {
             name,
@@ -250,6 +258,7 @@ impl MapFile {
             cables,
             generators,
             lights,
+            entities,
             chunks: chunks
                 .iter()
                 .map(|c| MapChunkFile {
@@ -348,6 +357,7 @@ mod tests {
                 cables: vec![(0.0, 16.0), (32.0, 16.0)],
                 generators: vec![(0.0, 16.0, 20.0)],
                 lights: vec![(32.0, 16.0)],
+                entities: vec![],
             },
             &chunks,
         )
@@ -379,6 +389,7 @@ mod tests {
             cables: vec![],
             generators: vec![],
             lights: vec![],
+            entities: vec![],
             chunks: vec![MapChunkFile {
                 coords: (0, 0),
                 rows: vec![".".to_string()],

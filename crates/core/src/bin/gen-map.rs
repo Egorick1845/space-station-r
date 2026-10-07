@@ -71,6 +71,7 @@ fn main() {
             cables,
             generators,
             lights,
+            entities: Vec::new(),
         },
         &chunks,
     )

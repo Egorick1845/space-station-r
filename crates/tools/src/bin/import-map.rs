@@ -76,6 +76,7 @@ fn main() {
     // --- Сущности: стены, двери, точки спавна ---
     let mut spawn_points = Vec::new();
     let mut doors = Vec::new();
+    let mut map_entities: Vec<(String, f32, f32)> = Vec::new();
     if let Some(entities) = root["entities"].as_sequence() {
         for group in entities {
             let proto = group["proto"].as_str().unwrap_or_default();
@@ -83,7 +84,9 @@ fn main() {
                 continue;
             };
             let kind = classify_proto(proto);
-            if kind == ProtoKind::Ignored {
+            // Игнорируем группу целиком только если НИ ОДНА сущность не
+            // переносится (иначе мебель/шкафы внутри Ignored-групп терялись).
+            if kind == ProtoKind::Ignored && map_entity(proto).is_none() {
                 counters.skipped_protos += list.len() as u64;
                 continue;
             }
@@ -114,7 +117,15 @@ fn main() {
                         spawn_points.push((x * TILE_UNITS, y * TILE_UNITS));
                         counters.spawns += 1;
                     }
-                    ProtoKind::Ignored => {}
+                    ProtoKind::Ignored => {
+                        // Сущности карты: лампы, мебель, шкафы, предметы.
+                        if let Some(id) = map_entity(proto) {
+                            map_entities.push((id, x * TILE_UNITS, y * TILE_UNITS));
+                            counters.entities += 1;
+                        } else {
+                            counters.skipped_protos += 1;
+                        }
+                    }
                 }
             }
         }
@@ -156,6 +167,7 @@ fn main() {
             name,
             spawn_points: spawn_points.clone(),
             doors: doors.clone(),
+            entities: map_entities,
             ..Default::default()
         },
         &chunk_list,
@@ -163,11 +175,13 @@ fn main() {
     .expect("save map");
     println!(
         "карта сохранена: {output}\n  чанков: {}\n  стен: {}\n  дверей: {}\n  спавнов: {}\n  \
+         сущностей карты: {},
          пропущено сущностей: {} (без Transform: {})",
         chunk_list.len(),
         counters.walls,
         doors.len(),
         spawn_points.len(),
+        counters.entities,
         counters.skipped_protos,
         counters.without_transform
     );
@@ -180,6 +194,7 @@ struct Report {
     doors: u64,
     spawns: u64,
     skipped_protos: u64,
+    entities: u64,
     without_transform: u64,
 }
 
@@ -193,7 +208,9 @@ enum ProtoKind {
 
 /// Классификация прототипа SS14 для нашего базового мира.
 fn classify_proto(proto: &str) -> ProtoKind {
-    if proto.starts_with("Wall") {
+    // Окна герметичны в SS14 (`Window*`/`Grille*` — блокируют атмосферу):
+    // без них импортированные карты дырявят вакуум в комнаты.
+    if proto.starts_with("Wall") || proto.contains("Window") || proto.contains("Grille") {
         ProtoKind::Wall
     } else if proto.contains("Airlock") || proto.starts_with("Door") || proto.contains("Windoor") {
         ProtoKind::Door
@@ -204,9 +221,76 @@ fn classify_proto(proto: &str) -> ProtoKind {
     }
 }
 
+/// Сущности карты для спавна (лампы, столы, шкафы, предметы):
+/// `None` — не переносим (маркеры, атмосферные трубы, кабели — у нас свои).
+fn map_entity(proto: &str) -> Option<String> {
+    // Лампы → наш Poweredlight-аналог (Light в энергосистеме).
+    if proto.starts_with("Poweredlight") || proto.starts_with("Lamp") {
+        return Some("light".to_string());
+    }
+    // Столы и мебель — структуры (PlaceableSurface/IconSmooth).
+    if proto.starts_with("Table")
+        || proto.starts_with("Chair")
+        || proto.starts_with("ComfyChair")
+        || proto.starts_with("OfficeChair")
+        || proto.starts_with("SeatBase")
+        || proto.starts_with("Star")
+    {
+        return Some(proto.to_string());
+    }
+    // Шкафы/ящики — структуры-контейнеры (EntityStorage: высыпание/всасывание).
+    if proto.starts_with("Locker")
+        || proto.starts_with("Cabinet")
+        || proto.starts_with("Crate")
+        || proto.starts_with("WoodenCrate")
+        || proto.starts_with("Toolbox")
+    {
+        return Some(proto.to_string());
+    }
+    // Медицина/наука/инженерия — мебель и машины из ProtoCatalog-структур.
+    if proto.starts_with("MedicalBed")
+        || proto.starts_with("OperatingTable")
+        || proto.starts_with("ChemDispenser")
+        || proto.starts_with("ChemMaster")
+        || proto.starts_with("Protolathe")
+        || proto.starts_with("CloningPod")
+        || proto.starts_with("Morgue")
+        || proto.starts_with("Crematorium")
+        || proto.starts_with("SMES")
+        || proto.starts_with("Substation")
+        || proto.starts_with("DebugGenerator")
+        || proto.starts_with("DebugAPC")
+        || proto.starts_with("GravityGenerator")
+        || proto.starts_with("AirAlarm")
+        || proto.starts_with("HighSecDoor")
+        || proto.starts_with("Altar")
+        || proto.starts_with("VendingMachine")
+    {
+        return Some(proto.to_string());
+    }
+    // Предметы: оружие, броня, медкиты, инструменты, ручные лампы.
+    if proto.starts_with("Weapon")
+        || proto.starts_with("Medkit")
+        || proto.starts_with("Flashlight")
+        || proto.starts_with("Crowbar")
+        || proto.starts_with("Wrench")
+        || proto.starts_with("Screwdriver")
+        || proto.starts_with("Multitool")
+        || proto.starts_with("Welder")
+        || proto.starts_with("Magazine")
+        || proto.starts_with("Box")
+        || proto.starts_with("Grenade")
+    {
+        return Some(proto.to_string());
+    }
+    None
+}
+
 /// Тип нашего тайла по имени тайла SS14.
 fn tile_kind(name: &str) -> TileType {
-    if name.starts_with("Space") {
+    if name.starts_with("Space") || name.starts_with("Lattice") {
+        // Решётка в SS14 открыта космосу (вакуум): иначе импортированные карты
+        // дырявят атмосферу комнат через наружные леса.
         TileType::Space
     } else if name.starts_with("Wall") {
         TileType::Wall

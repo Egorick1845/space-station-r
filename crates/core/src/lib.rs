@@ -26,6 +26,7 @@ pub mod rsi;
 pub mod ss14_proto;
 pub mod stamina;
 pub mod structures;
+pub mod ss14map;
 pub mod tiles;
 pub mod verbs;
 pub mod weapons;

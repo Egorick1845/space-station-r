@@ -29,7 +29,7 @@ use ssr_core::inventory::{
 use ssr_core::mechanics::{
         FacialHair, Hair, PlayerName, Sex, facial_hair_style_names, hair_style_names,
     };
-use ssr_core::mechanics::{Ghost, KNOCKDOWN_SECS, KnockedDown, Sprinting};
+use ssr_core::mechanics::{Ghost, KnockedDown, Sprinting};
 use ssr_core::power::{Cable, Consumer, Generator, Light, Powered};
 use ssr_core::roles::{Access, PlayerRole, RoleSet};
 use ssr_core::tiles::{MapFile, TileChunkData, TileType};
@@ -146,6 +146,7 @@ fn main() {
             init_atmosphere,
             spawn_walls,
             spawn_containers,
+            spawn_map_entities,
             spawn_load_test,
             spawn_collision_test,
         )
@@ -514,6 +515,10 @@ struct GameMap {
     cables: Vec<(f32, f32)>,
     generators: Vec<(f32, f32, f32)>,
     lights: Vec<(f32, f32)>,
+    /// Сущности карты из сборки: лампы, мебель, шкафы, предметы.
+    entities: Vec<(String, f32, f32)>,
+    /// Двери карты (юниты) — герметичные тайлы атмосферы.
+    doors: Vec<(f32, f32)>,
 }
 
 /// Курсор выдачи точек спавна (T2.4): каждый новый игрок получает следующую
@@ -676,6 +681,9 @@ struct Atmospheres {
     gas: Vec<Gas>,
     /// Типы тайлов (правила обмена: стена не пропускает, космос — сток).
     tiles: Vec<TileType>,
+    /// Тайлы дверей (герметичны, как закрытый шлюз в SS14 — lite-атмосфера
+    /// считает их всегда закрытыми).
+    doors: std::collections::HashSet<(i32, i32)>,
     /// (координаты чанка) → сущность реплицируемой атмосферы.
     entities: HashMap<(i32, i32), Entity>,
 }
@@ -977,6 +985,17 @@ fn init_atmosphere(
     atmospheres.size = (width, height);
     atmospheres.tiles = tiles;
     atmospheres.gas = gas;
+    // Двери — герметичные тайлы (закрытый шлюз не пропускает атмосферу).
+    atmospheres.doors = map
+        .doors
+        .iter()
+        .map(|(x, y)| {
+            (
+                (*x / TILE_SIZE).floor() as i32,
+                (*y / TILE_SIZE).floor() as i32,
+            )
+        })
+        .collect();
     tracing::info!(
         width,
         height,
@@ -1013,6 +1032,15 @@ fn simulate_atmosphere(
             }
             // Пары (восток, север) — каждая пара обрабатывается один раз.
             for (dx, dy) in [(1i32, 0i32), (0, 1)] {
+                // Дверь герметична: через дверной тайл обмена нет (lite-модель
+                // считает шлюзы закрытыми).
+                if atmospheres.doors.contains(&(atmospheres.min.0 + x, atmospheres.min.1 + y))
+                    || atmospheres
+                        .doors
+                        .contains(&(atmospheres.min.0 + x + dx, atmospheres.min.1 + y + dy))
+                {
+                    continue;
+                }
                 let index_b =
                     atmospheres.index(atmospheres.min.0 + x + dx, atmospheres.min.1 + y + dy);
                 let (pressure_b, oxygen_b, exchange) = match index_b {
@@ -1440,10 +1468,18 @@ fn load_map(
     mut allocator: ResMut<RoomAllocator>,
     mut map_index: ResMut<MapIndex>,
 ) {
-    // SSR_MAP=imported_aspid.ron — выбрать карту (файлы в assets/maps/).
-    let map_name = std::env::var("SSR_MAP").unwrap_or_else(|_| "station.ron".to_string());
+    // SSR_MAP=имя файла в assets/maps — RON или YAML КАРТЫ SS14 НАПРЯМУЮ
+    // (ssr_core::ss14map: грид-локальные координаты + смещение грида — иначе
+    // двери/спавны/сущности попадали в космос и комнаты «разгерметизировались»).
+    // По умолчанию — Dev-карта из сборки (SS14 стартует на Dev).
+    let map_name = std::env::var("SSR_MAP").unwrap_or_else(|_| "dev_map.yml".to_string());
     let path = ssr_core::assets_root().join("maps").join(&map_name);
-    let file = MapFile::load(&path).unwrap_or_else(|e| panic!("{e}"));
+    let file = if map_name.ends_with(".yml") || map_name.ends_with(".yaml") {
+        // Карта SS14 читается НАПРЯМУЮ (ss14map: грид-смещения, сущности).
+        ssr_core::ss14map::load(&path).unwrap_or_else(|e| panic!("{e}"))
+    } else {
+        MapFile::load(&path).unwrap_or_else(|e| panic!("{e}"))
+    };
     let chunks: Vec<TileChunkData> = file
         .to_chunks()
         .unwrap_or_else(|e| panic!("{e}"))
@@ -1503,6 +1539,8 @@ fn load_map(
     );
     commands.insert_resource(GameMap {
         spawn_points: file.spawn_points,
+        entities: file.entities,
+        doors: file.doors,
         cables: file.cables,
         generators: file.generators,
         lights: file.lights,
@@ -1992,6 +2030,9 @@ fn run_admin_command(
         }
         "heal" => {
             commands.entity(player).insert(Health::default());
+            // Оживление: снятое лежание (смерть теперь оставляет тело лежать).
+            commands.entity(player).remove::<KnockedDown>();
+            commands.entity(player).remove::<RespawnPending>();
             "здоровье восстановлено".to_string()
         }
         "tpto" => {
@@ -2087,6 +2128,11 @@ fn become_ghost(
     let observer = commands
         .spawn((
             Ghost,
+            // Спрайт призрака: клиент выбирает расу по компоненту Species —
+            // без неё наблюдатель рисовался обычным игроком (жалоба владельца).
+            Species {
+                id: "Ghost".to_string(),
+            },
             GhostObserver { body },
             // Наблюдатель летает (Kinematic без коллайдера — сквозь стены),
             // скорости 8/12 из observer.yml читает система движения.
@@ -3841,6 +3887,74 @@ fn spawn_walls(mut commands: Commands, map: Res<GameMap>, mut index: ResMut<MapI
     tracing::info!(walls = total, "map wall colliders spawned");
 }
 
+/// Спавн сущностей карты (лампы, мебель, шкафы, предметы) тем же правилом,
+/// что и команда `spawn`: структура из ProtoCatalog — Structure, прототип
+/// есть — предмет на полу, `light` — лампа энергосистемы.
+fn spawn_map_entities(
+    mut commands: Commands,
+    map: Res<GameMap>,
+    prototypes: Res<ProtoCatalog>,
+    mut chunk_rooms: ResMut<ChunkRooms>,
+    mut allocator: ResMut<RoomAllocator>,
+) {
+    let mut structures = 0usize;
+    let mut items = 0usize;
+    let mut lights = 0usize;
+    for (id, x, y) in &map.entities {
+        let room = ItemRoom(chunk_rooms.room_for(chunk_coords(*x, *y), &mut allocator));
+        if id == "light" {
+            commands.spawn((
+                Light::default(),
+                Consumer {
+                    draw_kw: ssr_core::power::LIGHT_DRAW_KW,
+                },
+                Powered(true),
+                ItemPosition([*x, *y]),
+                Replicate::to_clients(NetworkTarget::All),
+                Rooms::single(room.0),
+            ));
+            lights += 1;
+            continue;
+        }
+        if let Some(info) = prototypes.structure(id).cloned() {
+            let mut entity = commands.spawn((
+                ssr_core::structures::Structure {
+                    proto: id.clone(),
+                    smooth: info.smooth.clone(),
+                    surface: info.surface,
+                    solid: info.solid,
+                },
+                ItemPosition([*x, *y]),
+                Replicate::to_clients(NetworkTarget::All),
+                Rooms::single(room.0),
+            ));
+            if info.solid {
+                entity.insert((
+                    RigidBody::Static,
+                    Collider::rectangle(info.half.0 * 2.0, info.half.1 * 2.0),
+                    Position(Vector::new(*x, *y)),
+                    Rotation::default(),
+                ));
+            }
+            structures += 1;
+            continue;
+        }
+        if prototypes.contains(id) {
+            commands.spawn((
+                Item {
+                    name: id.clone(),
+                },
+                HeldBy { player: 0 },
+                ItemPosition([*x, *y]),
+                Replicate::to_clients(NetworkTarget::All),
+                Rooms::single(room.0),
+            ));
+            items += 1;
+        }
+    }
+    tracing::info!(structures, items, lights, "map entities spawned");
+}
+
 /// Запросы здоровья/доступа/питания для обработки действий (сокращает
 /// число аргументов системы: у функций-систем лимит 16 параметров).
 #[derive(bevy::ecs::system::SystemParam)]
@@ -4903,13 +5017,17 @@ fn apply_damage(
     }
 }
 
-/// Смерть (T4.1): Health обратно к максимуму, тело на точку спавна, лог.
+/// Смерть (T4.1) как в SS14: тело ОСТАЁТСЯ лежать (никакого респавна и
+/// телепорта на спавн — жалоба владельца), управление переходит призраку
+/// (наблюдатель, как `GhostSystem.OnGhostStartup`).
+#[allow(clippy::too_many_arguments)]
 fn respawn_dead(
     mut commands: Commands,
     mut death_events: MessageReader<DeathEvent>,
-    mut healths: Query<&mut Health>,
-    players: Res<Players>,
+    positions: Query<&PlayerPosition>,
+    mut players: ResMut<Players>,
     names: Query<&ssr_core::mechanics::PlayerName>,
+    mut senders: Query<(Entity, &mut MessageSender<ServerMessage>), With<Connected>>,
     mut system_chat: ResMut<SystemChatQueue>,
 ) {
     for event in death_events.read() {
@@ -4946,21 +5064,24 @@ fn respawn_dead(
                 .push(format!("{victim} погиб от рук {killer}")),
             None => system_chat.0.push(format!("{victim} погиб")),
         }
-        if let Ok(mut health) = healths.get_mut(event.target) {
-            health.current = health.max;
+        // Тело остаётся на месте и лежит навсегда (мёртвое): поднять может
+        // только админский heal/rejuvenate.
+        commands.entity(event.target).insert(KnockedDown {
+            seconds: f32::MAX,
+        });
+        // Управление переходит призраку-наблюдателю (OnGhostStartup в сборке).
+        if let Some(entry) = players
+            .entries
+            .iter_mut()
+            .find(|entry| entry.player == event.target)
+        {
+            let observer = become_ghost(&mut commands, entry, &positions);
+            send_welcome(entry.link, observer, &mut senders);
         }
-        // «Падение»: игрок лежит KNOCKDOWN_SECS, потом возвращается на спавн
-        // (телепорт — в knockdown_tick, чтобы было видно падение).
-        commands.entity(event.target).insert((
-            KnockedDown {
-                seconds: KNOCKDOWN_SECS,
-            },
-            RespawnPending,
-        ));
         tracing::info!(
             target = ?event.target,
             killer = ?event.killer,
-            "player died and fell down"
+            "player died: body stays, control moved to ghost"
         );
     }
 }

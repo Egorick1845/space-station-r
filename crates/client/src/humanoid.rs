@@ -70,7 +70,7 @@ pub struct StunStars {
 }
 
 /// Смещение слоя звёзд по Y (`StunSystem`: `offset (0, 0.3125)`).
-const STUN_STARS_OFFSET_Y: f32 = 0.3125;
+const STUN_STARS_OFFSET_Y: f32 = 0.62;
 /// Ключ спрайта звёзд (`StunVisualsComponent`: `Mobs/Effects/stunned.rsi#stunned`).
 const STUN_STARS_KEY: &str = "sprites/ss14/Mobs/Effects/stunned.rsi#stunned";
 /// z слоя звёзд: выше всех слоёв тела и одежды (`StunVisualLayers.StamCrit`).
@@ -746,6 +746,9 @@ pub fn update_facing(
 /// при повороте слои пересобираются заново, поэтому одежда гарантированно смотрит
 /// туда же, куда и тело (была жалоба, что одежда «поворачивается отдельно»).
 type WornSignature = (
+    // Призрачность: тело-призрак перерисовывается без одежды-детей, и после
+    // возврата в тело слои нужно пересоздать (жалоба «тело голое»).
+    bool,
     Vec<(ssr_core::clothing::ClothingSlot, u64)>,
     Option<(String, [u8; 3])>,
     Option<(String, [u8; 3])>,
@@ -764,6 +767,7 @@ pub struct WornContext<'w, 's> {
     content: Res<'w, crate::content::ClientContent>,
     items: Query<'w, 's, &'static ssr_core::inventory::Item>,
     entity_map: Option<Res<'w, bevy_replicon::shared::server_entity_map::ServerEntityMap>>,
+    ghosts: Query<'w, 's, &'static ssr_core::mechanics::Ghost>,
 }
 
 impl WornContext<'_, '_> {
@@ -814,6 +818,7 @@ pub fn sync_worn_clothes(
             .map(|facing| facing.0)
             .unwrap_or_default();
         let signature = (
+            context.ghosts.get(entity).is_ok(),
             clothing.slots.clone(),
             hair.map(|hair| (hair.style.clone(), hair.color)),
             beard.map(|beard| (beard.style.clone(), beard.color)),
@@ -1100,7 +1105,7 @@ pub struct HealthBarOverlay {
     owner: Entity,
 }
 
-const OVERHEAD_Y: f32 = 0.38;
+const OVERHEAD_Y: f32 = 0.62;
 const OVERHEAD_Z: f32 = 0.6;
 const JOB_ICONS_PREFIX: &str = "sprites/ss14/Interface/Misc/job_icons.rsi#";
 const SSD_ICON_KEY: &str = "sprites/ss14/Effects/ssd.rsi#default0";
