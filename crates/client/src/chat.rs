@@ -3,7 +3,7 @@
 //! (шрифт 12) и поле ввода снизу.
 //!
 //! Каналы и цвета как в движке: OOC — `LightSkyBlue`, LOOC — `MediumTurquoise`,
-//! системные — серые. Ввод открывается по T, отправка — Enter, выход — Esc;
+//! системные — Orange, речь/эмоции — LightGray, шёпот — DarkGray. Ввод открывается по T, отправка — Enter, выход — Esc;
 //! пока чат в фокусе, игровой ввод (ходьба, действия) не работает.
 
 use bevy::input::ButtonState;
@@ -52,8 +52,7 @@ pub struct ChatState {
     pub focused: bool,
     /// На сколько строк прокручена история вверх от конца.
     pub scroll: usize,
-    /// Выбранный канал кнопкой-селектором (`ChannelSelectorPopup`: у нас есть
-    /// только OOC и LOOC, поэтому переключаются они).
+    /// Выбранный канал кнопкой-селектором (`ChannelSelectorPopup`).
     pub channel: ChatChannel,
 }
 
@@ -64,7 +63,8 @@ impl Default for ChatState {
             input: String::new(),
             focused: false,
             scroll: 0,
-            channel: ChatChannel::Ooc,
+            // В сборке селектор по умолчанию — Local (речь персонажа).
+            channel: ChatChannel::Local,
         }
     }
 }
@@ -143,28 +143,71 @@ fn channel_color(channel: ChatChannel) -> Color {
         ChatChannel::System => Color::srgb(1.0, 0.647, 0.0), // Orange
         ChatChannel::Dead => Color::srgb(0.576, 0.439, 0.859), // MediumPurple
         ChatChannel::AdminChat => Color::srgb(1.0, 0.412, 0.706), // HotPink
+        ChatChannel::Whisper => Color::srgb(0.663, 0.663, 0.663), // DarkGray
+        // `_ => Color.LightGray` — речь и эмоции.
+        ChatChannel::Local | ChatChannel::Emotes => Color::srgb(0.827, 0.827, 0.827),
     }
 }
 
-/// Кнопка-селектор переключает каналы по кругу (в сборке `ChannelSelectorPopup`
-/// перечисляет доступные: OOC, LOOC, Dead, Admin).
-const CHANNEL_CYCLE: [ChatChannel; 4] = [
-    ChatChannel::Ooc,
+/// Цвет кнопки-селектора — `ChannelSelectorButton.ChannelSelectColor`: у
+/// Local/Whisper/Emotes это `_ => Color.DarkGray`, остальные — как строки.
+fn selector_color(channel: ChatChannel) -> Color {
+    if channel.is_ic() {
+        Color::srgb(0.663, 0.663, 0.663)
+    } else {
+        channel_color(channel)
+    }
+}
+
+/// Кнопка-селектор переключает каналы по кругу в порядке `ChatSelectChannel`
+/// сборки: Local, Whisper, LOOC, OOC, Emotes, Dead, Admin (рации пока нет).
+const CHANNEL_CYCLE: [ChatChannel; 7] = [
+    ChatChannel::Local,
+    ChatChannel::Whisper,
     ChatChannel::Looc,
+    ChatChannel::Ooc,
+    ChatChannel::Emotes,
     ChatChannel::Dead,
     ChatChannel::AdminChat,
 ];
 
-/// Подпись кнопки канала (`chat-channel-humanized-*` в локали сборки).
+/// Подпись кнопки канала (`hud-chatbox-select-channel-*` в ru-RU локали сборки).
 fn channel_label(channel: ChatChannel) -> &'static str {
     match channel {
+        ChatChannel::Local => "Рядом",
+        ChatChannel::Whisper => "Шёпот",
+        ChatChannel::Emotes => "Эмоции",
         ChatChannel::Ooc => "OOC",
         ChatChannel::Looc => "LOOC",
-        ChatChannel::Dead => "DEAD",
-        ChatChannel::AdminChat => "ADMIN",
+        ChatChannel::Dead => "Мёртвые",
+        ChatChannel::AdminChat => "Админ",
         ChatChannel::System => "SYS",
     }
 }
+
+/// Префикс в начале строки выбирает канал — `ChatUIController.PrefixToChannel`
+/// и константы `SharedChatSystem`: `>` речь, `,` шёпот, `%`/`*` эмоции,
+/// `_` LOOC, `[` OOC, `\` мёртвые, `]` админ. Без префикса — канал селектора.
+pub fn parse_prefix(text: &str, selected: ChatChannel) -> (ChatChannel, String) {
+    let mut chars = text.chars();
+    let channel = match chars.next() {
+        Some('>') => Some(ChatChannel::Local),
+        Some(',') => Some(ChatChannel::Whisper),
+        Some('%') | Some('*') => Some(ChatChannel::Emotes),
+        Some('_') => Some(ChatChannel::Looc),
+        Some('[') => Some(ChatChannel::Ooc),
+        Some('\\') => Some(ChatChannel::Dead),
+        Some(']') => Some(ChatChannel::AdminChat),
+        _ => None,
+    };
+    match channel {
+        Some(channel) => (channel, chars.as_str().trim().to_string()),
+        None => (selected, text.trim().to_string()),
+    }
+}
+
+/// Подсказка в пустом поле ввода.
+const INPUT_HINT: &str = "T — писать; , шёпот, * эмоция, _ LOOC, [ OOC";
 
 /// Создаёт панель чата при входе в игру.
 pub fn spawn_chat(
@@ -240,9 +283,9 @@ pub fn spawn_chat(
                         BackgroundColor(ui::GLASS_BUTTON),
                     ))
                     .with_child((
-                        Text::new("OOC"),
+                        Text::new(channel_label(ChatChannel::Local)),
                         super::chat_text_font(),
-                        TextColor(channel_color(ChatChannel::Ooc)),
+                        TextColor(selector_color(ChatChannel::Local)),
                     ));
                     // Поле ввода кликабельно: щелчок открывает набор текста,
                     // как LineEdit в сборке (раньше работала только клавиша T).
@@ -258,7 +301,7 @@ pub fn spawn_chat(
                     ))
                     .with_child((
                         ChatInputText,
-                        Text::new("Нажмите T или щёлкните, чтобы писать; _ — LOOC, [ — OOC"),
+                        Text::new(INPUT_HINT),
                         super::chat_text_font(),
                         TextColor(ui::TEXT_MUTED),
                     ));
@@ -288,7 +331,7 @@ pub fn chat_channel_button(
         tracing::info!(channel = ?chat.channel, "chat channel selected");
     }
     let wanted = channel_label(chat.channel);
-    let wanted_color = channel_color(chat.channel);
+    let wanted_color = selector_color(chat.channel);
     for (_, children) in buttons_q.iter_mut() {
         for child in children.iter() {
             let Ok((mut label, mut color)) = texts.get_mut(child) else {
@@ -337,7 +380,7 @@ pub fn chat_ghost_channel(
     chat.channel = if ghost {
         ChatChannel::Dead
     } else {
-        ChatChannel::Ooc
+        ChatChannel::Local
     };
 }
 
@@ -467,16 +510,7 @@ pub fn chat_input(
         let text = std::mem::take(&mut chat.input);
         let text = text.trim().to_string();
         if !text.is_empty() {
-            // Префиксы каналов — как `SharedChatSystem` сборки: `_` — LOOC,
-            // `[` — OOC. Без префикса сообщение уходит в выбранный селектором
-            // канал (по умолчанию OOC).
-            let (channel, message) = if let Some(rest) = text.strip_prefix('_') {
-                (ChatChannel::Looc, rest.trim().to_string())
-            } else if let Some(rest) = text.strip_prefix('[') {
-                (ChatChannel::Ooc, rest.trim().to_string())
-            } else {
-                (chat.channel, text.clone())
-            };
+            let (channel, message) = parse_prefix(&text, chat.channel);
             if !message.is_empty() {
                 for mut sender in senders.iter_mut() {
                     sender.send::<GameChannel>(ClientMessage::Chat {
@@ -493,10 +527,7 @@ pub fn chat_input(
     let (label, color) = if chat.focused {
         (format!("{}_", chat.input), ui::TEXT)
     } else {
-        (
-            "Нажмите T или щёлкните, чтобы писать; _ — LOOC, [ — OOC".to_string(),
-            ui::TEXT_MUTED,
-        )
+        (INPUT_HINT.to_string(), ui::TEXT_MUTED)
     };
     for (mut node_text, mut node_color) in text.iter_mut() {
         if node_text.0 != label {
@@ -568,6 +599,22 @@ pub fn chat_test_mode(
         chat.system("Тестовое системное сообщение");
         tracing::info!("chat-test: system line added");
     }
+    // IC-речь: сервер оборачивает каждую реплику (`Имя говорит, "…"`).
+    if state.1 == 3 && elapsed >= 10.0 {
+        state.1 = 4;
+        send(&mut senders, ChatChannel::Local, "есть кто живой?");
+        tracing::info!("chat-test: Local sent");
+    }
+    if state.1 == 4 && elapsed >= 11.0 {
+        state.1 = 5;
+        send(&mut senders, ChatChannel::Whisper, "тихо, тут кто-то есть");
+        tracing::info!("chat-test: Whisper sent");
+    }
+    if state.1 == 5 && elapsed >= 12.0 {
+        state.1 = 6;
+        send(&mut senders, ChatChannel::Emotes, "машет рукой");
+        tracing::info!("chat-test: Emotes sent");
+    }
 }
 
 #[cfg(test)]
@@ -591,5 +638,42 @@ mod tests {
         // Другой канал — не коалесцируется даже с тем же текстом.
         chat.push(ChatChannel::Looc, "Игрок", "другое");
         assert_eq!(chat.lines.len(), 3);
+    }
+
+    /// Префиксы каналов — `ChatUIController.PrefixToChannel` сборки.
+    #[test]
+    fn prefixes_select_channel() {
+        let sel = ChatChannel::Local;
+        assert_eq!(
+            parse_prefix("привет", sel),
+            (ChatChannel::Local, "привет".into())
+        );
+        assert_eq!(
+            parse_prefix(">привет", ChatChannel::Ooc).0,
+            ChatChannel::Local
+        );
+        assert_eq!(
+            parse_prefix(", тсс", sel),
+            (ChatChannel::Whisper, "тсс".into())
+        );
+        assert_eq!(parse_prefix("*машет", sel).0, ChatChannel::Emotes);
+        assert_eq!(parse_prefix("%машет", sel).0, ChatChannel::Emotes);
+        assert_eq!(parse_prefix("_ooc рядом", sel).0, ChatChannel::Looc);
+        assert_eq!(parse_prefix("[всем", sel).0, ChatChannel::Ooc);
+        assert_eq!(parse_prefix("\\дух", sel).0, ChatChannel::Dead);
+        assert_eq!(parse_prefix("]админы", sel).0, ChatChannel::AdminChat);
+    }
+
+    /// Селектор по умолчанию — речь персонажа, а в цикле есть все IC-каналы.
+    #[test]
+    fn selector_defaults_to_local_and_cycles_ic_channels() {
+        assert_eq!(ChatState::default().channel, ChatChannel::Local);
+        for channel in [
+            ChatChannel::Local,
+            ChatChannel::Whisper,
+            ChatChannel::Emotes,
+        ] {
+            assert!(CHANNEL_CYCLE.contains(&channel));
+        }
     }
 }

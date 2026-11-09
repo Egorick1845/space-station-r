@@ -6,7 +6,8 @@
 use serde::{Deserialize, Serialize};
 
 /// Версия протокола. Несовпадение при рукопожатии = отказ соединения (проверка в T1.2).
-pub const PROTOCOL_VERSION: u32 = 13;
+/// v14 — IC-каналы чата (`Local`, `Whisper`, `Emotes`).
+pub const PROTOCOL_VERSION: u32 = 14;
 
 /// Порт игрового сервера по умолчанию (T1.2).
 pub const DEFAULT_SERVER_PORT: u16 = 7777;
@@ -319,6 +320,23 @@ pub enum ChatChannel {
     Dead,
     /// Админ-чат (`ChatChannel.AdminChat`, HotPink) — только для админов.
     AdminChat,
+    /// Речь персонажа (`ChatChannel.Local`, LightGray): слышат в радиусе
+    /// `VoiceRange = 10` тайлов, сквозь стены. Сервер шлёт готовую строку
+    /// `Имя говорит, "…"` с пустым `from`.
+    Local,
+    /// Шёпот (`ChatChannel.Whisper`, DarkGray): разборчиво до 2 тайлов,
+    /// зашумлённо до 5 (`ssr_core::speech`).
+    Whisper,
+    /// Эмоции (`ChatChannel.Emotes`, LightGray): `Имя текст`, видно в радиусе
+    /// 10 тайлов только в прямой видимости.
+    Emotes,
+}
+
+impl ChatChannel {
+    /// Канал речи персонажа (IC) — сервер оборачивает текст сам.
+    pub fn is_ic(self) -> bool {
+        matches!(self, Self::Local | Self::Whisper | Self::Emotes)
+    }
 }
 
 /// Сущность в снимке мира.
