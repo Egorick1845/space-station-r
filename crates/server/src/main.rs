@@ -1706,6 +1706,19 @@ fn ic_line_for_listener(
     }
 }
 
+/// Текст реплики над головой из строки чата этого слушателя (аналог
+/// `GetStringInsideTag(message, "BubbleContent")`): у речи и шёпота — то, что в
+/// кавычках (зашумлённое, если слушатель далеко), у эмоции — сам текст.
+fn bubble_text(channel: ChatChannel, line: &str, message: &str) -> String {
+    if channel == ChatChannel::Emotes {
+        return message.to_string();
+    }
+    match (line.find('"'), line.rfind('"')) {
+        (Some(start), Some(end)) if end > start => line[start + 1..end].to_string(),
+        _ => message.to_string(),
+    }
+}
+
 /// Генератор `[0, 1)` для зашумления шёпота (xorshift32, зерно — время).
 fn unit_roller() -> impl FnMut() -> f32 {
     let mut state = std::time::SystemTime::now()
@@ -2316,6 +2329,7 @@ fn send_system_to(
                 channel: ChatChannel::System,
                 from: String::new(),
                 text: text.to_string(),
+                bubble: None,
             });
         }
     }
@@ -3290,10 +3304,23 @@ fn handle_client_messages(
                             ) else {
                                 continue;
                             };
+                            let bubble = ssr_protocol::SpeechBubble {
+                                speaker: player.to_bits(),
+                                name: name.clone(),
+                                text: bubble_text(channel, &line, &message),
+                                kind: match channel {
+                                    ChatChannel::Whisper => ssr_protocol::BubbleKind::Whisper,
+                                    ChatChannel::Emotes => ssr_protocol::BubbleKind::Emote,
+                                    _ => ssr_protocol::BubbleKind::Say,
+                                },
+                                loud: channel == ChatChannel::Local
+                                    && ssr_core::speech::speech_verb(&message).bold,
+                            };
                             sender.send::<GameChannel>(ServerMessage::Chat {
                                 channel,
                                 from: String::new(),
                                 text: line,
+                                bubble: Some(bubble),
                             });
                             recipients += 1;
                         }
@@ -3356,14 +3383,44 @@ fn handle_client_messages(
                         if !audible {
                             continue;
                         }
+                        // LOOC над головой (`hud.show_looc_above_head` = true).
+                        let bubble =
+                            (channel == ChatChannel::Looc).then(|| ssr_protocol::SpeechBubble {
+                                speaker: player.to_bits(),
+                                name: name.clone(),
+                                text: text.clone(),
+                                kind: ssr_protocol::BubbleKind::Looc,
+                                loud: false,
+                            });
                         sender.send::<GameChannel>(ServerMessage::Chat {
                             channel,
                             from: name.clone(),
                             text: text.clone(),
+                            bubble,
                         });
                         recipients += 1;
                     }
                     tracing::info!(%name, ?channel, recipients, %text, "chat message");
+                }
+                ClientMessage::Typing { state } => {
+                    // `OnTypingChanged`: кто не может говорить (призрак) —
+                    // без облачка; иначе состояние уходит в реплицируемый
+                    // компонент на теле игрока.
+                    let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {
+                        continue;
+                    };
+                    let player = entry.player;
+                    use ssr_core::speech::TypingIndicator;
+                    let indicator = if sprint_state.ghosts.get(player).is_ok() {
+                        TypingIndicator::None
+                    } else {
+                        match state {
+                            ssr_protocol::TypingState::None => TypingIndicator::None,
+                            ssr_protocol::TypingState::Idle => TypingIndicator::Idle,
+                            ssr_protocol::TypingState::Typing => TypingIndicator::Typing,
+                        }
+                    };
+                    commands.entity(player).insert(indicator);
                 }
                 ClientMessage::Attack { target } => {
                     let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {

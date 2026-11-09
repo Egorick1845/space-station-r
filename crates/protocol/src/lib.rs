@@ -66,6 +66,8 @@ pub enum ClientMessage {
     Pickup { item: u64 },
     /// Сообщение в чат (ввод по T). LOOC слышат только рядом стоящие.
     Chat { channel: ChatChannel, text: String },
+    /// Индикатор набора (`TypingChangedEvent`): облачко над головой.
+    Typing { state: TypingState },
     /// Бросить предмет из рюкзака на пол (перетаскивание из окна в мир, SS14).
     DropItem { item: u64 },
     /// Надеть предмет: `slot` — целевой слот (одежда, карман, разгрузка).
@@ -302,7 +304,42 @@ pub enum ServerMessage {
         from: String,
         /// Текст сообщения.
         text: String,
+        /// Реплика над головой говорящего (Runechat); `None` — без неё.
+        bubble: Option<SpeechBubble>,
     },
+}
+
+/// Реплика над головой (`ChatUIController.AddSpeechBubble`): текст уже такой,
+/// каким его воспринял этот слушатель (шёпот издалека — зашумлён).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SpeechBubble {
+    /// Серверная сущность говорящего (bits).
+    pub speaker: u64,
+    /// Имя говорящего — от него цвет текста (`GetNameColor`).
+    pub name: String,
+    /// Текст реплики.
+    pub text: String,
+    /// Вид: речь, шёпот, эмоция или LOOC.
+    pub kind: BubbleKind,
+    /// Крик (`bold` у глагола) — крупный шрифт.
+    pub loud: bool,
+}
+
+/// Вид реплики (`SpeechBubble.SpeechType`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BubbleKind {
+    Say,
+    Whisper,
+    Emote,
+    Looc,
+}
+
+/// Состояние набора (`TypingIndicatorState`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TypingState {
+    None,
+    Idle,
+    Typing,
 }
 
 /// Канал чата. Цвета — `ChatChannelExtensions.TextColor` сборки

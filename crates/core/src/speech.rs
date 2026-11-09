@@ -205,9 +205,169 @@ pub fn line_of_sight(from: [f32; 2], to: [f32; 2], solid: impl Fn(i32, i32) -> b
     true
 }
 
+// ---------------------------------------------------------------- индикатор набора
+
+/// Состояние индикатора набора (`TypingIndicatorState`): облачко над головой.
+#[derive(
+    bevy::prelude::Component,
+    serde::Serialize,
+    serde::Deserialize,
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+)]
+pub enum TypingIndicator {
+    /// Чат не в фокусе — облачка нет.
+    #[default]
+    None,
+    /// Чат открыт, но текст давно не менялся — `idleState: default3`.
+    Idle,
+    /// Игрок печатает — `typingState: default0`.
+    Typing,
+}
+
+/// Через сколько секунд без нажатий «печатает» сменяется на «ждёт»
+/// (`TypingIndicatorSystem._typingTimeout`).
+pub const TYPING_TIMEOUT: f32 = 2.0;
+/// RSI и состояния прототипа `default` (`typing_indicator.yml`).
+pub const TYPING_RSI: &str = "sprites/ss14/Effects/speech.rsi";
+pub const TYPING_STATE: &str = "default0";
+pub const IDLE_STATE: &str = "default3";
+
+/// Состояние для отправки (`ClientUpdateTyping`): фокус чата + недавний ввод.
+pub fn typing_state(chat_focused: bool, typing: bool) -> TypingIndicator {
+    match (chat_focused, typing) {
+        (false, _) => TypingIndicator::None,
+        (true, true) => TypingIndicator::Typing,
+        (true, false) => TypingIndicator::Idle,
+    }
+}
+
+// ---------------------------------------------------------------- Runechat
+
+/// Сколько живёт реплика над головой (`SpeechBubble.TotalTime`).
+pub const BUBBLE_TOTAL_SECS: f32 = 4.0;
+/// Затухание в конце (`SpeechBubble.FadeTime`).
+pub const BUBBLE_FADE_OUT_SECS: f32 = 0.25;
+/// Появление (`RunechatSpeechBubble.FadeInTime`).
+pub const BUBBLE_FADE_IN_SECS: f32 = 0.15;
+/// Сколько реплик одновременно над головой (`ChatUIController.SpeechBubbleCap`).
+pub const BUBBLE_CAP: usize = 4;
+/// Максимальная ширина текста (`RunechatMaxWidth`), px.
+pub const BUBBLE_MAX_WIDTH: f32 = 200.0;
+/// Высота над точкой сущности (`EntityVerticalOffset`), тайлов.
+pub const BUBBLE_VERTICAL_OFFSET: f32 = 0.5;
+/// Цвет LOOC над головой (`RunechatSpeechBubble.LoocColor` = #48d1cc).
+pub const LOOC_BUBBLE_COLOR: [f32; 3] = [
+    0x48 as f32 / 255.0,
+    0xd1 as f32 / 255.0,
+    0xcc as f32 / 255.0,
+];
+
+/// Пауза до следующей реплики в очереди: `BubbleDelayBase + len * BubbleDelayFactor`
+/// (0.2 + len · 0.8/100).
+pub fn bubble_delay(message: &str) -> f32 {
+    0.2 + message.chars().count() as f32 * (0.8 / 100.0)
+}
+
+/// Размер шрифта Runechat в пикселях: базовый 12 pt (`chat.runechat_font_size`),
+/// шёпот `ScaleSize(9)`, крик `GetLoudSize` = 18 pt; pt → px ×96/72.
+pub fn bubble_font_px(whisper: bool, loud: bool) -> f32 {
+    let points = if whisper {
+        9.0
+    } else if loud {
+        18.0
+    } else {
+        12.0
+    };
+    points * 96.0 / 72.0
+}
+
+/// Толщина чёрной обводки (`RunechatStyle.GetOutline`): pt·96/72/8 · scale(1).
+pub fn bubble_outline_px(font_px: f32) -> f32 {
+    font_px / 8.0
+}
+
+/// Цвет имени (`RunechatSpeechBubble.GetNameColor`): FNV-1a по UTF-16 кодам
+/// символов → HSL. Возвращает sRGB 0..1.
+pub fn name_color(name: &str) -> [f32; 3] {
+    let mut hash: u32 = 2_166_136_261;
+    for unit in name.encode_utf16() {
+        hash ^= unit as u32;
+        hash = hash.wrapping_mul(16_777_619);
+    }
+    let hue = (hash % 360) as f32 / 360.0;
+    let saturation = 0.55 + ((hash >> 9) % 30) as f32 / 100.0;
+    let lightness = 0.65 + ((hash >> 17) % 15) as f32 / 100.0;
+    hsl_to_rgb(hue, saturation, lightness)
+}
+
+/// `Color.FromHsl` (h, s, l в 0..1).
+fn hsl_to_rgb(h: f32, s: f32, l: f32) -> [f32; 3] {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let hp = h * 6.0;
+    let x = c * (1.0 - (hp % 2.0 - 1.0).abs());
+    let (r, g, b) = match hp as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = l - c / 2.0;
+    [r + m, g + m, b + m]
+}
+
+/// Прозрачность реплики по возрасту: появление 0.15 с, затухание 0.25 с до
+/// конца жизни `life` (4 с, либо раньше — при вытеснении сверх лимита).
+pub fn bubble_alpha(age: f32, life: f32) -> f32 {
+    let fade_in = (age / BUBBLE_FADE_IN_SECS).clamp(0.0, 1.0);
+    let left = life - age;
+    let fade_out = if left <= BUBBLE_FADE_OUT_SECS {
+        (left / BUBBLE_FADE_OUT_SECS).clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    fade_in * fade_out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typing_state_follows_focus_and_input() {
+        assert_eq!(typing_state(false, true), TypingIndicator::None);
+        assert_eq!(typing_state(true, true), TypingIndicator::Typing);
+        assert_eq!(typing_state(true, false), TypingIndicator::Idle);
+    }
+
+    #[test]
+    fn runechat_numbers_match_engine() {
+        assert!((bubble_delay("") - 0.2).abs() < 1e-6);
+        assert!((bubble_delay(&"a".repeat(100)) - 1.0).abs() < 1e-5);
+        assert_eq!(bubble_font_px(false, false), 16.0);
+        assert_eq!(bubble_font_px(true, true), 12.0);
+        assert_eq!(bubble_font_px(false, true), 24.0);
+        assert_eq!(bubble_outline_px(16.0), 2.0);
+        assert_eq!(bubble_alpha(0.0, 4.0), 0.0);
+        assert_eq!(bubble_alpha(1.0, 4.0), 1.0);
+        assert!((bubble_alpha(3.875, 4.0) - 0.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn name_color_is_stable_and_light() {
+        let a = name_color("Иван");
+        assert_eq!(a, name_color("Иван"));
+        assert_ne!(a, name_color("Пётр"));
+        // Светлота 0.65..0.80 — цвет всегда светлый.
+        let max = a.iter().cloned().fold(0.0, f32::max);
+        assert!(max > 0.6 && a.iter().all(|c| (0.0..=1.0).contains(c)));
+    }
 
     #[test]
     fn ranges_match_chat_system() {
