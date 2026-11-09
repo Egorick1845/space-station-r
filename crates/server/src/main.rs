@@ -1673,6 +1673,67 @@ const CHAT_COOLDOWN: f32 = 0.6;
 /// Дальность слышимости локального чата (LOOC), юнитов.
 const CHAT_LOCAL_RANGE: f32 = 320.0;
 
+/// Что услышит конкретный слушатель IC-реплики (`ChatSystem.SendInVoiceRange`
+/// / `SendEntityWhisper` / `SendEntityEmote`). `None` — не слышит вовсе.
+/// `distance` — в тайлах, `observer` — призрак (`GhostHearing`).
+fn ic_line_for_listener(
+    channel: ChatChannel,
+    name: &str,
+    message: &str,
+    distance: f32,
+    line_of_sight: bool,
+    observer: bool,
+    roll: &mut impl FnMut() -> f32,
+) -> Option<String> {
+    use ssr_core::speech;
+    match channel {
+        ChatChannel::Local => speech::hears_say(distance, observer)
+            .then(|| speech::wrap_say(name, speech::speech_verb(message), message)),
+        ChatChannel::Whisper => match speech::whisper_hearing(distance, line_of_sight, observer) {
+            speech::WhisperHearing::Clear => Some(speech::wrap_whisper(name, message)),
+            speech::WhisperHearing::Muffled => Some(speech::wrap_whisper(
+                name,
+                &speech::obfuscate(message, speech::OBFUSCATION_FACTOR, &mut *roll),
+            )),
+            speech::WhisperHearing::MuffledUnknown => Some(speech::wrap_whisper_unknown(
+                &speech::obfuscate(message, speech::OBFUSCATION_FACTOR, &mut *roll),
+            )),
+            speech::WhisperHearing::None => None,
+        },
+        ChatChannel::Emotes => speech::sees_emote(distance, line_of_sight, observer)
+            .then(|| speech::wrap_emote(name, message)),
+        _ => None,
+    }
+}
+
+/// Текст реплики над головой из строки чата этого слушателя (аналог
+/// `GetStringInsideTag(message, "BubbleContent")`): у речи и шёпота — то, что в
+/// кавычках (зашумлённое, если слушатель далеко), у эмоции — сам текст.
+fn bubble_text(channel: ChatChannel, line: &str, message: &str) -> String {
+    if channel == ChatChannel::Emotes {
+        return message.to_string();
+    }
+    match (line.find('"'), line.rfind('"')) {
+        (Some(start), Some(end)) if end > start => line[start + 1..end].to_string(),
+        _ => message.to_string(),
+    }
+}
+
+/// Генератор `[0, 1)` для зашумления шёпота (xorshift32, зерно — время).
+fn unit_roller() -> impl FnMut() -> f32 {
+    let mut state = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0x9E37_79B9)
+        | 1;
+    move || {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        (state >> 8) as f32 / (1u32 << 24) as f32
+    }
+}
+
 /// Время последнего сообщения игрока (антиспам).
 #[derive(Resource, Default)]
 struct ChatCooldowns(HashMap<u64, f32>);
@@ -2268,6 +2329,7 @@ fn send_system_to(
                 channel: ChatChannel::System,
                 from: String::new(),
                 text: text.to_string(),
+                bubble: None,
             });
         }
     }
@@ -3198,6 +3260,73 @@ fn handle_client_messages(
                         continue;
                     }
                     aux.cooldowns.0.insert(player.to_bits(), now);
+                    let mut channel = channel;
+                    // IC-речь (`TrySendInGameICMessage`): призрак говорить не
+                    // может — его реплика уходит в чат мёртвых.
+                    if channel.is_ic() && sprint_state.ghosts.get(player).is_ok() {
+                        channel = ChatChannel::Dead;
+                    }
+                    if channel.is_ic() {
+                        // Эмоции не капитализируются (`shouldCapitalize`).
+                        let message = if channel == ChatChannel::Emotes {
+                            text.clone()
+                        } else {
+                            ssr_core::speech::capitalize(&text)
+                        };
+                        let from = positions.get(player).map(|p| p.0).unwrap_or_default();
+                        let from_tiles = [from[0] / TILE_SIZE, from[1] / TILE_SIZE];
+                        let mut roll = unit_roller();
+                        let mut recipients = 0;
+                        for (link, mut sender) in senders.iter_mut() {
+                            let Some(entry) =
+                                players.entries.iter().find(|entry| entry.link == link)
+                            else {
+                                continue;
+                            };
+                            let Ok(target) = positions.get(entry.player) else {
+                                continue;
+                            };
+                            let to_tiles = [target.0[0] / TILE_SIZE, target.0[1] / TILE_SIZE];
+                            let distance = ((to_tiles[0] - from_tiles[0]).powi(2)
+                                + (to_tiles[1] - from_tiles[1]).powi(2))
+                            .sqrt();
+                            let observer = sprint_state.ghosts.get(entry.player).is_ok();
+                            let sight =
+                                ssr_core::speech::line_of_sight(from_tiles, to_tiles, |tx, ty| {
+                                    wall_at(
+                                        &map,
+                                        (tx as f32 + 0.5) * TILE_SIZE,
+                                        (ty as f32 + 0.5) * TILE_SIZE,
+                                    )
+                                });
+                            let Some(line) = ic_line_for_listener(
+                                channel, &name, &message, distance, sight, observer, &mut roll,
+                            ) else {
+                                continue;
+                            };
+                            let bubble = ssr_protocol::SpeechBubble {
+                                speaker: player.to_bits(),
+                                name: name.clone(),
+                                text: bubble_text(channel, &line, &message),
+                                kind: match channel {
+                                    ChatChannel::Whisper => ssr_protocol::BubbleKind::Whisper,
+                                    ChatChannel::Emotes => ssr_protocol::BubbleKind::Emote,
+                                    _ => ssr_protocol::BubbleKind::Say,
+                                },
+                                loud: channel == ChatChannel::Local
+                                    && ssr_core::speech::speech_verb(&message).bold,
+                            };
+                            sender.send::<GameChannel>(ServerMessage::Chat {
+                                channel,
+                                from: String::new(),
+                                text: line,
+                                bubble: Some(bubble),
+                            });
+                            recipients += 1;
+                        }
+                        tracing::info!(%name, ?channel, recipients, %message, "ic chat message");
+                        continue;
+                    }
                     // Права каналов из сборки (`ChatSystem.cs`): чат мёртвых
                     // пишут только призраки (SendDeadChat), админ-чат — только
                     // админы (`ChatManager.SendAdminChat`). Отказ — прямое
@@ -3254,14 +3383,44 @@ fn handle_client_messages(
                         if !audible {
                             continue;
                         }
+                        // LOOC над головой (`hud.show_looc_above_head` = true).
+                        let bubble =
+                            (channel == ChatChannel::Looc).then(|| ssr_protocol::SpeechBubble {
+                                speaker: player.to_bits(),
+                                name: name.clone(),
+                                text: text.clone(),
+                                kind: ssr_protocol::BubbleKind::Looc,
+                                loud: false,
+                            });
                         sender.send::<GameChannel>(ServerMessage::Chat {
                             channel,
                             from: name.clone(),
                             text: text.clone(),
+                            bubble,
                         });
                         recipients += 1;
                     }
                     tracing::info!(%name, ?channel, recipients, %text, "chat message");
+                }
+                ClientMessage::Typing { state } => {
+                    // `OnTypingChanged`: кто не может говорить (призрак) —
+                    // без облачка; иначе состояние уходит в реплицируемый
+                    // компонент на теле игрока.
+                    let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {
+                        continue;
+                    };
+                    let player = entry.player;
+                    use ssr_core::speech::TypingIndicator;
+                    let indicator = if sprint_state.ghosts.get(player).is_ok() {
+                        TypingIndicator::None
+                    } else {
+                        match state {
+                            ssr_protocol::TypingState::None => TypingIndicator::None,
+                            ssr_protocol::TypingState::Idle => TypingIndicator::Idle,
+                            ssr_protocol::TypingState::Typing => TypingIndicator::Typing,
+                        }
+                    };
+                    commands.entity(player).insert(indicator);
                 }
                 ClientMessage::Attack { target } => {
                     let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {
@@ -5797,5 +5956,73 @@ fn flush_system_chat(
             });
         }
         tracing::info!(%text, "system chat message");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Маршрутизация IC-реплик по правилам `ChatSystem`: речь сквозь стены до
+    /// 10 тайлов, шёпот разборчиво до 2 и зашумлённо до 5, эмоции только в
+    /// прямой видимости; призраки слышат всё разборчиво.
+    #[test]
+    fn ic_routing_follows_chat_system_ranges() {
+        let mut keep = || 0.99_f32; // ничего не зашумляется
+        let mut mask = || 0.0_f32; // всё зашумляется
+        let line = |channel, distance, sight, observer, roll: &mut dyn FnMut() -> f32| {
+            ic_line_for_listener(
+                channel,
+                "Иван",
+                "Привет",
+                distance,
+                sight,
+                observer,
+                &mut || roll(),
+            )
+        };
+        assert_eq!(
+            line(ChatChannel::Local, 9.0, false, false, &mut keep).as_deref(),
+            Some("Иван говорит, \"Привет\"")
+        );
+        assert_eq!(line(ChatChannel::Local, 11.0, true, false, &mut keep), None);
+        assert_eq!(
+            line(ChatChannel::Whisper, 1.0, false, false, &mut mask).as_deref(),
+            Some("Иван шепчет, \"Привет\"")
+        );
+        assert_eq!(
+            line(ChatChannel::Whisper, 4.0, true, false, &mut mask).as_deref(),
+            Some("Иван шепчет, \"~~~~~~\"")
+        );
+        assert_eq!(
+            line(ChatChannel::Whisper, 4.0, false, false, &mut mask).as_deref(),
+            Some("Кто-то шепчет, \"~~~~~~\"")
+        );
+        assert_eq!(
+            line(ChatChannel::Whisper, 6.0, true, false, &mut keep),
+            None
+        );
+        assert_eq!(
+            line(ChatChannel::Whisper, 40.0, false, true, &mut mask).as_deref(),
+            Some("Иван шепчет, \"Привет\"")
+        );
+        assert_eq!(
+            line(ChatChannel::Emotes, 3.0, false, false, &mut keep),
+            None
+        );
+        assert_eq!(
+            line(ChatChannel::Emotes, 3.0, true, false, &mut keep).as_deref(),
+            Some("Иван Привет")
+        );
+        assert_eq!(line(ChatChannel::Ooc, 1.0, true, false, &mut keep), None);
+    }
+
+    #[test]
+    fn unit_roller_stays_in_unit_interval() {
+        let mut roll = unit_roller();
+        for _ in 0..1000 {
+            let value = roll();
+            assert!((0.0..1.0).contains(&value));
+        }
     }
 }

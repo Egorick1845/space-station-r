@@ -6,7 +6,8 @@
 use serde::{Deserialize, Serialize};
 
 /// Версия протокола. Несовпадение при рукопожатии = отказ соединения (проверка в T1.2).
-pub const PROTOCOL_VERSION: u32 = 13;
+/// v14 — IC-каналы чата (`Local`, `Whisper`, `Emotes`).
+pub const PROTOCOL_VERSION: u32 = 14;
 
 /// Порт игрового сервера по умолчанию (T1.2).
 pub const DEFAULT_SERVER_PORT: u16 = 7777;
@@ -65,6 +66,8 @@ pub enum ClientMessage {
     Pickup { item: u64 },
     /// Сообщение в чат (ввод по T). LOOC слышат только рядом стоящие.
     Chat { channel: ChatChannel, text: String },
+    /// Индикатор набора (`TypingChangedEvent`): облачко над головой.
+    Typing { state: TypingState },
     /// Бросить предмет из рюкзака на пол (перетаскивание из окна в мир, SS14).
     DropItem { item: u64 },
     /// Надеть предмет: `slot` — целевой слот (одежда, карман, разгрузка).
@@ -301,7 +304,42 @@ pub enum ServerMessage {
         from: String,
         /// Текст сообщения.
         text: String,
+        /// Реплика над головой говорящего (Runechat); `None` — без неё.
+        bubble: Option<SpeechBubble>,
     },
+}
+
+/// Реплика над головой (`ChatUIController.AddSpeechBubble`): текст уже такой,
+/// каким его воспринял этот слушатель (шёпот издалека — зашумлён).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SpeechBubble {
+    /// Серверная сущность говорящего (bits).
+    pub speaker: u64,
+    /// Имя говорящего — от него цвет текста (`GetNameColor`).
+    pub name: String,
+    /// Текст реплики.
+    pub text: String,
+    /// Вид: речь, шёпот, эмоция или LOOC.
+    pub kind: BubbleKind,
+    /// Крик (`bold` у глагола) — крупный шрифт.
+    pub loud: bool,
+}
+
+/// Вид реплики (`SpeechBubble.SpeechType`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BubbleKind {
+    Say,
+    Whisper,
+    Emote,
+    Looc,
+}
+
+/// Состояние набора (`TypingIndicatorState`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TypingState {
+    None,
+    Idle,
+    Typing,
 }
 
 /// Канал чата. Цвета — `ChatChannelExtensions.TextColor` сборки
@@ -319,6 +357,23 @@ pub enum ChatChannel {
     Dead,
     /// Админ-чат (`ChatChannel.AdminChat`, HotPink) — только для админов.
     AdminChat,
+    /// Речь персонажа (`ChatChannel.Local`, LightGray): слышат в радиусе
+    /// `VoiceRange = 10` тайлов, сквозь стены. Сервер шлёт готовую строку
+    /// `Имя говорит, "…"` с пустым `from`.
+    Local,
+    /// Шёпот (`ChatChannel.Whisper`, DarkGray): разборчиво до 2 тайлов,
+    /// зашумлённо до 5 (`ssr_core::speech`).
+    Whisper,
+    /// Эмоции (`ChatChannel.Emotes`, LightGray): `Имя текст`, видно в радиусе
+    /// 10 тайлов только в прямой видимости.
+    Emotes,
+}
+
+impl ChatChannel {
+    /// Канал речи персонажа (IC) — сервер оборачивает текст сам.
+    pub fn is_ic(self) -> bool {
+        matches!(self, Self::Local | Self::Whisper | Self::Emotes)
+    }
 }
 
 /// Сущность в снимке мира.

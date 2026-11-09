@@ -32,6 +32,7 @@ mod inventory_ui;
 mod light_gpu;
 mod lighting;
 mod lobby;
+mod overhead_speech;
 mod power_view;
 mod rsi;
 mod settings;
@@ -189,6 +190,15 @@ fn main() {
     // Визоры над головой: должность, SSD, полоска здоровья.
     app.add_systems(Startup, humanoid::setup_health_bar);
     app.add_systems(Update, humanoid::sync_overheads);
+    app.init_resource::<overhead_speech::BubbleQueues>();
+    app.add_systems(
+        Update,
+        (
+            overhead_speech::spawn_speech_bubbles,
+            overhead_speech::position_speech_bubbles,
+            overhead_speech::sync_typing_clouds,
+        ),
+    );
     // Space — спринт-тоггл (PORT_PLAN 2.2).
     app.add_systems(Update, hud::sprint_hotkey);
     // Алерт выносливости (PORT_PLAN 1.5): 7 уровней, иконки из сборки.
@@ -368,6 +378,9 @@ fn main() {
             chat::chat_ghost_channel,
             chat::chat_health_notices,
             chat::chat_test_mode,
+            chat::chat_popups,
+            chat::chat_popup_clicks,
+            chat::chat_typing_indicator,
             hud::spawn_hud,
             hud::hud_hotkeys,
             hud::hud_click,
@@ -803,8 +816,12 @@ fn receive_server(
                     channel,
                     from,
                     text,
+                    bubble,
                 } => {
                     chat.push(channel, from.clone(), text.clone());
+                    if let Some(bubble) = bubble {
+                        chat.pending_bubbles.push(bubble);
+                    }
                     tracing::info!(?channel, %from, %text, "chat received");
                 }
                 ServerMessage::Welcome {

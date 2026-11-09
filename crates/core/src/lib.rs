@@ -23,6 +23,7 @@ pub mod pull;
 pub mod recipes;
 pub mod roles;
 pub mod rsi;
+pub mod speech;
 pub mod ss14_proto;
 pub mod stamina;
 pub mod structures;

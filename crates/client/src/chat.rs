@@ -3,7 +3,7 @@
 //! (шрифт 12) и поле ввода снизу.
 //!
 //! Каналы и цвета как в движке: OOC — `LightSkyBlue`, LOOC — `MediumTurquoise`,
-//! системные — серые. Ввод открывается по T, отправка — Enter, выход — Esc;
+//! системные — Orange, речь/эмоции — LightGray, шёпот — DarkGray. Ввод открывается по T, отправка — Enter, выход — Esc;
 //! пока чат в фокусе, игровой ввод (ходьба, действия) не работает.
 
 use bevy::input::ButtonState;
@@ -52,9 +52,18 @@ pub struct ChatState {
     pub focused: bool,
     /// На сколько строк прокручена история вверх от конца.
     pub scroll: usize,
-    /// Выбранный канал кнопкой-селектором (`ChannelSelectorPopup`: у нас есть
-    /// только OOC и LOOC, поэтому переключаются они).
+    /// Выбранный канал кнопкой-селектором (`ChannelSelectorPopup`).
     pub channel: ChatChannel,
+    /// Открыт ряд кнопок выбора канала (`ChannelSelectorPopup`).
+    pub selector_open: bool,
+    /// Открыт список фильтров (`ChannelFilterPopup`).
+    pub filter_open: bool,
+    /// Каналы, скрытые фильтром (галочка снята).
+    pub hidden: Vec<ChatChannel>,
+    /// Свой игрок — призрак (меняет набор доступных каналов).
+    pub ghost: bool,
+    /// Реплики над головой, пришедшие с сервера (забирает `speech_bubbles`).
+    pub pending_bubbles: Vec<ssr_protocol::SpeechBubble>,
 }
 
 impl Default for ChatState {
@@ -64,7 +73,13 @@ impl Default for ChatState {
             input: String::new(),
             focused: false,
             scroll: 0,
-            channel: ChatChannel::Ooc,
+            // В сборке селектор по умолчанию — Local (речь персонажа).
+            channel: ChatChannel::Local,
+            selector_open: false,
+            filter_open: false,
+            hidden: Vec::new(),
+            ghost: false,
+            pending_bubbles: Vec::new(),
         }
     }
 }
@@ -106,9 +121,14 @@ impl ChatState {
 
     /// Видимые строки с учётом прокрутки.
     fn visible(&self) -> impl Iterator<Item = &ChatLine> {
-        let end = self.lines.len().saturating_sub(self.scroll);
+        let shown: Vec<&ChatLine> = self
+            .lines
+            .iter()
+            .filter(|line| !self.hidden.contains(&line.channel))
+            .collect();
+        let end = shown.len().saturating_sub(self.scroll);
         let start = end.saturating_sub(CHAT_VISIBLE);
-        self.lines[start..end].iter()
+        shown[start..end].to_vec().into_iter()
     }
 }
 
@@ -143,38 +163,199 @@ fn channel_color(channel: ChatChannel) -> Color {
         ChatChannel::System => Color::srgb(1.0, 0.647, 0.0), // Orange
         ChatChannel::Dead => Color::srgb(0.576, 0.439, 0.859), // MediumPurple
         ChatChannel::AdminChat => Color::srgb(1.0, 0.412, 0.706), // HotPink
+        ChatChannel::Whisper => Color::srgb(0.663, 0.663, 0.663), // DarkGray
+        // `_ => Color.LightGray` — речь и эмоции.
+        ChatChannel::Local | ChatChannel::Emotes => Color::srgb(0.827, 0.827, 0.827),
     }
 }
 
-/// Кнопка-селектор переключает каналы по кругу (в сборке `ChannelSelectorPopup`
-/// перечисляет доступные: OOC, LOOC, Dead, Admin).
-const CHANNEL_CYCLE: [ChatChannel; 4] = [
-    ChatChannel::Ooc,
+/// Цвет кнопки-селектора — `ChannelSelectorButton.ChannelSelectColor`: у
+/// Local/Whisper/Emotes это `_ => Color.DarkGray`, остальные — как строки.
+fn selector_color(channel: ChatChannel) -> Color {
+    if channel.is_ic() {
+        Color::srgb(0.663, 0.663, 0.663)
+    } else {
+        channel_color(channel)
+    }
+}
+
+/// Порядок кнопок выбора канала — `ChannelSelectorPopup.ChannelSelectorOrder`
+/// (Local, Whisper, Emotes, Radio, LOOC, OOC, Dead, Admin; рации пока нет).
+const CHANNEL_CYCLE: [ChatChannel; 7] = [
+    ChatChannel::Local,
+    ChatChannel::Whisper,
+    ChatChannel::Emotes,
     ChatChannel::Looc,
+    ChatChannel::Ooc,
     ChatChannel::Dead,
     ChatChannel::AdminChat,
 ];
 
-/// Подпись кнопки канала (`chat-channel-humanized-*` в локали сборки).
+/// Доступные каналы (`ChatUIController.SelectableChannels`): живому — без
+/// чата мёртвых, призраку — без речи/шёпота/эмоций, но с чатом мёртвых.
+pub fn available_channels(ghost: bool) -> Vec<ChatChannel> {
+    CHANNEL_CYCLE
+        .into_iter()
+        .filter(|channel| {
+            if ghost {
+                !channel.is_ic()
+            } else {
+                *channel != ChatChannel::Dead
+            }
+        })
+        .collect()
+}
+
+/// Следующий доступный канал (`CycleChatChannelForward`, Tab).
+pub fn next_channel(current: ChatChannel, ghost: bool) -> ChatChannel {
+    let channels = available_channels(ghost);
+    let index = channels
+        .iter()
+        .position(|channel| *channel == current)
+        .map(|index| (index + 1) % channels.len())
+        .unwrap_or(0);
+    channels[index]
+}
+
+/// Префикс канала для подписи кнопки (`ChatUIController.ChannelPrefixes`).
+fn channel_prefix(channel: ChatChannel) -> char {
+    match channel {
+        ChatChannel::Local => '>',
+        ChatChannel::Whisper => ',',
+        ChatChannel::Emotes => '%',
+        ChatChannel::Looc => '_',
+        ChatChannel::Ooc => '[',
+        ChatChannel::Dead => '\\',
+        ChatChannel::AdminChat => ']',
+        ChatChannel::System => ' ',
+    }
+}
+
+/// Подпись кнопки в ряду выбора (`hud-chatbox-select-name-prefixed`:
+/// `{ $prefix } { $name }`).
+pub fn selector_item_label(channel: ChatChannel) -> String {
+    format!("{} {}", channel_prefix(channel), channel_label(channel))
+}
+
+/// Подпись строки фильтра (`hud-chatbox-channel-*`).
+fn filter_label(channel: ChatChannel) -> &'static str {
+    match channel {
+        ChatChannel::AdminChat => "Админ Чат",
+        ChatChannel::System => "Сервер",
+        other => channel_label(other),
+    }
+}
+
+/// Каналы в окне фильтра (`FilterableChannels`).
+fn filterable_channels(ghost: bool) -> Vec<ChatChannel> {
+    let mut channels = vec![
+        ChatChannel::Local,
+        ChatChannel::Whisper,
+        ChatChannel::Emotes,
+        ChatChannel::Looc,
+        ChatChannel::Ooc,
+    ];
+    if ghost {
+        channels.push(ChatChannel::Dead);
+    }
+    channels.push(ChatChannel::AdminChat);
+    channels.push(ChatChannel::System);
+    channels
+}
+
+/// Подпись кнопки канала (`hud-chatbox-select-channel-*` в ru-RU локали сборки).
 fn channel_label(channel: ChatChannel) -> &'static str {
     match channel {
+        ChatChannel::Local => "Рядом",
+        ChatChannel::Whisper => "Шёпот",
+        ChatChannel::Emotes => "Эмоции",
         ChatChannel::Ooc => "OOC",
         ChatChannel::Looc => "LOOC",
-        ChatChannel::Dead => "DEAD",
-        ChatChannel::AdminChat => "ADMIN",
+        ChatChannel::Dead => "Мёртвые",
+        ChatChannel::AdminChat => "Админ",
         ChatChannel::System => "SYS",
     }
 }
+
+/// Префикс в начале строки выбирает канал — `ChatUIController.PrefixToChannel`
+/// и константы `SharedChatSystem`: `>` речь, `,` шёпот, `%`/`*` эмоции,
+/// `_` LOOC, `[` OOC, `\` мёртвые, `]` админ. Без префикса — канал селектора.
+pub fn parse_prefix(text: &str, selected: ChatChannel) -> (ChatChannel, String) {
+    let mut chars = text.chars();
+    let channel = match chars.next() {
+        Some('>') => Some(ChatChannel::Local),
+        Some(',') => Some(ChatChannel::Whisper),
+        Some('%') | Some('*') => Some(ChatChannel::Emotes),
+        Some('_') => Some(ChatChannel::Looc),
+        Some('[') => Some(ChatChannel::Ooc),
+        Some('\\') => Some(ChatChannel::Dead),
+        Some(']') => Some(ChatChannel::AdminChat),
+        _ => None,
+    };
+    match channel {
+        Some(channel) => (channel, chars.as_str().trim().to_string()),
+        None => (selected, text.trim().to_string()),
+    }
+}
+
+/// Подсказка в пустом поле ввода (`hud-chatbox-info`: `{ $talk-key } чтобы
+/// говорить, { $cycle-key } для переключения каналов.`).
+const INPUT_HINT: &str = "T чтобы говорить, Tab для переключения каналов.";
+/// Цвета иконки фильтра (`ChannelFilterButton`).
+const FILTER_NORMAL: Color = Color::srgb(
+    0x7b as f32 / 255.0,
+    0x7e as f32 / 255.0,
+    0x9e as f32 / 255.0,
+);
+const FILTER_HOVERED: Color = Color::srgb(
+    0x96 as f32 / 255.0,
+    0x99 as f32 / 255.0,
+    0xbb as f32 / 255.0,
+);
+const FILTER_PRESSED: Color = Color::srgb(
+    0x78 as f32 / 255.0,
+    0x9b as f32 / 255.0,
+    0x8c as f32 / 255.0,
+);
+/// Сдвиг выпадающего списка фильтров влево (`FilterDropdownOffset`).
+const FILTER_DROPDOWN_OFFSET: f32 = 120.0;
+
+/// Кнопка фильтра каналов (`ChannelFilterButton`).
+#[derive(Component)]
+pub struct ChatFilterButton;
+
+/// Иконка на кнопке фильтра (красится по состоянию кнопки).
+#[derive(Component)]
+pub struct ChatFilterIcon;
+
+/// Ряд кнопок выбора канала (`ChannelSelectorPopup`).
+#[derive(Component)]
+pub struct ChatSelectorPopup;
+
+/// Кнопка канала в ряду выбора.
+#[derive(Component, Clone, Copy)]
+pub struct ChatSelectorItem(pub ChatChannel);
+
+/// Список фильтров (`ChannelFilterPopup`).
+#[derive(Component)]
+pub struct ChatFilterPopup;
+
+/// Строка-галочка фильтра.
+#[derive(Component, Clone, Copy)]
+pub struct ChatFilterItem(pub ChatChannel);
 
 /// Создаёт панель чата при входе в игру.
 pub fn spawn_chat(
     mut commands: Commands,
     own: Res<OwnPlayerEntity>,
     roots: Query<(), With<ChatRoot>>,
+    assets: Res<AssetServer>,
 ) {
     if own.0.is_none() || !roots.is_empty() {
         return;
     }
+    let filter_icon: Handle<Image> =
+        assets.load("sprites/ss14/Interface/Nano/filter.svg.96dpi.png");
     commands
         .spawn((
             ChatRoot,
@@ -240,9 +421,9 @@ pub fn spawn_chat(
                         BackgroundColor(ui::GLASS_BUTTON),
                     ))
                     .with_child((
-                        Text::new("OOC"),
+                        Text::new(channel_label(ChatChannel::Local)),
                         super::chat_text_font(),
-                        TextColor(channel_color(ChatChannel::Ooc)),
+                        TextColor(selector_color(ChatChannel::Local)),
                     ));
                     // Поле ввода кликабельно: щелчок открывает набор текста,
                     // как LineEdit в сборке (раньше работала только клавиша T).
@@ -258,17 +439,41 @@ pub fn spawn_chat(
                     ))
                     .with_child((
                         ChatInputText,
-                        Text::new("Нажмите T или щёлкните, чтобы писать; _ — LOOC, [ — OOC"),
+                        Text::new(INPUT_HINT),
                         super::chat_text_font(),
                         TextColor(ui::TEXT_MUTED),
+                    ));
+                    // Кнопка фильтра каналов (`ChannelFilterButton`): иконка
+                    // `Interface/Nano/filter.svg.96dpi.png`, цвет по состоянию.
+                    row.spawn((
+                        Button,
+                        ChatFilterButton,
+                        Node {
+                            width: px(24),
+                            height: px(24),
+                            align_items: AlignItems::Center,
+                            justify_content: JustifyContent::Center,
+                            ..default()
+                        },
+                        BackgroundColor(ui::GLASS_BUTTON),
+                    ))
+                    .with_child((
+                        ChatFilterIcon,
+                        ImageNode::new(filter_icon).with_color(FILTER_NORMAL),
+                        Node {
+                            width: px(16),
+                            height: px(16),
+                            ..default()
+                        },
                     ));
                 });
         });
 }
 
-/// Клик по кнопке канала переключает каналы по кругу (OOC → LOOC → DEAD →
-/// ADMIN → OOC, как выбор канала в `ChannelSelectorPopup`); подпись и цвет
-/// кнопки — `ChannelSelectColor` из `ChatChannelExtensions.TextColor`.
+/// Кнопка канала (`ChannelSelectorButton`, ToggleMode) открывает и закрывает
+/// ряд выбора (`ChannelSelectorPopup`); подпись и цвет кнопки —
+/// `ChannelSelectColor`. Если канал стал недоступен (смерть/возврат в тело) —
+/// селектор переходит на первый доступный, как `SetChannels`.
 pub fn chat_channel_button(
     buttons: Query<&Interaction, (Changed<Interaction>, With<ChatChannelButton>)>,
     mut chat: ResMut<ChatState>,
@@ -279,16 +484,14 @@ pub fn chat_channel_button(
         if *interaction != Interaction::Pressed {
             continue;
         }
-        let index = CHANNEL_CYCLE
-            .iter()
-            .position(|channel| *channel == chat.channel)
-            .map(|index| (index + 1) % CHANNEL_CYCLE.len())
-            .unwrap_or(0);
-        chat.channel = CHANNEL_CYCLE[index];
-        tracing::info!(channel = ?chat.channel, "chat channel selected");
+        chat.selector_open = !chat.selector_open;
+        chat.filter_open = false;
+    }
+    if !available_channels(chat.ghost).contains(&chat.channel) {
+        chat.channel = available_channels(chat.ghost)[0];
     }
     let wanted = channel_label(chat.channel);
-    let wanted_color = channel_color(chat.channel);
+    let wanted_color = selector_color(chat.channel);
     for (_, children) in buttons_q.iter_mut() {
         for child in children.iter() {
             let Ok((mut label, mut color)) = texts.get_mut(child) else {
@@ -301,6 +504,216 @@ pub fn chat_channel_button(
                 color.0 = wanted_color;
             }
         }
+    }
+}
+
+/// Подпись открытых выпадающих окон чата: пересобираем их только при смене.
+type PopupSignature = (bool, bool, bool, Vec<ChatChannel>);
+
+/// Ряд выбора канала и список фильтров под полем ввода. Пересобираются при
+/// смене состояния; клики обрабатывает `chat_popup_clicks`.
+pub fn chat_popups(
+    mut commands: Commands,
+    chat: Res<ChatState>,
+    roots: Query<Entity, With<ChatRoot>>,
+    selectors: Query<Entity, With<ChatSelectorPopup>>,
+    filters: Query<Entity, With<ChatFilterPopup>>,
+    mut last: Local<Option<PopupSignature>>,
+) {
+    let signature = (
+        chat.selector_open,
+        chat.filter_open,
+        chat.ghost,
+        chat.hidden.clone(),
+    );
+    if last.as_ref() == Some(&signature) {
+        return;
+    }
+    let Ok(root) = roots.single() else {
+        return;
+    };
+    *last = Some(signature);
+    for entity in selectors.iter().chain(filters.iter()) {
+        commands.entity(entity).despawn();
+    }
+    if chat.selector_open {
+        // Горизонтальный ряд кнопок с отступом 1 (`SeparationOverride = 1`)
+        // прямо под полем ввода.
+        commands.entity(root).with_children(|panel| {
+            panel
+                .spawn((
+                    ChatSelectorPopup,
+                    Node {
+                        position_type: PositionType::Absolute,
+                        top: Val::Percent(100.0),
+                        left: px(0),
+                        margin: UiRect::top(px(2)),
+                        column_gap: px(1),
+                        ..default()
+                    },
+                    GlobalZIndex(50),
+                ))
+                .with_children(|row| {
+                    for channel in available_channels(chat.ghost) {
+                        row.spawn((
+                            Button,
+                            ChatSelectorItem(channel),
+                            Node {
+                                height: px(24),
+                                padding: UiRect::axes(px(6), px(2)),
+                                align_items: AlignItems::Center,
+                                ..default()
+                            },
+                            BackgroundColor(ui::GLASS_BUTTON),
+                        ))
+                        .with_child((
+                            Text::new(selector_item_label(channel)),
+                            super::chat_text_font(),
+                            TextColor(ui::TEXT),
+                        ));
+                    }
+                });
+        });
+    }
+    if chat.filter_open {
+        // Список галочек: левый край сдвинут на `FilterDropdownOffset` от
+        // кнопки фильтра (она у правого края панели).
+        commands.entity(root).with_children(|panel| {
+            panel
+                .spawn((
+                    ChatFilterPopup,
+                    Node {
+                        position_type: PositionType::Absolute,
+                        top: Val::Percent(100.0),
+                        right: px(24.0 + 2.0 - FILTER_DROPDOWN_OFFSET),
+                        margin: UiRect::top(px(2)),
+                        flex_direction: FlexDirection::Column,
+                        padding: UiRect::all(px(4)),
+                        row_gap: px(2),
+                        min_width: px(FILTER_DROPDOWN_OFFSET + 24.0),
+                        ..default()
+                    },
+                    BackgroundColor(ui::CHAT_BACKGROUND),
+                    GlobalZIndex(50),
+                ))
+                .with_children(|list| {
+                    for channel in filterable_channels(chat.ghost) {
+                        let shown = !chat.hidden.contains(&channel);
+                        list.spawn((
+                            Button,
+                            ChatFilterItem(channel),
+                            Node {
+                                height: px(20),
+                                column_gap: px(6),
+                                align_items: AlignItems::Center,
+                                ..default()
+                            },
+                        ))
+                        .with_children(|item| {
+                            // Галочка `CheckBox`: квадрат 12 px, заливка акцентом.
+                            item.spawn((
+                                Node {
+                                    width: px(12),
+                                    height: px(12),
+                                    border: UiRect::all(px(1)),
+                                    ..default()
+                                },
+                                BorderColor::all(ui::TEXT_MUTED),
+                                BackgroundColor(if shown { ui::ACCENT } else { Color::NONE }),
+                            ));
+                            item.spawn((
+                                Text::new(filter_label(channel)),
+                                super::chat_text_font(),
+                                TextColor(ui::TEXT),
+                            ));
+                        });
+                    }
+                });
+        });
+    }
+}
+
+/// Клики по ряду выбора, по фильтрам и по кнопке фильтра; цвет иконки
+/// фильтра — Normal/Hover/Pressed из `ChannelFilterButton`.
+#[allow(clippy::type_complexity)]
+pub fn chat_popup_clicks(
+    mut chat: ResMut<ChatState>,
+    items: Query<(&Interaction, &ChatSelectorItem), Changed<Interaction>>,
+    filters: Query<(&Interaction, &ChatFilterItem), Changed<Interaction>>,
+    filter_button: Query<&Interaction, With<ChatFilterButton>>,
+    filter_changed: Query<&Interaction, (Changed<Interaction>, With<ChatFilterButton>)>,
+    mut icons: Query<&mut ImageNode, With<ChatFilterIcon>>,
+) {
+    for (interaction, item) in items.iter() {
+        if *interaction == Interaction::Pressed {
+            chat.channel = item.0;
+            chat.selector_open = false;
+            tracing::info!(channel = ?item.0, "chat channel selected");
+        }
+    }
+    for (interaction, item) in filters.iter() {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        if let Some(index) = chat.hidden.iter().position(|c| *c == item.0) {
+            chat.hidden.remove(index);
+        } else {
+            chat.hidden.push(item.0);
+        }
+        chat.scroll = 0;
+    }
+    for interaction in filter_changed.iter() {
+        if *interaction == Interaction::Pressed {
+            chat.filter_open = !chat.filter_open;
+            chat.selector_open = false;
+        }
+    }
+    let color = match filter_button.iter().next() {
+        _ if chat.filter_open => FILTER_PRESSED,
+        Some(Interaction::Hovered) => FILTER_HOVERED,
+        Some(Interaction::Pressed) => FILTER_PRESSED,
+        _ => FILTER_NORMAL,
+    };
+    for mut icon in icons.iter_mut() {
+        if icon.color != color {
+            icon.color = color;
+        }
+    }
+}
+
+/// Индикатор набора (`TypingIndicatorSystem`): «печатает», пока текст
+/// менялся последние 2 с; «ждёт», пока поле в фокусе; иначе — нет. Серверу
+/// уходит только смена состояния.
+pub fn chat_typing_indicator(
+    time: Res<Time>,
+    chat: Res<ChatState>,
+    mut senders: Query<&mut MessageSender<ClientMessage>, With<Connected>>,
+    mut state: Local<(String, f32, Option<ssr_protocol::TypingState>)>,
+) {
+    let now = time.elapsed_secs();
+    if chat.input != state.0 {
+        state.0 = chat.input.clone();
+        if !chat.input.is_empty() {
+            state.1 = now;
+        }
+    }
+    let typing = !chat.input.is_empty() && now - state.1 < ssr_core::speech::TYPING_TIMEOUT;
+    let wanted = match ssr_core::speech::typing_state(chat.focused, typing) {
+        ssr_core::speech::TypingIndicator::None => ssr_protocol::TypingState::None,
+        ssr_core::speech::TypingIndicator::Idle => ssr_protocol::TypingState::Idle,
+        ssr_core::speech::TypingIndicator::Typing => ssr_protocol::TypingState::Typing,
+    };
+    if state.2 == Some(wanted) {
+        return;
+    }
+    let mut sent = false;
+    for mut sender in senders.iter_mut() {
+        sender.send::<GameChannel>(ClientMessage::Typing { state: wanted });
+        sent = true;
+    }
+    if sent {
+        state.2 = Some(wanted);
+        tracing::debug!(?wanted, "typing state sent");
     }
 }
 
@@ -334,10 +747,11 @@ pub fn chat_ghost_channel(
         return;
     }
     *last = ghost;
+    chat.ghost = ghost;
     chat.channel = if ghost {
         ChatChannel::Dead
     } else {
-        ChatChannel::Ooc
+        ChatChannel::Local
     };
 }
 
@@ -447,6 +861,11 @@ pub fn chat_input(
             }
             match &event.logical_key {
                 Key::Enter => submitted = true,
+                // `CycleChatChannelForward` (Tab) — следующий доступный канал.
+                Key::Tab => {
+                    let next = next_channel(chat.channel, chat.ghost);
+                    chat.channel = next;
+                }
                 Key::Escape => {
                     chat.focused = false;
                     chat.input.clear();
@@ -464,19 +883,12 @@ pub fn chat_input(
     }
 
     if submitted {
+        // После отправки поле теряет фокус, как `ChatInputBox` в сборке.
+        chat.focused = false;
         let text = std::mem::take(&mut chat.input);
         let text = text.trim().to_string();
         if !text.is_empty() {
-            // Префиксы каналов — как `SharedChatSystem` сборки: `_` — LOOC,
-            // `[` — OOC. Без префикса сообщение уходит в выбранный селектором
-            // канал (по умолчанию OOC).
-            let (channel, message) = if let Some(rest) = text.strip_prefix('_') {
-                (ChatChannel::Looc, rest.trim().to_string())
-            } else if let Some(rest) = text.strip_prefix('[') {
-                (ChatChannel::Ooc, rest.trim().to_string())
-            } else {
-                (chat.channel, text.clone())
-            };
+            let (channel, message) = parse_prefix(&text, chat.channel);
             if !message.is_empty() {
                 for mut sender in senders.iter_mut() {
                     sender.send::<GameChannel>(ClientMessage::Chat {
@@ -493,10 +905,7 @@ pub fn chat_input(
     let (label, color) = if chat.focused {
         (format!("{}_", chat.input), ui::TEXT)
     } else {
-        (
-            "Нажмите T или щёлкните, чтобы писать; _ — LOOC, [ — OOC".to_string(),
-            ui::TEXT_MUTED,
-        )
+        (INPUT_HINT.to_string(), ui::TEXT_MUTED)
     };
     for (mut node_text, mut node_color) in text.iter_mut() {
         if node_text.0 != label {
@@ -568,6 +977,30 @@ pub fn chat_test_mode(
         chat.system("Тестовое системное сообщение");
         tracing::info!("chat-test: system line added");
     }
+    // IC-речь: сервер оборачивает каждую реплику (`Имя говорит, "…"`).
+    if state.1 == 3 && elapsed >= 10.0 {
+        state.1 = 4;
+        send(&mut senders, ChatChannel::Local, "есть кто живой?");
+        tracing::info!("chat-test: Local sent");
+    }
+    if state.1 == 4 && elapsed >= 11.0 {
+        state.1 = 5;
+        send(&mut senders, ChatChannel::Whisper, "тихо, тут кто-то есть");
+        tracing::info!("chat-test: Whisper sent");
+    }
+    if state.1 == 5 && elapsed >= 12.0 {
+        state.1 = 6;
+        send(&mut senders, ChatChannel::Emotes, "машет рукой");
+        tracing::info!("chat-test: Emotes sent");
+    }
+    // Облачко набора и ряд выбора канала — для снимка.
+    if state.1 == 6 && elapsed >= 12.5 {
+        state.1 = 7;
+        chat.focused = true;
+        chat.input = "печатаю".to_string();
+        chat.selector_open = true;
+        tracing::info!("chat-test: typing + selector open");
+    }
 }
 
 #[cfg(test)]
@@ -591,5 +1024,42 @@ mod tests {
         // Другой канал — не коалесцируется даже с тем же текстом.
         chat.push(ChatChannel::Looc, "Игрок", "другое");
         assert_eq!(chat.lines.len(), 3);
+    }
+
+    /// Префиксы каналов — `ChatUIController.PrefixToChannel` сборки.
+    #[test]
+    fn prefixes_select_channel() {
+        let sel = ChatChannel::Local;
+        assert_eq!(
+            parse_prefix("привет", sel),
+            (ChatChannel::Local, "привет".into())
+        );
+        assert_eq!(
+            parse_prefix(">привет", ChatChannel::Ooc).0,
+            ChatChannel::Local
+        );
+        assert_eq!(
+            parse_prefix(", тсс", sel),
+            (ChatChannel::Whisper, "тсс".into())
+        );
+        assert_eq!(parse_prefix("*машет", sel).0, ChatChannel::Emotes);
+        assert_eq!(parse_prefix("%машет", sel).0, ChatChannel::Emotes);
+        assert_eq!(parse_prefix("_ooc рядом", sel).0, ChatChannel::Looc);
+        assert_eq!(parse_prefix("[всем", sel).0, ChatChannel::Ooc);
+        assert_eq!(parse_prefix("\\дух", sel).0, ChatChannel::Dead);
+        assert_eq!(parse_prefix("]админы", sel).0, ChatChannel::AdminChat);
+    }
+
+    /// Селектор по умолчанию — речь персонажа, а в цикле есть все IC-каналы.
+    #[test]
+    fn selector_defaults_to_local_and_cycles_ic_channels() {
+        assert_eq!(ChatState::default().channel, ChatChannel::Local);
+        for channel in [
+            ChatChannel::Local,
+            ChatChannel::Whisper,
+            ChatChannel::Emotes,
+        ] {
+            assert!(CHANNEL_CYCLE.contains(&channel));
+        }
     }
 }
