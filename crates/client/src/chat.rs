@@ -11,7 +11,7 @@ use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::prelude::*;
 use lightyear::prelude::client::*;
 use lightyear::prelude::*;
-use ssr_core::inventory::Health;
+use ssr_core::damage::Damageable;
 use ssr_protocol::net::GameChannel;
 use ssr_protocol::{ChatChannel, ClientMessage};
 
@@ -920,14 +920,15 @@ pub fn chat_input(
 /// Системные строки о своём состоянии (потеря сознания и возвращение).
 pub fn chat_health_notices(
     own: Res<OwnPlayerEntity>,
-    healths: Query<&Health>,
+    healths: Query<&Damageable>,
     mut chat: ResMut<ChatState>,
     mut last: Local<bool>,
 ) {
     let down = own
         .0
         .and_then(|entity| healths.get(entity).ok())
-        .is_some_and(|health| health.current == 0);
+        // Крит или смерть (`MobState`) — без сознания.
+        .is_some_and(|health| health.incapacitated());
     if down != *last {
         *last = down;
         if down {

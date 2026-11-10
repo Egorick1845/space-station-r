@@ -11,6 +11,7 @@ pub const GAME_NAME: &str = "Space Station R";
 
 pub mod atmosphere;
 pub mod clothing;
+pub mod damage;
 pub mod inventory;
 pub mod item_size;
 pub mod items;

@@ -4,7 +4,7 @@
 use bevy::audio::{AudioPlayer, AudioSource, PlaybackSettings};
 use bevy::prelude::*;
 use ssr_core::Door;
-use ssr_core::inventory::Health;
+use ssr_core::damage::Damageable;
 use ssr_core::tiles::TileChunkData;
 
 /// Загруженные звуки (грузятся один раз при старте).
@@ -145,8 +145,8 @@ pub fn damage_sound(
     mut commands: Commands,
     sounds: Res<Sounds>,
     own: Res<crate::inventory_ui::OwnPlayerEntity>,
-    healths: Query<&Health>,
-    mut last: Local<Option<i32>>,
+    healths: Query<&Damageable>,
+    mut last: Local<Option<f32>>,
 ) {
     let Some(entity) = own.0 else {
         return;
@@ -155,11 +155,11 @@ pub fn damage_sound(
         return;
     };
     if let Some(previous) = *last
-        && health.current < previous
+        && health.total() > previous
     {
         play(&mut commands, &sounds.hit);
     }
-    *last = Some(health.current);
+    *last = Some(health.total());
 }
 
 /// Правка тайлов (стройка/разбор) — рабочий звук.

@@ -1143,7 +1143,7 @@ pub fn sync_overheads(
     visuals: Query<(Entity, &RemotePlayerVisual)>,
     roles: Query<&ssr_core::roles::PlayerRole>,
     ssds: Query<&ssr_core::mechanics::Ssd>,
-    healths: Query<&ssr_core::inventory::Health>,
+    healths: Query<&ssr_core::damage::Damageable>,
     jobs: Query<(Entity, &JobIconOverlay)>,
     ssd_icons: Query<(Entity, &SsdOverlay)>,
     bars: Query<(Entity, &HealthBarOverlay)>,
@@ -1241,8 +1241,9 @@ pub fn sync_overheads(
         let fraction = healths
             .get(*data)
             .ok()
+            // Доля «здоровья» до крита (`CRIT_THRESHOLD`), в крите — пусто.
             .map(|health| {
-                (health.current as f32 / health.max.max(1) as f32).clamp(0.0, 1.0)
+                (1.0 - health.total() / ssr_core::damage::CRIT_THRESHOLD).clamp(0.0, 1.0)
             });
         let existing = bars.iter().find(|(_, overlay)| overlay.owner == *owner);
         let Some(fraction) = fraction else {

@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 
 /// Версия протокола. Несовпадение при рукопожатии = отказ соединения (проверка в T1.2).
 /// v14 — IC-каналы чата (`Local`, `Whisper`, `Emotes`).
-pub const PROTOCOL_VERSION: u32 = 14;
+/// v15 — урон по типам и состояние моба (`Damageable`), лечение (`Heal`, `DoAfterBar`).
+pub const PROTOCOL_VERSION: u32 = 15;
 
 /// Порт игрового сервера по умолчанию (T1.2).
 pub const DEFAULT_SERVER_PORT: u16 = 7777;
@@ -189,6 +190,9 @@ pub enum ActionKind {
     Rejuvenate { entity: u64 },
     /// Админ-верб «Стать призраком» (`aghost`).
     AdminGhost,
+    /// Лечить цель предметом из активной руки (`HealingSystem.TryHeal`:
+    /// `AfterInteract` по цели или `UseInHand` на себя).
+    Heal { target: u64 },
     /// Верб «View Variables» (`VvVerb`): открыть окно переменных сущности.
     ViewVariables { entity: u64 },
     /// Снять надетый предмет (верб на носителе: ПКМ по себе/игроку — вербы

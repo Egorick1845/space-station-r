@@ -722,20 +722,6 @@ fn send_interact(
 #[derive(Component)]
 pub struct AlertRoot;
 
-/// Алерт здоровья (`HumanHealth` в alerts.yml): 5 иконок `human_alive.rsi`
-/// health0..health4. Уровень — как `MobThresholdSystem`: лерп от 0 (максимальная
-/// тяжесть) до 4 (здоров) по проценту до следующего порога состояния.
-pub fn health_alert_level(health: &ssr_core::inventory::Health) -> u8 {
-    // `MobThresholdSystem` сборки: `severity = round(lerp(0, 4, доля урона до
-    // следующего состояния))`, иконки HumanHealth — health0..health4 по
-    // возрастанию severity. То есть 0 урона → health0 («ХОРОШО», зелёная) и
-    // порог крита → health4 («ОПАСНО!», красная). Раньше у нас было наоборот:
-    // полностью здоровый игрок показывал красную иконку опасности.
-    let damage = (health.max - health.current).max(0) as f32;
-    let fraction = (damage / health.max.max(1) as f32).clamp(0.0, 1.0);
-    (4.0 * fraction).round().clamp(0.0, 4.0) as u8
-}
-
 /// Иконка алерта: ключ RSI и текущий кадр. В сборке (`AlertControl` +
 /// `SpriteView`) спрайт алерта — это ФЛИПБУК из RSI: движок проигрывает кадры
 /// состояния по `delays` из meta.json (`SpriteSystem.FrameUpdate`,
@@ -813,7 +799,7 @@ pub fn animate_alerts(
 }
 
 /// Подпись колонки алертов: уровни Health/Stamina и алерт давления (если есть).
-type AlertsSignature = (u8, u8, Option<(bool, u8)>, bool);
+type AlertsSignature = (ssr_core::damage::HealthAlert, u8, Option<(bool, u8)>, bool);
 
 /// Рисует колонку алертов: Health (5 иконок human_alive), Stamina
 /// (7 иконок stamina) и, в опасной зоне, давление (pressure.rsi) — правый
@@ -823,7 +809,7 @@ pub fn render_alerts_column(
     mut commands: Commands,
     own: Res<OwnPlayerEntity>,
     staminas: Query<&ssr_core::stamina::Stamina>,
-    healths: Query<&ssr_core::inventory::Health>,
+    healths: Query<&ssr_core::damage::Damageable>,
     knocked: Query<&ssr_core::mechanics::KnockedDown>,
     positions: Query<&ssr_core::PlayerPosition>,
     atmospheres: Query<(
@@ -837,8 +823,10 @@ pub fn render_alerts_column(
     let level_health = own
         .0
         .and_then(|entity| healths.get(entity).ok())
-        .map(health_alert_level)
-        .unwrap_or(0);
+        // Категория Health (`MobThresholdSystem.UpdateAlerts`): HumanHealth
+        // 0..4 у живого, HumanCrit в крите, HumanDead у мёртвого.
+        .map(|health| health.alert())
+        .unwrap_or(ssr_core::damage::HealthAlert::Health(0));
     let level_stamina = own
         .0
         .and_then(|entity| staminas.get(entity).ok())
@@ -880,7 +868,7 @@ pub fn render_alerts_column(
         return;
     }
     let mut icons = vec![
-        format!("sprites/ss14/Interface/Alerts/human_alive.rsi#health{level_health}"),
+        level_health.sprite_key(),
         format!("sprites/ss14/Interface/Alerts/stamina.rsi#stamina{level_stamina}"),
     ];
     if knockdown {

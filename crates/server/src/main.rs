@@ -17,6 +17,7 @@ use avian2d::prelude::{
 use bevy::app::ScheduleRunnerPlugin;
 use bevy::prelude::*;
 
+mod medical;
 mod weapons;
 use lightyear::connection::server::Start;
 use lightyear::prelude::server::*;
@@ -24,11 +25,12 @@ use lightyear::prelude::*;
 use ssr_core::atmosphere::Gas;
 use ssr_core::clothing::{Clothing, ClothingSlot};
 use ssr_core::inventory::{
-    Container, Hands, Health, HeldBy, Inventory, Item, ItemPosition, ItemStorage, SLOT_ANY,
+    Container, Hands, HeldBy, Inventory, Item, ItemPosition, ItemStorage, SLOT_ANY,
 };
 use ssr_core::mechanics::{
         FacialHair, Hair, PlayerName, Sex, facial_hair_style_names, hair_style_names,
     };
+use ssr_core::damage::{DamageSpecifier, DamageType, Damageable, MobState};
 use ssr_core::mechanics::{Ghost, KnockedDown, Sprinting};
 use ssr_core::power::{Cable, Consumer, Generator, Light, Powered};
 use ssr_core::roles::{Access, PlayerRole, RoleSet};
@@ -153,6 +155,8 @@ fn main() {
             .chain(),
     );
     app.add_message::<DamageEvent>();
+    app.init_resource::<medical::HealRequests>();
+    app.init_resource::<medical::DoAfterIds>();
     app.add_message::<DeathEvent>();
     app.add_systems(
         Update,
@@ -160,7 +164,14 @@ fn main() {
             tick_logger,
             handle_client_messages,
             // Урон применяется сразу после разбора очереди действий (T4.1).
-            (process_actions, apply_damage, respawn_dead).chain(),
+            (
+                process_actions,
+                medical::start_healing,
+                medical::tick_healing,
+                apply_damage,
+                respawn_dead,
+            )
+                .chain(),
             flush_system_chat,
             movement,
             // Тянуть за собой (Pull): цель идёт за игроком после движения.
@@ -185,6 +196,8 @@ fn main() {
             // Атмосфера (T4.3): диффузия, урон от разгерметизации.
             simulate_atmosphere,
             suffocation,
+            // Медицина: дыхание (удушье в крите) и пассивная регенерация.
+            (medical::breathing, medical::passive_regen, medical::medical_test),
             auto_doors,
             knockdown_tick,
             power_grid,
@@ -1193,7 +1206,11 @@ fn suffocation(
         };
         damage_events.write(DamageEvent {
             target: entry.player,
-            amount: ssr_core::atmosphere::VACUUM_DAMAGE_PER_SECOND,
+            // Вакуум/нет кислорода — удушье (`Respirator.damage: Asphyxiation`).
+            damage: DamageSpecifier::of(
+                DamageType::Asphyxiation,
+                ssr_core::atmosphere::VACUUM_DAMAGE_PER_SECOND as f32,
+            ),
             source: DamageSource::Environment { cause },
         });
         tracing::info!(player = ?entry.player, pressure = gas.pressure, oxygen = gas.oxygen, cause, "suffocation damage");
@@ -1650,13 +1667,16 @@ enum DamageSource {
     },
     /// Среда (T4.3): разгерметизация, нехватка кислорода, урон без убийцы.
     Environment { cause: &'static str },
+    /// Лечение предметом (`HealingSystem`): лекарь.
+    Healing { healer: Entity },
 }
 
 /// Урон, нанесённый за кадр (T4.1): пишется атакой, применяется apply_damage.
 #[derive(Message, Debug)]
 struct DamageEvent {
     target: Entity,
-    amount: i32,
+    /// Урон по типам (`DamageSpecifier`); отрицательный — лечение.
+    damage: DamageSpecifier,
     source: DamageSource,
 }
 
@@ -1758,6 +1778,8 @@ struct AuxParams<'w, 's> {
     observers: Query<'w, 's, &'static GhostObserver>,
     /// Спящие тела (Ssd) — кандидаты на переподключение.
     sleeping: Query<'w, 's, (Entity, &'static PlayerName), With<ssr_core::mechanics::Ssd>>,
+    /// Урон и состояние (крит запрещает действия и речь).
+    damageables: Query<'w, 's, &'static Damageable>,
 }
 
 /// Индекс из времени: без внешних RNG-зависимостей.
@@ -2147,7 +2169,7 @@ fn run_admin_command(
             format!("кикнут {target_name} ({reason})")
         }
         "heal" => {
-            commands.entity(player).insert(Health::default());
+            commands.entity(player).insert(Damageable::default());
             // Оживление: снятое лежание (смерть теперь оставляет тело лежать).
             commands.entity(player).remove::<KnockedDown>();
             commands.entity(player).remove::<RespawnPending>();
@@ -2475,6 +2497,39 @@ fn handle_client_messages(
     for (link_entity, remote_id, mut receiver) in receivers.iter_mut() {
         for message in receiver.receive() {
             content.stats.messages_in += 1;
+            // Крит/смерть (`MobStateSystem.CheckAct`): руки, экипировка,
+            // стрельба и спринт недоступны.
+            let blocked = matches!(
+                message,
+                ClientMessage::TakeInHand { .. }
+                    | ClientMessage::MoveHandToInventory { .. }
+                    | ClientMessage::DropHand { .. }
+                    | ClientMessage::Shoot { .. }
+                    | ClientMessage::Reload
+                    | ClientMessage::Pickup { .. }
+                    | ClientMessage::DropItem { .. }
+                    | ClientMessage::Equip { .. }
+                    | ClientMessage::Unequip { .. }
+                    | ClientMessage::StoragePut { .. }
+                    | ClientMessage::StorageTake { .. }
+                    | ClientMessage::TransferItem { .. }
+                    | ClientMessage::Craft { .. }
+                    | ClientMessage::ToggleSprint { sprint: true }
+            );
+            if blocked
+                && players
+                    .entries
+                    .iter()
+                    .find(|entry| entry.link == link_entity)
+                    .is_some_and(|entry| {
+                        aux.damageables
+                            .get(entry.player)
+                            .is_ok_and(|damageable| damageable.incapacitated())
+                    })
+            {
+                tracing::debug!(client = ?remote_id, "incapacitated: message ignored");
+                continue;
+            }
             match message {
                 ClientMessage::Connect {
                     protocol_version,
@@ -3266,6 +3321,17 @@ fn handle_client_messages(
                     if channel.is_ic() && sprint_state.ghosts.get(player).is_ok() {
                         channel = ChatChannel::Dead;
                     }
+                    // В крите речь и эмоции отменяются (`OnSpeakAttempt` →
+                    // `CheckAct`); OOC/LOOC остаются.
+                    if channel.is_ic()
+                        && aux
+                            .damageables
+                            .get(player)
+                            .is_ok_and(|damageable| damageable.incapacitated())
+                    {
+                        tracing::debug!(?player, "incapacitated: IC speech blocked");
+                        continue;
+                    }
                     if channel.is_ic() {
                         // Эмоции не капитализируются (`shouldCapitalize`).
                         let message = if channel == ChatChannel::Emotes {
@@ -3426,10 +3492,22 @@ fn handle_client_messages(
                     let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {
                         continue;
                     };
-                    actions.0.push((
-                        entry.player,
-                        QueuedAction::Do(ActionKind::Attack { target }),
-                    ));
+                    // Клик по игроку лечащим предметом вне боевого режима —
+                    // `AfterInteract` → `HealingSystem.TryHeal`, а не удар.
+                    let combat = inputs.get(entry.player).is_ok_and(|input| input.combat);
+                    let healing = hands
+                        .get(entry.player)
+                        .ok()
+                        .and_then(|h| h.active_item())
+                        .and_then(Entity::try_from_bits)
+                        .and_then(|item| items.get(item).ok())
+                        .is_some_and(|item| ssr_core::damage::healing_for(&item.name).is_some());
+                    let action = if healing && !combat {
+                        ActionKind::Heal { target }
+                    } else {
+                        ActionKind::Attack { target }
+                    };
+                    actions.0.push((entry.player, QueuedAction::Do(action)));
                 }
                 ClientMessage::UseItem { item, tx, ty } => {
                     let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {
@@ -3527,7 +3605,7 @@ fn handle_client_messages(
                 Position(Vector::new(spawn.0, spawn.1)),
                 Rotation::default(),
                 Hands::default(),
-                Health::default(),
+                Damageable::default(),
             ))
             .id();
         let player_bits = player.to_bits();
@@ -3785,7 +3863,11 @@ fn movement(
                 });
                 damage_events.write(DamageEvent {
                     target: player,
-                    amount: ssr_core::stamina::SPRINT_BREAK_DAMAGE as i32,
+                    // `SprintDamageSpecifier`: Blunt 10.
+                    damage: DamageSpecifier::of(
+                        DamageType::Blunt,
+                        ssr_core::stamina::SPRINT_BREAK_DAMAGE,
+                    ),
                     source: DamageSource::Environment {
                         cause: "sprint break",
                     },
@@ -3809,7 +3891,7 @@ fn movement(
         // Замедление от урона (`SlowOnDamage` в `Species/base.yml`):
         // урон ≥60 → ×0.7, ≥80 → ×0.5 (числа из сборки).
         let damage = health
-            .map(|health| (health.max - health.current).max(0) as f32)
+            .map(|health| health.total())
             .unwrap_or(0.0);
         let damage_mult = if damage >= SLOW_ON_DAMAGE_HIGH {
             SLOW_ON_DAMAGE_HIGH_MULT
@@ -4197,7 +4279,7 @@ fn spawn_map_entities(
 /// число аргументов системы: у функций-систем лимит 16 параметров).
 #[derive(bevy::ecs::system::SystemParam)]
 struct ActionQueries<'w, 's> {
-    healths: Query<'w, 's, &'static mut Health>,
+    healths: Query<'w, 's, &'static mut Damageable>,
     clothings: Query<'w, 's, &'static mut Clothing>,
     /// Хранилища предметов (пояса/сумки) и авто-закрытие дверей — здесь, чтобы
     /// у `process_actions` не превышался предел числа параметров (16).
@@ -4215,6 +4297,8 @@ struct ActionQueries<'w, 's> {
     ghosts: Query<'w, 's, &'static Ghost>,
     /// Наблюдатели — возврат в тело (верб aghost).
     observers: Query<'w, 's, &'static GhostObserver>,
+    /// Заявки на лечение (`ActionKind::Heal`).
+    heal_requests: ResMut<'w, medical::HealRequests>,
 }
 
 /// Доступ к двери (T4.2): дверь без ключа открыта всем, с ключом — только
@@ -4241,7 +4325,7 @@ type MovingPlayers<'w, 's> = Query<
         Option<&'static KnockedDown>,
         Option<&'static mut ssr_core::stamina::Stamina>,
         Option<&'static Sprinting>,
-        Option<&'static Health>,
+        Option<&'static Damageable>,
         Option<&'static Pulling>,
         // Призрак (Content.Shared/Ghost/GhostComponent.cs): скорости берутся
         // из observer.yml (8 ходьба / 12 бег тайлов в секунду).
@@ -4319,6 +4403,21 @@ fn process_actions(
                     )
                 {
                     tracing::debug!(?player, "ghost: взаимодействие запрещено");
+                    continue;
+                }
+                // Крит и смерть (`MobStateSystem.CheckAct`): никаких действий,
+                // кроме осмотра и админских вербов.
+                if world.healths.get(player).is_ok_and(|h| h.incapacitated())
+                    && !matches!(
+                        action,
+                        ActionKind::Examine { .. }
+                            | ActionKind::ViewVariables { .. }
+                            | ActionKind::AdminGhost
+                            | ActionKind::Delete { .. }
+                            | ActionKind::Rejuvenate { .. }
+                    )
+                {
+                    tracing::debug!(?player, "incapacitated: действие запрещено");
                     continue;
                 }
                 action
@@ -4430,6 +4529,25 @@ fn process_actions(
                             options.push(ActionOption {
                                 label: "Ударить".into(),
                                 action: ActionKind::Attack { target: entity },
+                                ..verb_default(ssr_core::verbs::VerbType::Interaction)
+                            });
+                        }
+                        // Лечащий предмет в руке → «Лечить» (у нас вербом:
+                        // в сборке это `AfterInteract`/`UseInHand` предмета).
+                        let healing_item = hand_item
+                            .and_then(Entity::try_from_bits)
+                            .and_then(|item| items.get(item).ok())
+                            .filter(|item| ssr_core::damage::healing_for(&item.name).is_some());
+                        if let Some(item) = healing_item
+                            && world.healths.get(target).is_ok()
+                            && (target == player || in_range(target))
+                        {
+                            options.push(ActionOption {
+                                label: format!(
+                                    "Лечить: {}",
+                                    world.catalogs.items.name_of(&item.name).to_lowercase()
+                                ),
+                                action: ActionKind::Heal { target: entity },
                                 ..verb_default(ssr_core::verbs::VerbType::Interaction)
                             });
                         }
@@ -4801,7 +4919,8 @@ fn process_actions(
                 };
                 damage_events.write(DamageEvent {
                     target: target_entity,
-                    amount: damage,
+                    // Ближний бой — Blunt (кулак и лом в сборке бьют Blunt).
+                    damage: DamageSpecifier::of(DamageType::Blunt, damage as f32),
                     source: DamageSource::Melee {
                         attacker: player,
                         weapon: weapon.clone(),
@@ -4850,12 +4969,19 @@ fn process_actions(
                 if let Ok(mut health) = world.healths.get_mut(target) {
                     tracing::info!(?player, ?target, "debug verb: rejuvenate");
                     // `rejuvenate` в сборке лечит полностью и снимает станы.
-                    health.heal();
+                    health.rejuvenate();
                 }
                 commands.entity(target).remove::<KnockedDown>();
             }
             // Админ-верб «Стать призраком» (`aghost`): переводим игрока в
             // состояние призрака — сквозь стены и невидимым для живых.
+            // Лечение (`HealingSystem.TryHeal`) — в модуле medical.
+            ActionKind::Heal { target } => {
+                let Some(target) = Entity::try_from_bits(target) else {
+                    continue;
+                };
+                world.heal_requests.0.push((player, target));
+            }
             ActionKind::AdminGhost => {
                 // Единая модель с командой ghost: наблюдатель + тело в SSD.
                 // Раньше верб снимал только Ghost — ColliderDisabled оставался
@@ -5217,19 +5343,23 @@ fn process_actions(
     }
 }
 
-/// Применяет урон из событий (T4.1): Health − amount, лог каждого попадания
-/// с источником, при нуле — событие смерти.
+/// Применяет урон из событий (`DamageableSystem.ChangeDamage`) и пороги
+/// состояний (`MobThresholdSystem.CheckThresholds`): 100 — крит (лежит,
+/// роняет предметы — `MobStateSystem.OnStateEnteredSubscribers`), 200 —
+/// смерть; лечение ниже 100 поднимает из крита.
 fn apply_damage(
+    mut commands: Commands,
     mut damage_events: MessageReader<DamageEvent>,
     mut death_events: MessageWriter<DeathEvent>,
-    mut healths: Query<&mut Health>,
+    mut healths: Query<&mut Damageable>,
 ) {
     for event in damage_events.read() {
         let Ok(mut health) = healths.get_mut(event.target) else {
-            tracing::warn!(target = ?event.target, "damage: target has no health");
+            tracing::warn!(target = ?event.target, "damage: target has no Damageable");
             continue;
         };
-        let dead = health.damage(event.amount);
+        let applied = health.change(&event.damage);
+        let transition = health.update_state();
         let (killer, weapon) = match &event.source {
             DamageSource::Melee { attacker, weapon } => {
                 (Some(*attacker), weapon.as_deref().unwrap_or("fist"))
@@ -5240,20 +5370,38 @@ fn apply_damage(
             }
             // Среда: убийцы нет, «оружие» — причина (vacuum/no_oxygen).
             DamageSource::Environment { cause } => (None, *cause),
+            DamageSource::Healing { healer } => (Some(*healer), "healing"),
         };
-        tracing::info!(
-            target = ?event.target,
-            amount = event.amount,
-            killer = ?killer,
-            weapon,
-            hp = health.current,
-            "damage applied"
-        );
-        if dead {
-            death_events.write(DeathEvent {
-                target: event.target,
-                killer,
-            });
+        if applied.total() != 0.0 {
+            tracing::info!(
+                target = ?event.target,
+                amount = applied.total(),
+                killer = ?killer,
+                weapon,
+                total = health.total(),
+                state = ?health.state,
+                "damage applied"
+            );
+        }
+        match transition {
+            Some((_, MobState::Critical)) => {
+                // Крит: лежит, пока урон не опустится ниже порога.
+                commands.entity(event.target).insert(KnockedDown {
+                    seconds: f32::MAX,
+                });
+                tracing::info!(target = ?event.target, "mob state: critical");
+            }
+            Some((MobState::Critical, MobState::Alive)) => {
+                commands.entity(event.target).remove::<KnockedDown>();
+                tracing::info!(target = ?event.target, "mob state: alive again");
+            }
+            Some((_, MobState::Dead)) => {
+                death_events.write(DeathEvent {
+                    target: event.target,
+                    killer,
+                });
+            }
+            _ => {}
         }
     }
 }
@@ -5348,7 +5496,7 @@ fn damage_test(
     };
     damage_events.write(DamageEvent {
         target: entry.player,
-        amount: 25,
+        damage: DamageSpecifier::of(DamageType::Blunt, 25.0),
         source: DamageSource::Melee {
             attacker: entry.player,
             weapon: None,
@@ -5364,16 +5512,24 @@ fn damage_test(
 /// задаём смещением по направлению броска (как «улетел на полтайла»).
 fn drop_hands_on_stam_crit(
     mut commands: Commands,
-    mut hands: Query<(&mut Hands, &Position, Option<&ssr_core::stamina::Stamina>)>,
+    mut hands: Query<(
+        &mut Hands,
+        &Position,
+        Option<&ssr_core::stamina::Stamina>,
+        Option<&Damageable>,
+    )>,
     items: Query<&Item>,
     knocked: Query<Entity, Added<KnockedDown>>,
 ) {
     for player in knocked.iter() {
-        let Ok((mut hand, position, stamina)) = hands.get_mut(player) else {
+        let Ok((mut hand, position, stamina, damageable)) = hands.get_mut(player) else {
             continue;
         };
-        // Только стамина-крит: при обычном нокдауне от урона руки не пустеют.
-        if !stamina.is_some_and(|stamina| stamina.critical) {
+        // Стамина-крит или крит/смерть по урону (`DropHandItemsEvent` в
+        // `MobStateSystem.OnStateEnteredSubscribers`, Goobstation).
+        if !stamina.is_some_and(|stamina| stamina.critical)
+            && !damageable.is_some_and(|damageable| damageable.incapacitated())
+        {
             continue;
         }
         let mut dropped = 0;
@@ -5704,7 +5860,7 @@ fn move_projectiles(
     time: Res<Time>,
     mut projectiles: Query<(Entity, &mut weapons::Projectile, &mut ItemPosition)>,
     map: Res<GameMap>,
-    players: Query<(Entity, &PlayerPosition, &Health)>,
+    players: Query<(Entity, &PlayerPosition, &Damageable)>,
     mut damage_events: MessageWriter<DamageEvent>,
     mut sounds: ResMut<weapons::SoundQueue>,
 ) {
@@ -5722,10 +5878,13 @@ fn move_projectiles(
             let dx = player_position.0[0] - x;
             let dy = player_position.0[1] - y;
             if dx * dx + dy * dy < (TILE_SIZE * 0.5) * (TILE_SIZE * 0.5) {
-                let amount: f32 = projectile.damage.iter().map(|(_, value)| value).sum();
+                // Урон снаряда по типам (`Projectile.damage` прототипа).
+                let damage = DamageSpecifier::from_pairs(
+                    projectile.damage.iter().map(|(id, value)| (id.as_str(), *value)),
+                );
                 damage_events.write(DamageEvent {
                     target: player,
-                    amount: amount.round() as i32,
+                    damage,
                     source: DamageSource::Projectile {
                         shooter: Entity::try_from_bits(projectile.shooter)
                             .unwrap_or(Entity::PLACEHOLDER),

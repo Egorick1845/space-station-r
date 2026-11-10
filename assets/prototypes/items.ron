@@ -65,6 +65,13 @@
         (id: "IronIngot", name: "Железный слиток", sprite: Some("Objects/Materials/ingots.rsi#iron"), size_id: Some("Small"), tags: ["material", "metal"]),
         // ---------------------------------------------------------- медицина
         (id: "Medkit", name: "Аптечка", sprite: Some("Objects/Specific/Medical/firstaidkits.rsi#advkit"), size_id: Some("Large"), tags: ["medical"]),
+        // Лечащие предметы (`Objects/Specific/Medical/healing.yml`, размер Small).
+        (id: "Brutepack", name: "Набор для ушибов", sprite: Some("Objects/Specific/Medical/medical.rsi#brutepack"), inhand: Some("Objects/Specific/Medical/medical.rsi#brutepack-inhand-right"), size_id: Some("Small"), tags: ["medical"]),
+        (id: "Ointment", name: "Мазь", sprite: Some("Objects/Specific/Medical/medical.rsi#ointment"), inhand: Some("Objects/Specific/Medical/medical.rsi#ointment-inhand-right"), size_id: Some("Small"), tags: ["medical"]),
+        (id: "Gauze", name: "Марлевый бинт", sprite: Some("Objects/Specific/Medical/medical.rsi#gauze"), inhand: Some("Objects/Specific/Medical/medical.rsi#gauze-inhand-right"), size_id: Some("Small"), tags: ["medical"]),
+        (id: "MedicatedSuture", name: "Медицинская нить", sprite: Some("Objects/Specific/Medical/medical.rsi#medicated-suture"), inhand: Some("Objects/Specific/Medical/medical.rsi#medicated-suture-inhand-right"), size_id: Some("Small"), tags: ["medical"]),
+        (id: "RegenerativeMesh", name: "Регенеративная сеть", sprite: Some("Objects/Specific/Medical/medical.rsi#regenerative-mesh"), inhand: Some("Objects/Specific/Medical/medical.rsi#regenerative-mesh-inhand-right"), size_id: Some("Small"), tags: ["medical"]),
+        (id: "Bloodpack", name: "Пакет крови", sprite: Some("Objects/Specific/Medical/medical.rsi#bloodpack"), inhand: Some("Objects/Specific/Medical/medical.rsi#bloodpack-inhand-right"), size_id: Some("Small"), tags: ["medical"]),
         // ------------------------------------------------------------- еда
         (id: "Bread", name: "Батон", sprite: Some("Objects/Consumable/Food/Baked/bread.rsi#baguette"), size_id: Some("Normal"), tags: ["food"]),
         (id: "Cola", name: "Банка колы", sprite: Some("Objects/Consumable/Drinks/cola.rsi#icon"), inhand: Some("Objects/Consumable/Drinks/cola.rsi#icon"), size_id: Some("Small"), tags: ["drink"]),

@@ -255,36 +255,6 @@ impl Hands {
     }
 }
 
-/// Здоровье (T4.1, минимум для атаки): урон снижает, смерть — возврат на спавн.
-#[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct Health {
-    pub current: i32,
-    pub max: i32,
-}
-
-impl Default for Health {
-    fn default() -> Self {
-        Self {
-            current: 100,
-            max: 100,
-        }
-    }
-}
-
-impl Health {
-    /// Нанести урон; true — цель погибла.
-    pub fn damage(&mut self, amount: i32) -> bool {
-        self.current = (self.current - amount).max(0);
-        self.current == 0
-    }
-
-    /// Полностью вылечить — дебаг-верб «Оживить» (`rejuvenate` в сборке лечит
-    /// и снимает станы; у нас здоровье и `KnockedDown`).
-    pub fn heal(&mut self) {
-        self.current = self.max;
-    }
-}
-
 /// Предмет удерживается игроком (руки/рюкзак): реплицируется, чтобы клиент
 /// рисовал предмет в руке владельца (SS14-модель, T3.3+).
 #[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
@@ -375,15 +345,6 @@ mod tests {
         assert!(!hands.has(1));
         hands.switch();
         assert_eq!(hands.active_item(), None);
-    }
-
-    #[test]
-    fn health_damage() {
-        let mut health = Health::default();
-        assert!(!health.damage(40));
-        assert_eq!(health.current, 60);
-        assert!(health.damage(999));
-        assert_eq!(health.current, 0);
     }
 
     #[test]

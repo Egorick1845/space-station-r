@@ -25,6 +25,7 @@ mod console;
 mod containers;
 mod content;
 mod crafting;
+mod do_after;
 mod doors;
 mod hud;
 mod humanoid;
@@ -197,6 +198,8 @@ fn main() {
             overhead_speech::spawn_speech_bubbles,
             overhead_speech::position_speech_bubbles,
             overhead_speech::sync_typing_clouds,
+            // Полоска DoAfter (лечение) над персонажем.
+            do_after::sync_do_after_bars,
         ),
     );
     // Space — спринт-тоггл (PORT_PLAN 2.2).
