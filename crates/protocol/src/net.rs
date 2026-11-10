@@ -19,7 +19,7 @@ pub fn register_replication(app: &mut bevy_app::App) {
     use ssr_core::atmosphere::ChunkAtmosphere;
     use ssr_core::clothing::Clothing;
     use ssr_core::inventory::{
-        Container, Hands, Health, HeldBy, Inventory, Item, ItemPosition, ItemStorage,
+        Container, Hands, HeldBy, Inventory, Item, ItemPosition, ItemStorage,
     };
     use ssr_core::mechanics::{
         FacialHair, Ghost, Hair, KnockedDown, PlayerName, Sex, Sprinting, Ssd,
@@ -39,7 +39,8 @@ pub fn register_replication(app: &mut bevy_app::App) {
     app.component::<Inventory>().replicate();
     app.component::<Item>().replicate();
     app.component::<Hands>().replicate();
-    app.component::<Health>().replicate();
+    app.component::<ssr_core::damage::Damageable>().replicate();
+    app.component::<ssr_core::damage::DoAfterBar>().replicate();
     app.component::<HeldBy>().replicate();
     app.component::<Container>().replicate();
     app.component::<ItemStorage>().replicate();
