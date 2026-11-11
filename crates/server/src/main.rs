@@ -17,6 +17,7 @@ use avian2d::prelude::{
 use bevy::app::ScheduleRunnerPlugin;
 use bevy::prelude::*;
 
+mod interaction;
 mod medical;
 mod weapons;
 use lightyear::connection::server::Start;
@@ -156,6 +157,7 @@ fn main() {
     );
     app.add_message::<DamageEvent>();
     app.init_resource::<medical::HealRequests>();
+    app.init_resource::<interaction::InteractionQueue>();
     app.init_resource::<medical::DoAfterIds>();
     app.add_message::<DeathEvent>();
     app.add_systems(
@@ -166,6 +168,7 @@ fn main() {
             // Урон применяется сразу после разбора очереди действий (T4.1).
             (
                 process_actions,
+                interaction::process_interactions,
                 medical::start_healing,
                 medical::tick_healing,
                 apply_damage,
@@ -196,8 +199,11 @@ fn main() {
             // Атмосфера (T4.3): диффузия, урон от разгерметизации.
             simulate_atmosphere,
             suffocation,
+            // Стопки: полное количество у новых стопочных предметов.
+            interaction::ensure_stacks,
             // Медицина: дыхание (удушье в крите) и пассивная регенерация.
             (medical::breathing, medical::passive_regen, medical::medical_test),
+            (interaction::items_test, interaction::log_hands_test),
             auto_doors,
             knockdown_tick,
             power_grid,
@@ -1780,6 +1786,10 @@ struct AuxParams<'w, 's> {
     sleeping: Query<'w, 's, (Entity, &'static PlayerName), With<ssr_core::mechanics::Ssd>>,
     /// Урон и состояние (крит запрещает действия и речь).
     damageables: Query<'w, 's, &'static Damageable>,
+    /// Запросы взаимодействия с предметами (руки, Z, SmartEquip, Alt, H).
+    interactions: ResMut<'w, interaction::InteractionQueue>,
+    /// Стопки (крафт тратит количество, а не предметы).
+    stacks: Query<'w, 's, &'static mut ssr_core::stack::Stack>,
 }
 
 /// Индекс из времени: без внешних RNG-зависимостей.
@@ -1903,6 +1913,7 @@ fn describe_target(
     atmospheres: &Atmospheres,
     catalogs: &ContentCatalog,
     prototypes: &ProtoCatalog,
+    stacks: &Query<&mut ssr_core::stack::Stack>,
 ) -> String {
     // Объект под курсором: предмет, ящик, дверь или генератор.
     if entity_bits != 0
@@ -1918,7 +1929,12 @@ fn describe_target(
                 .filter(|tags| !tags.is_empty())
                 .map(|tags| format!(" [{tags}]"))
                 .unwrap_or_default();
-            return format!("{name}{tags}");
+            // `OnStackExamined`: «В стопке N предметов.»
+            let stack = stacks
+                .get(entity)
+                .map(|stack| format!(" {}", ssr_core::stack::examine_text(stack.count)))
+                .unwrap_or_default();
+            return format!("{name}{tags}{stack}");
         }
         if let Ok(container) = containers.get(entity) {
             let count = container_positions
@@ -2448,9 +2464,14 @@ fn storage_accessible(
     player: Entity,
     container: Entity,
     player_position: [f32; 2],
+    held: bool,
 ) -> bool {
     if !item_storages.get(container).is_ok_and(|storage| storage.open) {
         return false;
+    }
+    // Сумка в руке (открыта по Z — `UseInHand`) доступна владельцу.
+    if held {
+        return true;
     }
     if clothings
         .get(player)
@@ -2502,6 +2523,10 @@ fn handle_client_messages(
             let blocked = matches!(
                 message,
                 ClientMessage::TakeInHand { .. }
+                    | ClientMessage::UseInHand
+                    | ClientMessage::HandClick { .. }
+                    | ClientMessage::SmartEquip { .. }
+                    | ClientMessage::AltInteract { .. }
                     | ClientMessage::MoveHandToInventory { .. }
                     | ClientMessage::DropHand { .. }
                     | ClientMessage::Shoot { .. }
@@ -2748,16 +2773,26 @@ fn handle_client_messages(
                     let Ok(mut inventory) = inventories.get_mut(player) else {
                         continue;
                     };
-                    // Материалы ищем в рюкзаке игрока.
-                    let have: Vec<String> = inventory
-                        .cells
-                        .iter()
-                        .flatten()
-                        .copied()
-                        .filter_map(Entity::try_from_bits)
-                        .filter_map(|entity| items.get(entity).ok())
-                        .map(|item| item.name.clone())
-                        .collect();
+                    // Материалы ищем в рюкзаке игрока; стопка считается своим
+                    // количеством (`StackComponent.Count`).
+                    let mut seen = Vec::new();
+                    let mut have: Vec<String> = Vec::new();
+                    for bits in inventory.cells.iter().flatten().copied() {
+                        if seen.contains(&bits) {
+                            continue;
+                        }
+                        seen.push(bits);
+                        let Some(entity) = Entity::try_from_bits(bits) else {
+                            continue;
+                        };
+                        let Ok(item) = items.get(entity) else {
+                            continue;
+                        };
+                        let count = aux.stacks.get(entity).map(|s| s.count).unwrap_or(1);
+                        for _ in 0..count {
+                            have.push(item.name.clone());
+                        }
+                    }
                     if !ssr_core::recipes::can_craft(&recipe, &have) {
                         tracing::warn!(recipe = %recipe.id, "craft: not enough materials");
                         continue;
@@ -2777,19 +2812,28 @@ fn handle_client_messages(
                             else {
                                 break;
                             };
-                            inventory.take(bits);
-                            if let Some(entity) = Entity::try_from_bits(bits) {
-                                commands.entity(entity).despawn();
+                            let Some(entity) = Entity::try_from_bits(bits) else {
+                                break;
+                            };
+                            // Из стопки — сколько нужно, остальное остаётся.
+                            let available = aux.stacks.get(entity).map(|s| s.count).unwrap_or(1);
+                            let take = available.min(left);
+                            if interaction::reduce_stack(&mut commands, &mut aux.stacks, entity, take)
+                            {
+                                inventory.take(bits);
                             }
-                            consumed += 1;
-                            left -= 1;
+                            consumed += take as usize;
+                            left -= take;
                         }
                     }
                     // Выдаём результат (по размеру из каталога, тетрис).
                     let (output_id, count) = recipe.output.clone();
                     let (w, h) = content.catalogs.items.size_of(&output_id);
                     let mut produced = 0usize;
-                    for _ in 0..count {
+                    // Стопочный результат — одной стопкой нужного размера.
+                    let stackable = content.catalogs.items.max_stack(&output_id).is_some();
+                    let spawns = if stackable { 1 } else { count };
+                    for _ in 0..spawns {
                         let entity = commands
                             .spawn((
                                 Item {
@@ -2802,12 +2846,17 @@ fn handle_client_messages(
                                 Rooms::default(),
                             ))
                             .id();
+                        if stackable {
+                            commands
+                                .entity(entity)
+                                .insert(ssr_core::stack::Stack { count });
+                        }
                         if inventory.put_first_fit(entity.to_bits(), w, h).is_none() {
                             tracing::warn!(item = %output_id, "craft: no room in inventory");
                             commands.entity(entity).despawn();
                             break;
                         }
-                        produced += 1;
+                        produced += if stackable { count as usize } else { 1 };
                     }
                     tracing::info!(
                         recipe = %recipe.id,
@@ -2845,6 +2894,51 @@ fn handle_client_messages(
                         sender.send::<GameChannel>(ServerMessage::Event {
                             kind: format!("admin:{reply}"),
                         });
+                    }
+                }
+                ClientMessage::UseInHand => {
+                    if let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) {
+                        aux.interactions
+                            .0
+                            .push((entry.player, interaction::Request::UseInHand));
+                    }
+                }
+                ClientMessage::HandClick { hand } => {
+                    if let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) {
+                        aux.interactions
+                            .0
+                            .push((entry.player, interaction::Request::HandClick(hand)));
+                    }
+                }
+                ClientMessage::SmartEquip { slot } => {
+                    let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {
+                        continue;
+                    };
+                    // Только пояс и рюкзак (Shift+E / Shift+B в keybinds.yml).
+                    let Some(slot) = ClothingSlot::from_id(&slot)
+                        .filter(|slot| matches!(slot, ClothingSlot::Belt | ClothingSlot::Back))
+                    else {
+                        continue;
+                    };
+                    aux.interactions
+                        .0
+                        .push((entry.player, interaction::Request::SmartEquip(slot)));
+                }
+                ClientMessage::AltInteract { entity } => {
+                    let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {
+                        continue;
+                    };
+                    if let Some(target) = Entity::try_from_bits(entity) {
+                        aux.interactions
+                            .0
+                            .push((entry.player, interaction::Request::AltInteract(target)));
+                    }
+                }
+                ClientMessage::ReleasePull => {
+                    if let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) {
+                        aux.interactions
+                            .0
+                            .push((entry.player, interaction::Request::ReleasePull));
                     }
                 }
                 ClientMessage::SwitchHand => {
@@ -2997,22 +3091,23 @@ fn handle_client_messages(
                         .get(entity)
                         .map(|item| item.name.clone())
                         .unwrap_or_default();
-                    let (w, h) = content.catalogs.items.size_of(&name);
-                    // Свободная активная рука — приоритет (как в SS14), иначе рюкзак.
-                    let mut taken = false;
-                    if let Ok(mut hand) = hands.get_mut(player)
-                        && hand.active_item().is_none()
-                    {
-                        taken = hand.take_in_active(item);
+                    // `UserInteraction`: пустая активная рука берёт предмет,
+                    // занятая — применяет к нему предмет из руки
+                    // (`InteractUsing`: слияние стопок, вложение в сумку).
+                    let busy = hands
+                        .get(player)
+                        .is_ok_and(|hand| hand.active_item().is_some());
+                    if busy {
+                        aux.interactions
+                            .0
+                            .push((player, interaction::Request::InteractUsing(entity)));
+                        continue;
                     }
+                    let taken = hands
+                        .get_mut(player)
+                        .is_ok_and(|mut hand| hand.take_in_active(item));
                     if !taken {
-                        let Ok(mut inventory) = inventories.get_mut(player) else {
-                            continue;
-                        };
-                        if inventory.put_first_fit(item, w, h).is_none() {
-                            tracing::warn!(name, "pickup: no room");
-                            continue;
-                        }
+                        continue;
                     }
                     commands
                         .entity(entity)
@@ -3233,6 +3328,9 @@ fn handle_client_messages(
                         player,
                         container_entity,
                         positions.get(player).map(|p| p.0).unwrap_or_default(),
+                        hands
+                            .get(player)
+                            .is_ok_and(|hand| hand.has(container_entity.to_bits())),
                     ) {
                         continue;
                     }
@@ -3271,6 +3369,9 @@ fn handle_client_messages(
                         player,
                         container_entity,
                         positions.get(player).map(|p| p.0).unwrap_or_default(),
+                        hands
+                            .get(player)
+                            .is_ok_and(|hand| hand.has(container_entity.to_bits())),
                     ) {
                         continue;
                     }
@@ -4299,6 +4400,10 @@ struct ActionQueries<'w, 's> {
     observers: Query<'w, 's, &'static GhostObserver>,
     /// Заявки на лечение (`ActionKind::Heal`).
     heal_requests: ResMut<'w, medical::HealRequests>,
+    /// Разделение стопок и передача предмета (вербы).
+    interactions: ResMut<'w, interaction::InteractionQueue>,
+    /// Стопки (вербы «Разделить»).
+    stacks: Query<'w, 's, &'static mut ssr_core::stack::Stack>,
 }
 
 /// Доступ к двери (T4.2): дверь без ключа открыта всем, с ключом — только
@@ -4435,6 +4540,7 @@ fn process_actions(
                     &world.atmospheres,
                     &world.catalogs,
                     &world.prototypes,
+                    &world.stacks,
                 );
                 tracing::info!(?player, %text, "examine");
                 if let Some(link) = players
@@ -4532,6 +4638,24 @@ fn process_actions(
                                 ..verb_default(ssr_core::verbs::VerbType::Interaction)
                             });
                         }
+                        // Передать предмет из руки другому игроку (бывший Ctrl+клик:
+                        // Ctrl+ЛКМ в сборке — «тянуть»).
+                        if let Some(held) = hand_item
+                            .and_then(Entity::try_from_bits)
+                            .and_then(|item| items.get(item).ok())
+                            && target != player
+                            && world.healths.get(target).is_ok()
+                            && in_range(target)
+                        {
+                            options.push(ActionOption {
+                                label: format!(
+                                    "Передать: {}",
+                                    world.catalogs.items.name_of(&held.name).to_lowercase()
+                                ),
+                                action: ActionKind::Give { target: entity },
+                                ..verb_default(ssr_core::verbs::VerbType::Interaction)
+                            });
+                        }
                         // Лечащий предмет в руке → «Лечить» (у нас вербом:
                         // в сборке это `AfterInteract`/`UseInHand` предмета).
                         let healing_item = hand_item
@@ -4624,6 +4748,21 @@ fn process_actions(
                                 close_menu: Some(false),
                                 ..verb_default(ssr_core::verbs::VerbType::Examine)
                             });
+                            // Стопка: категория «Разделить»
+                            // (`OnStackAlternativeInteract`, AlternativeVerb):
+                            // «пополам» с приоритетом 1, затем количества.
+                            let count = world.stacks.get(target).map(|s| s.count).unwrap_or(1);
+                            let mut priority = 1;
+                            for (label, amount) in ssr_core::stack::split_options(count) {
+                                options.push(ActionOption {
+                                    label,
+                                    action: ActionKind::SplitStack { item: entity, amount },
+                                    category: Some(ssr_core::verbs::VerbCategory::Split),
+                                    priority,
+                                    ..verb_default(ssr_core::verbs::VerbType::Alternative)
+                                });
+                                priority = if priority == 1 { 0 } else { priority - 1 };
+                            }
                             let _ = item;
                         }
                         // Тянуть: верб ставит `PullingSystem.AddPullVerbs` —
@@ -4825,6 +4964,7 @@ fn process_actions(
                     &world.atmospheres,
                     &world.catalogs,
                     &world.prototypes,
+                    &world.stacks,
                 );
                 tracing::info!(?player, %text, "examine (verb)");
                 if let Some(link) = players
@@ -4859,20 +4999,10 @@ fn process_actions(
                     tracing::warn!(item, "verb pickup: too far");
                     continue;
                 }
-                let name = items
-                    .get(entity)
-                    .map(|i| i.name.clone())
-                    .unwrap_or_default();
-                let (w, h) = world.catalogs.items.size_of(&name);
-                let mut taken = false;
-                if let Ok(mut hand) = hands.get_mut(player)
-                    && hand.active_item().is_none()
-                {
-                    taken = hand.take_in_active(item);
-                }
-                if !taken && let Ok(mut inventory) = inventories.get_mut(player) {
-                    taken = inventory.put_first_fit(item, w, h).is_some();
-                }
+                // Верб «Взять» (`AddPickupVerb`) — только в пустую активную руку.
+                let taken = hands
+                    .get_mut(player)
+                    .is_ok_and(|mut hand| hand.take_in_active(item));
                 if taken {
                     commands
                         .entity(entity)
@@ -4975,6 +5105,23 @@ fn process_actions(
             }
             // Админ-верб «Стать призраком» (`aghost`): переводим игрока в
             // состояние призрака — сквозь стены и невидимым для живых.
+            // Разделение стопки и передача предмета — в модуле interaction.
+            ActionKind::SplitStack { item, amount } => {
+                if let Some(item) = Entity::try_from_bits(item) {
+                    world
+                        .interactions
+                        .0
+                        .push((player, interaction::Request::Split(item, amount)));
+                }
+            }
+            ActionKind::Give { target } => {
+                if let Some(target) = Entity::try_from_bits(target) {
+                    world
+                        .interactions
+                        .0
+                        .push((player, interaction::Request::Give(target)));
+                }
+            }
             // Лечение (`HealingSystem.TryHeal`) — в модуле medical.
             ActionKind::Heal { target } => {
                 let Some(target) = Entity::try_from_bits(target) else {
@@ -5302,12 +5449,12 @@ fn process_actions(
                         tracing::warn!(tx, ty, "build: tile occupied by a player");
                         continue;
                     }
-                    let Ok(mut hand) = hands.get_mut(player) else {
-                        continue;
-                    };
-                    hand.take(item);
-                    if let Some(entity) = Entity::try_from_bits(item) {
-                        commands.entity(entity).despawn();
+                    // Один лист из стопки (`ReduceCount`); пустая — удаляется.
+                    if let Some(entity) = Entity::try_from_bits(item)
+                        && interaction::reduce_stack(&mut commands, &mut world.stacks, entity, 1)
+                        && let Ok(mut hand) = hands.get_mut(player)
+                    {
+                        hand.take(item);
                     }
                     chunk.tiles[cell] = TileType::Wall;
                     tracing::info!(tx, ty, "tile built");

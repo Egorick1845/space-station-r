@@ -330,6 +330,7 @@ pub struct ItemSprites<'w, 's> {
     catalog: Res<'w, crate::content::ClientContent>,
     items: Query<'w, 's, &'static Item>,
     entity_map: Option<Res<'w, ServerEntityMap>>,
+    stacks: Query<'w, 's, &'static ssr_core::stack::Stack>,
 }
 
 impl ItemSprites<'_, '_> {
@@ -356,6 +357,18 @@ impl ItemSprites<'_, '_> {
     pub fn display_name(&self, bits: u64) -> Option<String> {
         let name = self.item_name(bits)?;
         Some(self.catalog.display_name(&name))
+    }
+
+    /// Количество в стопке по серверным bits (`None` — не стопка).
+    pub fn stack_count(&self, bits: u64) -> Option<u32> {
+        let server = Entity::try_from_bits(bits)?;
+        let client = self
+            .entity_map
+            .as_deref()?
+            .to_client()
+            .get(&server)
+            .copied()?;
+        self.stacks.get(client).ok().map(|stack| stack.count)
     }
 
     /// Иконка предмета по его id (для спрайта режима размещения).
@@ -738,7 +751,12 @@ fn storage_item_node(x: u8, y: u8, w: u8, h: u8) -> Node {
 /// предмет изображается прямо в слоте, активная рука подсвечивается рамкой
 /// `Slots/slot_highlight`; справа снизу — кнопка окна рюкзака (`Slots/toggle`).
 /// Отпечаток панели рук: руки, окно рюкзака и надетая одежда.
-type HandsSignature = (Hands, bool, Vec<(ssr_core::clothing::ClothingSlot, u64)>);
+type HandsSignature = (
+    Hands,
+    bool,
+    Vec<(ssr_core::clothing::ClothingSlot, u64)>,
+    Vec<(Option<String>, Option<u32>)>,
+);
 
 #[allow(clippy::too_many_arguments)]
 pub fn render_hands_panel(
@@ -761,7 +779,25 @@ pub fn render_hands_panel(
         .and_then(|entity| clothings.get(entity).ok())
         .map(|clothing| clothing.slots.clone())
         .unwrap_or_default();
-    let signature = (own_state.clone(), ui_open(&ui), clothing_signature);
+    // Имена и количества предметов в руках: предмет мог реплицироваться позже
+    // самих рук (раньше панель так и показывала «В руке пусто»), а стопка —
+    // поменять количество без смены рук.
+    let held_signature = own_state
+        .slots
+        .iter()
+        .map(|slot| {
+            (
+                slot.and_then(|bits| sprites.display_name(bits)),
+                slot.and_then(|bits| sprites.stack_count(bits)),
+            )
+        })
+        .collect();
+    let signature = (
+        own_state.clone(),
+        ui_open(&ui),
+        clothing_signature,
+        held_signature,
+    );
     if last.as_ref() == Some(&signature) {
         return;
     }
@@ -906,15 +942,29 @@ fn status_panel(
         }
         match item.and_then(|bits| sprites.display_name(bits)) {
             Some(name) => {
-                panel.spawn((
-                    Text::new(name),
-                    TextFont::from_font_size(ui::FONT_SMALL),
-                    TextColor(ui::TEXT),
-                    Node {
+                // Под именем — статус стопки (`StackStatusControl`:
+                // «Количество: N», белым).
+                let count = item.and_then(|bits| sprites.stack_count(bits));
+                panel
+                    .spawn(Node {
+                        flex_direction: FlexDirection::Column,
                         margin: UiRect::new(px(4), px(0), px(0), px(2)),
                         ..default()
-                    },
-                ));
+                    })
+                    .with_children(|column| {
+                        column.spawn((
+                            Text::new(name),
+                            TextFont::from_font_size(ui::FONT_SMALL),
+                            TextColor(ui::TEXT),
+                        ));
+                        if let Some(count) = count {
+                            column.spawn((
+                                Text::new(ssr_core::stack::status_text(count)),
+                                TextFont::from_font_size(ui::FONT_SMALL),
+                                TextColor(Color::WHITE),
+                            ));
+                        }
+                    });
             }
             None => {
                 panel.spawn((
@@ -1217,35 +1267,19 @@ pub fn inventory_slot_click(
 /// Клик по рукам: активная рука с предметом — убрать в рюкзак, иначе — переключить.
 pub fn hands_ui_click(
     hands_slots: HandClicks,
-    own: Res<OwnPlayerEntity>,
-    hands: Query<&Hands>,
     mut senders: Query<&mut MessageSender<ClientMessage>, With<Connected>>,
 ) {
-    let own_state = own_hands(&own, &hands).cloned();
+    // Решает сервер по `HandsSystem.UIHandClick`: использовать предмет
+    // активной руки, сделать руку активной, переложить предмет в активную
+    // руку или применить предмет активной руки к предмету нажатой.
     for (interaction, slot) in hands_slots.iter() {
         if *interaction != Interaction::Pressed {
             continue;
         }
-        let Some(state) = &own_state else {
-            continue;
-        };
-        let is_active = state.active == slot.0;
-        let item = state.item_in_hand(slot.0);
-        if is_active && item.is_some() {
-            for mut sender in senders.iter_mut() {
-                // Цель — центр игрока: клик по слоту кладёт предмет под себя
-                // (DropHand зажимает точку к игроку на сервере).
-                sender.send::<GameChannel>(ClientMessage::DropHand {
-                    target: [0.0, 0.0],
-                    throw: false,
-                });
-            }
-            tracing::info!("hand item stow sent");
-        } else if !is_active {
-            for mut sender in senders.iter_mut() {
-                sender.send::<GameChannel>(ClientMessage::SwitchHand);
-            }
+        for mut sender in senders.iter_mut() {
+            sender.send::<GameChannel>(ClientMessage::HandClick { hand: slot.0 });
         }
+        tracing::info!(hand = slot.0, "hand slot clicked");
     }
 }
 
@@ -1360,6 +1394,55 @@ pub fn world_click(
     if !menu.options.is_empty() {
         menu.options.clear();
     }
+    let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+    let alt = keys.any_pressed([KeyCode::AltLeft, KeyCode::AltRight]);
+    // Сущность под курсором: предмет на полу (клетка как у обводки), игрок,
+    // ящик — в таком порядке.
+    let hovered = {
+        const HALF: f32 = ssr_core::tiles::TILE_PX as f32 / 2.0;
+        items
+            .iter()
+            .find(|(_, _, position, held)| {
+                let point = Vec2::from_array(position.0);
+                held.player == 0
+                    && (point.x - world.x).abs() <= HALF
+                    && (point.y - world.y).abs() <= HALF
+            })
+            .map(|(entity, _, _, _)| entity)
+            .or_else(|| player_under_cursor(&visuals, &own, &positions, world).map(|(e, _)| e))
+            .or_else(|| container_under_cursor(&containers, world))
+            .and_then(|entity| {
+                entity_map
+                    .as_deref()
+                    .and_then(|map| map.to_server().get(&entity))
+                    .copied()
+                    .map(Entity::to_bits)
+            })
+    };
+    // Shift+ЛКМ — осмотр (`ExamineEntity`), объект или тайл.
+    if shift {
+        let tx = (world.x / TILE_UNITS).floor() as i32;
+        let ty = (world.y / TILE_UNITS).floor() as i32;
+        for mut sender in senders.iter_mut() {
+            sender.send::<GameChannel>(ClientMessage::Examine {
+                entity: hovered.unwrap_or(0),
+                tx,
+                ty,
+            });
+        }
+        tracing::info!(?hovered, "examine (shift+click)");
+        return;
+    }
+    // Alt+ЛКМ — `AltActivateItemInWorld`: первый альтернативный верб цели.
+    if alt {
+        if let Some(entity) = hovered {
+            for mut sender in senders.iter_mut() {
+                sender.send::<GameChannel>(ClientMessage::AltInteract { entity });
+            }
+            tracing::info!(entity, "alt interact (alt+click)");
+        }
+        return;
+    }
 
     // Ctrl+ЛКМ по крупному предмету или ящику — тянуть его за собой
     // (в SS14 это Ctrl+клик по объекту: `PullMessage` из Grab-интента).
@@ -1407,18 +1490,9 @@ pub fn world_click(
             return;
         };
         let target_bits = server_entity.to_bits();
-        if keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]) {
-            if let Some(item) = active_item {
-                for mut sender in senders.iter_mut() {
-                    sender.send::<GameChannel>(ClientMessage::TransferItem {
-                        item,
-                        to_slot: SLOT_ANY,
-                        target_player: target_bits,
-                    });
-                }
-                tracing::info!(item, "give item sent (ctrl+click)");
-            }
-        } else {
+        // Ctrl+ЛКМ — «тянуть» (`TryPullObject`); игроков тянуть у нас пока
+        // нельзя, а передача предмета теперь — верб «Передать».
+        if !keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]) {
             for mut sender in senders.iter_mut() {
                 sender.send::<GameChannel>(ClientMessage::Attack {
                     target: target_bits,
