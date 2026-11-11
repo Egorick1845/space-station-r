@@ -371,6 +371,14 @@ impl ItemSprites<'_, '_> {
         self.stacks.get(client).ok().map(|stack| stack.count)
     }
 
+    /// Спрайт предмета в сетке хранилища (`ItemGridPiece`: `storedSprite`,
+    /// иначе иконка) — у лома вертикальный, под форму 1×2.
+    pub fn stored_icon(&self, bits: u64) -> Option<&RsiSprite> {
+        let name = self.item_name(bits)?;
+        let key = self.catalog.stored_key(&name)?;
+        self.registry.get(&format!("sprites/ss14/{key}"))
+    }
+
     /// Иконка предмета по его id (для спрайта режима размещения).
     pub fn icon_by_name(&self, name: &str) -> Option<&RsiSprite> {
         item_icon(&self.registry, &self.catalog, name)
@@ -632,7 +640,7 @@ pub fn render_inventory_panel(
                     // Предметы: рамка по футпринту (`Storage/piece_*`) и спрайт ×2
                     // по центру занятой площади (ItemGridPiece.cs).
                     for (bits, x, y, w, h) in ssr_core::inventory::item_layout(inventory.cols, &inventory.cells) {
-                        let Some(sprite) = sprites.icon(bits) else {
+                        let Some(sprite) = sprites.stored_icon(bits) else {
                             continue;
                         };
                         let mut frame = crate::ui_theme::stretched(&theme.storage_tile);
@@ -1580,6 +1588,9 @@ fn player_under_cursor(
 pub fn action_menu_click(
     options: MenuClicks,
     mut menu: ResMut<ActionMenu>,
+    own: Res<OwnPlayerEntity>,
+    clothings: Query<&ssr_core::clothing::Clothing>,
+    mut uis: Query<&mut InventoryUi>,
     mut senders: Query<&mut MessageSender<ClientMessage>, With<Connected>>,
 ) {
     for (interaction, option) in options.iter() {
@@ -1589,6 +1600,21 @@ pub fn action_menu_click(
         let Some(entry) = menu.options.get(option.0).cloned() else {
             continue;
         };
+        // «Открыть хранилище» своего рюкзака: его сетка живёт на игроке и
+        // открывается окном рюкзака (V) — локально, без сервера.
+        let backpack = own
+            .0
+            .and_then(|entity| clothings.get(entity).ok())
+            .and_then(|clothing| clothing.get(ssr_core::clothing::ClothingSlot::Back));
+        if let ssr_protocol::ActionKind::Interact { entity } = entry.action
+            && backpack == Some(entity)
+        {
+            for mut ui in uis.iter_mut() {
+                ui.open = !ui.open;
+            }
+            menu.options.clear();
+            continue;
+        }
         for mut sender in senders.iter_mut() {
             sender.send::<GameChannel>(ClientMessage::PerformAction {
                 action: entry.action.clone(),
@@ -2310,6 +2336,22 @@ pub fn equip_slot_click(
             continue;
         }
         let clothing = own.0.and_then(|entity| clothings.get(entity).ok());
+        let held = own
+            .0
+            .and_then(|entity| hands.get(entity).ok())
+            .and_then(|hands| hands.active_item());
+        // `InventorySystem.OnUseSlot`: предмет в руке и вещь в слоте —
+        // `InteractUsing` (положить в рюкзак/пояс); у нас это та же логика,
+        // что и у быстрой экипировки.
+        if held.is_some() && clothing.and_then(|clothing| clothing.get(button.0)).is_some() {
+            for mut sender in senders.iter_mut() {
+                sender.send::<GameChannel>(ClientMessage::SmartEquip {
+                    slot: button.0.id().to_string(),
+                });
+            }
+            tracing::info!(slot = button.0.id(), "slot interact using sent");
+            continue;
+        }
         if let Some(item) = clothing.and_then(|clothing| clothing.get(button.0)) {
             for mut sender in senders.iter_mut() {
                 sender.send::<GameChannel>(ClientMessage::Unequip {
@@ -2334,6 +2376,53 @@ pub fn equip_slot_click(
             tracing::info!(slot = button.0.id(), item, "equip sent");
         }
     }
+}
+
+/// ПКМ по слоту руки или экипировки — меню действий предмета
+/// (`UIInventoryOpenContextMenu` / `HandsSystem` → `OpenVerbMenu`).
+#[allow(clippy::too_many_arguments)]
+pub fn slot_context_menu(
+    buttons: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window>,
+    own: Res<OwnPlayerEntity>,
+    hands: Query<&Hands>,
+    clothings: Query<&ssr_core::clothing::Clothing>,
+    hand_slots: Query<(&Interaction, &HandSlot)>,
+    equip_slots: Query<(&Interaction, &EquipSlotButton)>,
+    mut menu: ResMut<ActionMenu>,
+    mut senders: Query<&mut MessageSender<ClientMessage>, With<Connected>>,
+) {
+    if !buttons.just_pressed(MouseButton::Right) {
+        return;
+    }
+    let Some(own_entity) = own.0 else {
+        return;
+    };
+    let hovered = |interaction: &Interaction| *interaction != Interaction::None;
+    let item = hand_slots
+        .iter()
+        .find(|(interaction, _)| hovered(interaction))
+        .and_then(|(_, slot)| hands.get(own_entity).ok()?.item_in_hand(slot.0))
+        .or_else(|| {
+            equip_slots
+                .iter()
+                .find(|(interaction, _)| hovered(interaction))
+                .and_then(|(_, slot)| clothings.get(own_entity).ok()?.get(slot.0))
+        });
+    let Some(item) = item else {
+        return;
+    };
+    for mut sender in senders.iter_mut() {
+        sender.send::<GameChannel>(ClientMessage::RequestActions {
+            entity: item,
+            tx: 0,
+            ty: 0,
+        });
+    }
+    if let Some(cursor) = windows.single().ok().and_then(|w| w.cursor_position()) {
+        menu.cursor = cursor;
+    }
+    tracing::info!(item, "actions requested (slot)");
 }
 
 /// Кнопка слота экипировки.

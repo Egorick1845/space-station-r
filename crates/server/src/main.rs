@@ -2914,10 +2914,9 @@ fn handle_client_messages(
                     let Some(entry) = players.entry_by_link_mut(link_entity.to_bits()) else {
                         continue;
                     };
-                    // Только пояс и рюкзак (Shift+E / Shift+B в keybinds.yml).
-                    let Some(slot) = ClothingSlot::from_id(&slot)
-                        .filter(|slot| matches!(slot, ClothingSlot::Belt | ClothingSlot::Back))
-                    else {
+                    // Shift+E / Shift+B, а также клик по занятому слоту с
+                    // предметом в руке (`OnUseSlot` → `InteractUsing`).
+                    let Some(slot) = ClothingSlot::from_id(&slot) else {
                         continue;
                     };
                     aux.interactions
@@ -4748,6 +4747,34 @@ fn process_actions(
                                 close_menu: Some(false),
                                 ..verb_default(ssr_core::verbs::VerbType::Examine)
                             });
+                            // Хранилище (`SharedStorageSystem.AddUiVerb`,
+                            // ActivationVerb): «Открыть/Закрыть хранилище». У
+                            // своего рюкзака хранилище — сетка на игроке (окно
+                            // V), его открывает клиент.
+                            let own_backpack = world
+                                .clothings
+                                .get(player)
+                                .ok()
+                                .and_then(|c| c.get(ClothingSlot::Back))
+                                == Some(entity);
+                            let storage_open = world.item_storages.get(target).ok().map(|s| s.open);
+                            if own_backpack || storage_open.is_some() {
+                                let open = storage_open.unwrap_or(false);
+                                options.push(ActionOption {
+                                    label: if open {
+                                        "Закрыть хранилище".into()
+                                    } else {
+                                        "Открыть хранилище".into()
+                                    },
+                                    action: ActionKind::Interact { entity },
+                                    icon: Some(if open {
+                                        "Interface/VerbIcons/close.svg.192dpi.png".into()
+                                    } else {
+                                        "Interface/VerbIcons/open.svg.192dpi.png".into()
+                                    }),
+                                    ..verb_default(ssr_core::verbs::VerbType::Activation)
+                                });
+                            }
                             // Стопка: категория «Разделить»
                             // (`OnStackAlternativeInteract`, AlternativeVerb):
                             // «пополам» с приоритетом 1, затем количества.

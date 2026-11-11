@@ -50,6 +50,10 @@ pub struct ItemProto {
     /// (`BaseSheetStack`/`BaseMediumStack`), медицина — 15 (`medical.yml`).
     #[serde(default)]
     pub max_stack: Option<u32>,
+    /// Спрайт в сетке хранилища (`Item.storedSprite`): у вытянутых предметов
+    /// (лом, ключ, нож) — вертикальный `storage`, под форму 1×2.
+    #[serde(default)]
+    pub stored: Option<String>,
 }
 
 fn default_pullable() -> bool {
