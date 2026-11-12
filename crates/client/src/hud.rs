@@ -438,7 +438,22 @@ pub fn spawn_hud(
                 let icon = theme.icons.get(icon_index).cloned().unwrap_or_default();
                 // Первая кнопка панели в SS14 шире остальных (70×64).
                 let width = if index == 0 { 70.0 } else { 42.0 };
+                // Подсказка (`ToolTip` из GameTopMenuBar.xaml, ru-RU game-hud.ftl).
+                let tooltip = match action {
+                    HudAction::OpenSettings => "Открыть меню паузы.",
+                    HudAction::ToggleGuidebook => "Открыть меню руководства.",
+                    HudAction::ToggleCharacter => "Открыть меню персонажа.",
+                    HudAction::ToggleEmotes => "Открыть меню эмоций.",
+                    HudAction::ToggleCraft => "Открыть меню создания.",
+                    HudAction::ToggleAction => "Открыть меню действий.",
+                    HudAction::ToggleLanguage => "Открыть меню языков.",
+                    HudAction::ToggleAdmin => "Открыть меню администратора.",
+                    HudAction::ToggleSpawn => "Открыть меню песочницы.",
+                    HudAction::ToggleAHelp => "Открыть админ-помощь.",
+                    _ => "",
+                };
                 bar.spawn((
+                    crate::tooltip::Tooltip::new(tooltip),
                     action,
                     TopBarButton,
                     Button,
@@ -506,8 +521,24 @@ pub fn spawn_hud(
                 // (`harm.png` включён / `harmOff.png` выключен — как ActionButton
                 // в сборке, где иконка берётся из состояния режима).
                 let combat_button = matches!(action, HudAction::ToggleCombat);
+                // Подсказка действия (`ActionAlertTooltip`: название и описание).
+                let tooltip = match action {
+                    HudAction::ToggleCombat => crate::tooltip::Tooltip::with_body(
+                        "Боевой режим",
+                        "Войти в боевой режим: клики бьют, а не используют.",
+                    ),
+                    HudAction::Examine => crate::tooltip::Tooltip::with_body(
+                        "Осмотреть",
+                        "Shift+ЛКМ по объекту — описание.",
+                    ),
+                    _ => crate::tooltip::Tooltip::with_body(
+                        "Выбросить",
+                        "Положить предмет из активной руки под ноги.",
+                    ),
+                };
                 column
                     .spawn((
+                        tooltip,
                         action,
                         Button,
                         HudTint {

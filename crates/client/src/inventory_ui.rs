@@ -65,6 +65,19 @@ pub struct OwnPlayerEntity(pub Option<Entity>);
 pub struct ActionMenu {
     pub options: Vec<ActionOption>,
     pub cursor: Vec2,
+    /// Открытое подменю категории (`VerbCategory`).
+    pub category: Option<ssr_core::verbs::VerbCategory>,
+    /// Несколько сущностей под курсором — сначала их список (`EntityMenu`).
+    pub entities: Vec<crate::context_menu::MenuEntity>,
+}
+
+impl ActionMenu {
+    /// Закрыть меню целиком.
+    pub fn close(&mut self) {
+        self.options.clear();
+        self.entities.clear();
+        self.category = None;
+    }
 }
 
 /// Визуал другого игрока, привязанный к реплицированной сущности.
@@ -89,14 +102,6 @@ pub struct InventoryPanel;
 #[derive(Component)]
 pub struct HandsPanel;
 
-/// Корень меню действий.
-#[derive(Component)]
-pub struct ActionMenuRoot;
-
-/// Кнопка пункта меню действий (индекс в списке).
-#[derive(Component, Clone, Copy)]
-pub struct ActionMenuOption(pub usize);
-
 /// Иконка предмета в руке держателя.
 #[derive(Component)]
 pub struct InHandVisual {
@@ -112,13 +117,6 @@ type SlotClicks<'w, 's> =
 /// Клики по слотам рук.
 type HandClicks<'w, 's> =
     Query<'w, 's, (&'static Interaction, &'static HandSlot), (Changed<Interaction>, With<Button>)>;
-/// Клики по пунктам меню действий.
-type MenuClicks<'w, 's> = Query<
-    'w,
-    's,
-    (&'static Interaction, &'static ActionMenuOption),
-    (Changed<Interaction>, With<Button>),
->;
 
 /// Резолв своей сущности: bits из Welcome → ServerEntityMap → клиент.
 pub fn resolve_own_player(
@@ -1078,161 +1076,6 @@ pub fn icon_texture(cache: &mut IconCache, assets: &AssetServer, path: &str) -> 
         .clone()
 }
 
-/// Меню действий (вербов): строится из ответа сервера, позиционируется у курсора.
-/// Оформление — как `ContextMenuPopup`/`ContextMenuElement` в сборке: строки по
-/// 32 px, иконка 32×32 слева, шрифт по типу верба (`InteractionVerb` — жирный
-/// курсив, `ActivationVerb` — жирный, `AlternativeVerb` — курсив), недоступные
-/// вербы серые с причиной, категории — заголовками с отступом.
-#[allow(clippy::too_many_arguments)]
-pub fn render_action_menu(
-    mut commands: Commands,
-    menu: Res<ActionMenu>,
-    root: Query<Entity, With<ActionMenuRoot>>,
-    registry: Res<crate::rsi::RsiRegistry>,
-    assets: Res<AssetServer>,
-    mut icons: ResMut<IconCache>,
-    content: Res<crate::content::ClientContent>,
-    mut last: Local<Option<(usize, Vec2)>>,
-) {
-    let signature = (menu.options.len(), menu.cursor);
-    if last.as_ref() == Some(&signature) {
-        return;
-    }
-    *last = Some(signature);
-    for entity in root.iter() {
-        commands.entity(entity).despawn();
-    }
-    if menu.options.is_empty() {
-        return;
-    }
-    // В сборке меню — Popup у курсора с полем 2 px и высотой элемента 32 px;
-    // свыше 10 элементов появляется прокрутка (`ContextMenuPopup.xaml.cs:23`).
-    commands
-        .spawn((
-            ActionMenuRoot,
-            Node {
-                position_type: PositionType::Absolute,
-                left: px(menu.cursor.x.clamp(0.0, 1100.0)),
-                top: px(menu.cursor.y.clamp(0.0, 560.0)),
-                max_height: px(32.0 * 10.0),
-                flex_direction: FlexDirection::Column,
-                padding: UiRect::all(px(2)),
-                row_gap: px(2),
-                ..default()
-            },
-            BackgroundColor(Color::srgba(0.04, 0.04, 0.05, 0.96)),
-        ))
-        .with_children(|list| {
-            let mut current_category: Option<ssr_core::verbs::VerbCategory> = None;
-            for (index, option) in menu.options.iter().enumerate() {
-                // Заголовок категории — как элемент-категория в сборке
-                // (`AddVerbCategory`): иконка + текст, клик открывает подменю.
-                if option.category != current_category {
-                    current_category = option.category;
-                    if let Some(category) = option.category {
-                        list.spawn((
-                            Node {
-                                height: px(32),
-                                padding: UiRect::axes(px(6), px(4)),
-                                align_items: AlignItems::Center,
-                                column_gap: px(6),
-                                border: UiRect::all(px(1)),
-                                ..default()
-                            },
-                            BackgroundColor(Color::srgb(0.10, 0.10, 0.13)),
-                            BorderColor::from(Color::srgb(0.28, 0.28, 0.33)),
-                        ))
-                        .with_children(|row| {
-                            row.spawn((
-                                Text::new(category.text()),
-                                TextFont::from_font_size(13.0),
-                                TextColor(Color::srgb(0.85, 0.85, 0.88)),
-                            ));
-                        });
-                    }
-                }
-                let indented = option.category.is_some();
-                let (font_size, bold, _italic) = match option.style_class() {
-                    "InteractionVerb" => (12.0, true, true),
-                    "ActivationVerb" => (12.0, true, false),
-                    "AlternativeVerb" => (12.0, false, true),
-                    _ => (12.0, false, false),
-                };
-                let color = if option.disabled {
-                    Color::srgb(0.45, 0.45, 0.48)
-                } else {
-                    Color::srgb(0.92, 0.92, 0.94)
-                };
-                let label = match (&option.message, option.disabled) {
-                    (Some(message), true) => format!("{} ({message})", option.label),
-                    _ => option.label.clone(),
-                };
-                // Иконка: `path#state` — RSI (спрайты сущностей), иначе PNG
-                // (`Interface/VerbIcons/*.png` — `SpriteSpecifier.Texture`).
-                let icon = option.icon.as_deref().and_then(|path| {
-                    if path.contains('#') {
-                        registry.get(&format!("sprites/ss14/{path}")).map(|sprite| {
-                            (
-                                sprite.image.clone(),
-                                Some(TextureAtlas {
-                                    layout: sprite.layout.clone(),
-                                    index: sprite.index(0, 0),
-                                }),
-                            )
-                        })
-                    } else {
-                        Some((icon_texture(&mut icons, &assets, path), None))
-                    }
-                });
-                list.spawn((
-                    ActionMenuOption(index),
-                    Button,
-                    Node {
-                        height: px(32),
-                        min_width: px(160),
-                        margin: UiRect::left(px(if indented { 8 } else { 0 })),
-                        padding: UiRect::axes(px(6), px(2)),
-                        align_items: AlignItems::Center,
-                        column_gap: px(6),
-                        border: UiRect::all(px(1)),
-                        ..default()
-                    },
-                    BackgroundColor(if option.disabled {
-                        Color::srgb(0.08, 0.08, 0.10)
-                    } else {
-                        Color::srgb(0.11, 0.11, 0.14)
-                    }),
-                    BorderColor::from(Color::srgb(0.26, 0.26, 0.31)),
-                ))
-                .with_children(|row| {
-                    // Иконка 32×32 (`SpriteView`/`TextureRect` в сборке).
-                    if let Some((image, atlas)) = icon {
-                        let node = Node {
-                            width: px(24),
-                            height: px(24),
-                            ..default()
-                        };
-                        match atlas {
-                            Some(atlas) => {
-                                row.spawn((ImageNode::from_atlas_image(image, atlas), node));
-                            }
-                            None => {
-                                row.spawn((ImageNode::new(image), node));
-                            }
-                        }
-                    }
-                    let text = Text::new(label);
-                    row.spawn((
-                        text,
-                        TextFont::from_font_size(if bold { font_size + 0.5 } else { font_size }),
-                        TextColor(color),
-                    ));
-                });
-            }
-        });
-    let _ = &content;
-}
-
 // ---------------------------------------------------------------- ввод
 
 /// Клик по слоту рюкзака: взять предмет в активную руку (SS14-модель).
@@ -1320,6 +1163,8 @@ pub fn world_click(
     ui: Query<&Interaction, With<Button>>,
     mut menu: ResMut<ActionMenu>,
     mut senders: Query<&mut MessageSender<ClientMessage>, With<Connected>>,
+    content: Res<crate::content::ClientContent>,
+    names: Query<&ssr_core::mechanics::PlayerName>,
 ) {
     let Ok(window) = windows.single() else {
         return;
@@ -1339,68 +1184,96 @@ pub fn world_click(
         return;
     };
 
-    // Правый клик — меню контекстных действий (verbs).
+    // Правый клик — меню контекстных действий (verbs). Несколько сущностей
+    // под курсором — сначала их список (`EntityMenuUIController`), одна —
+    // сразу её вербы, ничего — вербы тайла.
     if buttons.just_pressed(MouseButton::Right) {
-        // Предмет под курсором: у него свои вербы, как в SS14 (взять, осмотреть
-        // и т.д.). Клетка та же, что у обводки в `doors::hover_outline`.
         const HALF: f32 = ssr_core::tiles::TILE_PX as f32 / 2.0;
-        let hovered_item = items
-            .iter()
-            .find(|(_, _, position, held)| {
-                let point = Vec2::from_array(position.0);
-                held.player == 0
-                    && (point.x - world.x).abs() <= HALF
-                    && (point.y - world.y).abs() <= HALF
-            })
-            .and_then(|(entity, _, _, _)| {
-                entity_map
-                    .as_deref()
-                    .and_then(|map| map.to_server().get(&entity))
-                    .copied()
-                    .map(Entity::to_bits)
+        let to_bits = |entity: Entity| {
+            entity_map
+                .as_deref()
+                .and_then(|map| map.to_server().get(&entity))
+                .copied()
+                .map(Entity::to_bits)
+        };
+        let mut found: Vec<crate::context_menu::MenuEntity> = Vec::new();
+        if let Some((player_entity, _)) = player_under_cursor(&visuals, &own, &positions, world)
+            && let Some(bits) = to_bits(player_entity)
+        {
+            let name = names
+                .get(player_entity)
+                .map(|n| n.0.clone())
+                .unwrap_or_else(|_| "Игрок".to_string());
+            found.push(crate::context_menu::MenuEntity {
+                bits,
+                name,
+                icon: None,
             });
-        if let Some(bits) = hovered_item {
-            for mut sender in senders.iter_mut() {
-                sender.send::<GameChannel>(ClientMessage::RequestActions {
-                    entity: bits,
-                    tx: 0,
-                    ty: 0,
+        }
+        for (entity, item, position, held) in items.iter() {
+            let point = Vec2::from_array(position.0);
+            if held.player != 0
+                || (point.x - world.x).abs() > HALF
+                || (point.y - world.y).abs() > HALF
+            {
+                continue;
+            }
+            if let Some(bits) = to_bits(entity) {
+                found.push(crate::context_menu::MenuEntity {
+                    bits,
+                    name: content.display_name(&item.name),
+                    icon: content.sprite_key(&item.name).map(str::to_string),
                 });
             }
-            menu.cursor = cursor;
-            tracing::info!(bits, "actions requested (item)");
-            return;
         }
-        let target = player_under_cursor(&visuals, &own, &positions, world);
-        let (entity, tx, ty) = match target {
-            Some((player_entity, _)) => {
-                let bits = entity_map
-                    .as_deref()
-                    .and_then(|m| m.to_server().get(&player_entity))
-                    .copied()
-                    .map(Entity::to_bits)
-                    .unwrap_or_default();
-                (bits, 0, 0)
-            }
-            None => (
-                0,
-                (world.x / TILE_UNITS).floor() as i32,
-                (world.y / TILE_UNITS).floor() as i32,
-            ),
-        };
-        for mut sender in senders.iter_mut() {
-            sender.send::<GameChannel>(ClientMessage::RequestActions { entity, tx, ty });
+        if let Some(container) = container_under_cursor(&containers, world)
+            && let Some(bits) = to_bits(container)
+        {
+            let name = containers
+                .get(container)
+                .map(|(_, c, _)| c.name.clone())
+                .unwrap_or_else(|_| "Ящик".to_string());
+            found.push(crate::context_menu::MenuEntity {
+                bits,
+                name,
+                icon: None,
+            });
         }
+        menu.close();
         menu.cursor = cursor;
-        tracing::info!(entity, tx, ty, "actions requested");
+        match found.len() {
+            0 => {
+                let tx = (world.x / TILE_UNITS).floor() as i32;
+                let ty = (world.y / TILE_UNITS).floor() as i32;
+                for mut sender in senders.iter_mut() {
+                    sender.send::<GameChannel>(ClientMessage::RequestActions { entity: 0, tx, ty });
+                }
+                tracing::info!(tx, ty, "actions requested (tile)");
+            }
+            1 => {
+                let bits = found[0].bits;
+                for mut sender in senders.iter_mut() {
+                    sender.send::<GameChannel>(ClientMessage::RequestActions {
+                        entity: bits,
+                        tx: 0,
+                        ty: 0,
+                    });
+                }
+                tracing::info!(bits, "actions requested");
+            }
+            count => {
+                menu.entities = found;
+                tracing::info!(count, "entity menu opened");
+            }
+        }
         return;
     }
 
     if !buttons.just_pressed(MouseButton::Left) {
         return;
     }
-    if !menu.options.is_empty() {
-        menu.options.clear();
+    if !menu.options.is_empty() || !menu.entities.is_empty() {
+        menu.close();
     }
     let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
     let alt = keys.any_pressed([KeyCode::AltLeft, KeyCode::AltRight]);
@@ -1584,20 +1457,45 @@ fn player_under_cursor(
     best
 }
 
-/// Клик по пункту меню действий: выполняем выбранное.
+/// Клик по строке меню: верб — выполнить, категория — открыть подменю,
+/// сущность из списка — запросить её вербы.
+#[allow(clippy::too_many_arguments)]
 pub fn action_menu_click(
-    options: MenuClicks,
+    rows: Query<(&Interaction, &crate::context_menu::MenuRow), Changed<Interaction>>,
     mut menu: ResMut<ActionMenu>,
     own: Res<OwnPlayerEntity>,
     clothings: Query<&ssr_core::clothing::Clothing>,
     mut uis: Query<&mut InventoryUi>,
     mut senders: Query<&mut MessageSender<ClientMessage>, With<Connected>>,
 ) {
-    for (interaction, option) in options.iter() {
+    use crate::context_menu::MenuRow;
+    for (interaction, row) in rows.iter() {
         if *interaction != Interaction::Pressed {
             continue;
         }
-        let Some(entry) = menu.options.get(option.0).cloned() else {
+        let index = match *row {
+            MenuRow::Category(category) => {
+                menu.category = Some(category);
+                continue;
+            }
+            MenuRow::Entity(index) => {
+                let Some(entity) = menu.entities.get(index).cloned() else {
+                    continue;
+                };
+                for mut sender in senders.iter_mut() {
+                    sender.send::<GameChannel>(ClientMessage::RequestActions {
+                        entity: entity.bits,
+                        tx: 0,
+                        ty: 0,
+                    });
+                }
+                menu.entities.clear();
+                tracing::info!(bits = entity.bits, name = %entity.name, "entity menu: verbs requested");
+                continue;
+            }
+            MenuRow::Verb(index) => index,
+        };
+        let Some(entry) = menu.options.get(index).cloned() else {
             continue;
         };
         // «Открыть хранилище» своего рюкзака: его сетка живёт на игроке и
@@ -1612,7 +1510,7 @@ pub fn action_menu_click(
             for mut ui in uis.iter_mut() {
                 ui.open = !ui.open;
             }
-            menu.options.clear();
+            menu.close();
             continue;
         }
         for mut sender in senders.iter_mut() {
@@ -1621,7 +1519,10 @@ pub fn action_menu_click(
             });
         }
         tracing::info!(label = %entry.label, "action performed");
-        menu.options.clear();
+        // `Verb.CloseMenu` (по умолчанию закрывает).
+        if entry.close_menu != Some(false) {
+            menu.close();
+        }
     }
 }
 
