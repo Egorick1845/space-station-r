@@ -19,6 +19,7 @@ use bevy::prelude::*;
 
 mod interaction;
 mod medical;
+mod throwing;
 mod weapons;
 use lightyear::connection::server::Start;
 use lightyear::prelude::server::*;
@@ -158,6 +159,7 @@ fn main() {
     app.add_message::<DamageEvent>();
     app.init_resource::<medical::HealRequests>();
     app.init_resource::<interaction::InteractionQueue>();
+    app.init_resource::<throwing::ThrowCooldowns>();
     app.init_resource::<medical::DoAfterIds>();
     app.add_message::<DeathEvent>();
     app.add_systems(
@@ -189,7 +191,7 @@ fn main() {
                 equip_spawned_guns,
                 fire_weapons,
                 move_projectiles,
-                move_thrown,
+                throwing::move_thrown,
                 flush_world_sounds,
                 flush_world_effects,
                 reload_weapons,
@@ -203,7 +205,7 @@ fn main() {
             interaction::ensure_stacks,
             // Медицина: дыхание (удушье в крите) и пассивная регенерация.
             (medical::breathing, medical::passive_regen, medical::medical_test),
-            (interaction::items_test, interaction::log_hands_test),
+            (interaction::items_test, interaction::log_hands_test, throwing::throw_test),
             auto_doors,
             knockdown_tick,
             power_grid,
@@ -693,22 +695,9 @@ struct DoorAuto {
     close_in: f32,
 }
 
-/// Скорость брошенного предмета, юнит/с: в сборке бросок ~10 тайлов/с
-/// (`SharedHandsSystem.TryThrow`, тайл 1 м → у нас 32 юнита).
-const THROW_SPEED: f32 = 320.0;
-/// Время полёта брошенного предмета, с (дальше гаснет скорость — как трение).
-const THROW_LIFETIME: f32 = 0.5;
 /// Дальность аккуратного дропа Q: InteractionRange (1.5 тайла) в сборке.
 const DROP_RANGE: f32 = INTERACT_RANGE;
 
-/// Брошенный предмет (`ThrownItemComponent` в сборке): летит по прямой,
-/// гасится о стену или игрока, затем остаётся лежать. Только сервер: клиент
-/// видит полёт по обновлениям `ItemPosition`.
-#[derive(Component)]
-struct Thrown {
-    velocity: [f32; 2],
-    lifetime: f32,
-}
 
 /// Атмосфера мира (T4.3, lite): единая сетка газа по тайлам карты.
 /// Хранится плоско (мир маленький), а клиенту отдаётся по чанкам
@@ -1790,6 +1779,8 @@ struct AuxParams<'w, 's> {
     interactions: ResMut<'w, interaction::InteractionQueue>,
     /// Стопки (крафт тратит количество, а не предметы).
     stacks: Query<'w, 's, &'static mut ssr_core::stack::Stack>,
+    /// Пауза между бросками.
+    throw_cooldowns: ResMut<'w, throwing::ThrowCooldowns>,
 }
 
 /// Индекс из времени: без внешних RNG-зависимостей.
@@ -3007,6 +2998,21 @@ fn handle_client_messages(
                     let Some(item) = hand.active_item() else {
                         continue;
                     };
+                    // `HandsComponent.ThrowCooldown`: не чаще раза в 0.5 с.
+                    let now = aux.time.elapsed_secs();
+                    if throw {
+                        if aux
+                            .throw_cooldowns
+                            .0
+                            .get(&player)
+                            .is_some_and(|until| now < *until)
+                        {
+                            continue;
+                        }
+                        aux.throw_cooldowns
+                            .0
+                            .insert(player, now + ssr_core::throwing::THROW_COOLDOWN);
+                    }
                     hand.take(item);
                     let Some(entity) = Entity::try_from_bits(item) else {
                         continue;
@@ -3021,20 +3027,20 @@ fn handle_client_messages(
                     let from = position.0;
                     let mut offset = [target[0] - from[0], target[1] - from[1]];
                     let distance = (offset[0] * offset[0] + offset[1] * offset[1]).sqrt();
-                    if throw && distance > 8.0 {
-                        // Бросок: скорость из сборки ~10 тайлов/с (TILE 32 → 320
-                        // юнит/с), время полёта ограничено — как дальность руки.
-                        let speed = THROW_SPEED;
-                        let dir = [offset[0] / distance, offset[1] / distance];
+                    // Бросок (`ThrowHeldItem`): до 8 тайлов, предмет
+                    // останавливается у курсора (`compensateFriction`).
+                    if throw
+                        && let Some(plan) = ssr_core::throwing::plan([
+                            offset[0] / TILE_SIZE,
+                            offset[1] / TILE_SIZE,
+                        ])
+                    {
                         commands.entity(entity).insert((
                             HeldBy { player: 0 },
                             ItemPosition(from),
-                            Thrown {
-                                velocity: [dir[0] * speed, dir[1] * speed],
-                                lifetime: THROW_LIFETIME,
-                            },
+                            throwing::Thrown::new(plan, player),
                         ));
-                        tracing::info!(item, target = ?target, "item thrown");
+                        tracing::info!(item, target = ?target, speed = plan.speed, "item thrown");
                         continue;
                     }
                     if distance > DROP_RANGE {
@@ -6080,37 +6086,6 @@ fn move_projectiles(
                 tracing::info!(proto = %projectile.proto, x, y, "projectile hit");
             }
             commands.entity(entity).despawn();
-        }
-    }
-}
-
-/// Полёт брошенного предмета (Ctrl+Q, `ThrownItemComponent` в сборке):
-/// летит по прямой, гасится о стену или игрока, затем просто лежит.
-/// Урон от броска в сборке считается по массе и скорости (`ThrowRegion`) —
-/// добавим при переносе масс предметов (PORT_PLAN 2.x).
-fn move_thrown(
-    mut commands: Commands,
-    time: Res<Time>,
-    mut thrown: Query<(Entity, &mut Thrown, &mut ItemPosition)>,
-    map: Res<GameMap>,
-    players: Query<&PlayerPosition>,
-) {
-    let dt = time.delta_secs();
-    for (entity, mut item, mut position) in thrown.iter_mut() {
-        position.0[0] += item.velocity[0] * dt;
-        position.0[1] += item.velocity[1] * dt;
-        item.lifetime -= dt;
-        let (x, y) = (position.0[0], position.0[1]);
-        let stopped = item.lifetime <= 0.0
-            || wall_at(&map, x, y)
-            || players.iter().any(|player_position| {
-                let dx = player_position.0[0] - x;
-                let dy = player_position.0[1] - y;
-                dx * dx + dy * dy < (TILE_SIZE * 0.5) * (TILE_SIZE * 0.5)
-            });
-        if stopped {
-            commands.entity(entity).remove::<Thrown>();
-            tracing::info!(item = ?entity, x, y, "thrown item landed");
         }
     }
 }

@@ -1846,6 +1846,45 @@ pub fn attack_test_mode(
     tracing::info!("attack-test: attack sent");
 }
 
+/// Тест `SSR_THROW_TEST=1`: с 5-й секунды каждые 2 с бросает предмет из руки
+/// (Ctrl+Q) на 5 тайлов вправо-вверх от своего игрока — вместе с серверным
+/// тестом и `SSR_AUTO_WALK` проверяет, что бросок не сбивает движение.
+pub fn throw_test_mode(
+    time: Res<Time>,
+    own: Res<OwnPlayerEntity>,
+    positions: Query<&PlayerPosition>,
+    mut senders: Query<&mut MessageSender<ClientMessage>, With<Connected>>,
+    mut state: Local<(f32, f32)>,
+) {
+    if std::env::var_os("SSR_THROW_TEST").is_none() {
+        return;
+    }
+    state.0 += time.delta_secs();
+    if state.0 < 5.0 || state.0 < state.1 {
+        return;
+    }
+    state.1 = state.0 + 2.0;
+    let Some(at) = own.0.and_then(|entity| positions.get(entity).ok()) else {
+        return;
+    };
+    // По ходу автохода (`SSR_AUTO_WALK_DIR="x,y"`), иначе вправо-вверх.
+    let dir = std::env::var("SSR_AUTO_WALK_DIR")
+        .ok()
+        .and_then(|value| {
+            let (x, y) = value.split_once(',')?;
+            Some([x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?])
+        })
+        .unwrap_or([1.0, 0.4]);
+    let target = [at.0[0] + 5.0 * TILE_UNITS * dir[0], at.0[1] + 5.0 * TILE_UNITS * dir[1]];
+    for mut sender in senders.iter_mut() {
+        sender.send::<GameChannel>(ClientMessage::DropHand {
+            target,
+            throw: true,
+        });
+    }
+    tracing::info!(?target, "throw-test: throw sent");
+}
+
 /// Клетки рюкзака, доступные мышью (для перетаскивания).
 type BackpackSlots<'w, 's> =
     Query<'w, 's, (&'static Interaction, &'static InvSlot), (With<Button>, Without<ContainerSlot>)>;
