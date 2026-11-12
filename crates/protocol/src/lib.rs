@@ -3,12 +3,15 @@
 //! ADR-4: репликация дельт; ADR-7: серверные ID сущностей.
 //! Крейт зависит только от serde (PLAN.md §4); транспорт появится в T1.2.
 
+pub mod status;
+
 use serde::{Deserialize, Serialize};
 
 /// Версия протокола. Несовпадение при рукопожатии = отказ соединения (проверка в T1.2).
 /// v14 — IC-каналы чата (`Local`, `Whisper`, `Emotes`).
 /// v15 — урон по типам и состояние моба (`Damageable`), лечение (`Heal`, `DoAfterBar`).
-pub const PROTOCOL_VERSION: u32 = 15;
+/// v16 — стопки (`Stack`), руки и быстрая экипировка как в SS14.
+pub const PROTOCOL_VERSION: u32 = 16;
 
 /// Порт игрового сервера по умолчанию (T1.2).
 pub const DEFAULT_SERVER_PORT: u16 = 7777;
@@ -67,6 +70,19 @@ pub enum ClientMessage {
     Pickup { item: u64 },
     /// Сообщение в чат (ввод по T). LOOC слышат только рядом стоящие.
     Chat { channel: ChatChannel, text: String },
+    /// Использовать предмет в активной руке (`UseItemInHand`, Z).
+    UseInHand,
+    /// Клик по слоту руки (`HandsSystem.UIHandClick`): использовать предмет в
+    /// активной руке, сделать руку активной, переложить предмет в активную
+    /// руку или применить предмет активной руки к предмету этой руки.
+    HandClick { hand: u8 },
+    /// Быстрая экипировка (`SmartEquipSystem`): `belt` (Shift+E) или `back`
+    /// (Shift+B) — убрать предмет из руки в слот/хранилище или достать.
+    SmartEquip { slot: String },
+    /// Alt+клик (`AltActivateItemInWorld`): первый альтернативный верб цели.
+    AltInteract { entity: u64 },
+    /// Отпустить того, кого тянешь (`ReleasePulledObject`, H).
+    ReleasePull,
     /// Индикатор набора (`TypingChangedEvent`): облачко над головой.
     Typing { state: TypingState },
     /// Бросить предмет из рюкзака на пол (перетаскивание из окна в мир, SS14).
@@ -193,6 +209,10 @@ pub enum ActionKind {
     /// Лечить цель предметом из активной руки (`HealingSystem.TryHeal`:
     /// `AfterInteract` по цели или `UseInHand` на себя).
     Heal { target: u64 },
+    /// Разделить стопку (`SharedStackSystem.UserSplit`): отделённое — в руку.
+    SplitStack { item: u64, amount: u32 },
+    /// Передать предмет из активной руки игроку (верб вместо Ctrl+клика).
+    Give { target: u64 },
     /// Верб «View Variables» (`VvVerb`): открыть окно переменных сущности.
     ViewVariables { entity: u64 },
     /// Снять надетый предмет (верб на носителе: ПКМ по себе/игроку — вербы

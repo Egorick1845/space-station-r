@@ -102,8 +102,13 @@ pub fn spawn_speech_bubbles(
     mut chat: ResMut<ChatState>,
     mut queues: ResMut<BubbleQueues>,
     mut bubbles: Query<&mut OverheadBubble>,
+    settings: Res<crate::settings::Settings>,
 ) {
     for bubble in chat.pending_bubbles.drain(..) {
+        // `hud.show_looc_above_head`: LOOC над головой можно выключить.
+        if bubble.kind == BubbleKind::Looc && !settings.show_looc_overhead {
+            continue;
+        }
         queues
             .queues
             .entry(bubble.speaker)

@@ -294,7 +294,7 @@ pub fn render_container_panel(
                     }
                     // Предметы поверх — во всю занятую площадь (тетрис).
                     for (bits, x, y, w, h) in ssr_core::inventory::item_layout(ssr_core::inventory::INVENTORY_COLS, &slots) {
-                        let Some(sprite) = sprites.icon(bits) else {
+                        let Some(sprite) = sprites.stored_icon(bits) else {
                             continue;
                         };
                         grid.spawn((
@@ -588,6 +588,7 @@ pub fn render_storage_window(
     mut commands: Commands,
     own: Res<crate::inventory_ui::OwnPlayerEntity>,
     clothings: Query<&ssr_core::clothing::Clothing>,
+    hands: Query<&ssr_core::inventory::Hands>,
     storages: Query<&ssr_core::inventory::ItemStorage>,
     inventories: Query<&Inventory>,
     items: Query<&ssr_core::inventory::Item>,
@@ -606,10 +607,16 @@ pub fn render_storage_window(
     };
     // Хранилище своего игрока: первый надетый предмет с открытым ItemStorage.
     let mut open_storage: Option<u64> = None;
-    if let Some(own_entity) = own.0
-        && let Ok(clothing) = clothings.get(own_entity)
-    {
-        for (_, bits) in &clothing.slots {
+    if let Some(own_entity) = own.0 {
+        // Надетые предметы и предметы в руках (сумка, открытая по Z).
+        let mut candidates: Vec<u64> = clothings
+            .get(own_entity)
+            .map(|clothing| clothing.slots.iter().map(|(_, bits)| *bits).collect())
+            .unwrap_or_default();
+        if let Ok(hands) = hands.get(own_entity) {
+            candidates.extend(hands.slots.iter().flatten().copied());
+        }
+        for bits in &candidates {
             let Some(client_entity) = resolve(*bits, entity_map.as_deref()) else {
                 continue;
             };

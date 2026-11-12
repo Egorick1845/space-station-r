@@ -39,6 +39,14 @@ impl ClientContent {
         self.proto_sprites.get(name).map(String::as_str)
     }
 
+    /// Спрайт в сетке хранилища (`storedSprite`), иначе обычная иконка.
+    pub fn stored_key(&self, name: &str) -> Option<&str> {
+        self.items
+            .by_id(name)
+            .and_then(|item| item.stored.as_deref())
+            .or_else(|| self.sprite_key(name))
+    }
+
     /// Имя для списка спавна: каталог, затем импортированный прототип.
     pub fn display_name(&self, id: &str) -> String {
         if let Some(item) = self.items.by_id(id) {

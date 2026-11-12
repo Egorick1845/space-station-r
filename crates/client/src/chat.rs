@@ -819,10 +819,12 @@ type InputTextQuery<'w, 's> = Query<
 >;
 
 /// Набор текста: T — открыть, Enter — отправить, Esc — закрыть, колесо — прокрутка.
+#[allow(clippy::too_many_arguments)]
 pub fn chat_input(
     mut events: MessageReader<KeyboardInput>,
     mut wheel: MessageReader<bevy::input::mouse::MouseWheel>,
     keys: Res<ButtonInput<KeyCode>>,
+    binds: Res<crate::keybinds::Keybinds>,
     console: Res<Console>,
     mut chat: ResMut<ChatState>,
     mut text: InputTextQuery,
@@ -845,9 +847,7 @@ pub fn chat_input(
     // T открывает поле ввода (как в SS14), если не занята консоль.
     if !chat.focused
         && !console.open
-        && keys.just_pressed(KeyCode::KeyT)
-        && !keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight])
-        && !keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight])
+        && binds.just_pressed(crate::keybinds::KeyFunction::FocusChat, &keys)
     {
         chat.focused = true;
         chat.scroll = 0;
