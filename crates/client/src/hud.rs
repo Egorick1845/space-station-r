@@ -954,18 +954,6 @@ pub fn sprint_hotkey(
     tracing::info!(sprint = !sprinting.0, "sprint toggle sent");
 }
 
-/// Отправляет осмотр тайла по мировым координатам.
-fn send_examine(
-    senders: &mut Query<&mut MessageSender<ClientMessage>, With<Connected>>,
-    world: Vec2,
-) {
-    let tx = (world.x / 32.0).floor() as i32;
-    let ty = (world.y / 32.0).floor() as i32;
-    for mut sender in senders.iter_mut() {
-        sender.send::<GameChannel>(ClientMessage::Examine { entity: 0, tx, ty });
-    }
-}
-
 /// Горячие клавиши: F5 спавн, F7 админ, F бой, E действие, Q бросить, C крафт.
 /// Предмет с пола поднимается кликом мыши (как в SS14).
 #[allow(clippy::too_many_arguments)]
@@ -1030,15 +1018,39 @@ pub fn hud_hotkeys(
             sender.send::<GameChannel>(ClientMessage::DropHand { target, throw });
         }
     }
+    let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+    // Z — использовать предмет в руке (`ActivateItemInHand`).
+    if keys.just_pressed(KeyCode::KeyZ) {
+        for mut sender in senders.iter_mut() {
+            sender.send::<GameChannel>(ClientMessage::UseInHand);
+        }
+    }
+    // H — отпустить того, кого тянешь (`ReleasePulledObject`).
+    if keys.just_pressed(KeyCode::KeyH) && !shift {
+        for mut sender in senders.iter_mut() {
+            sender.send::<GameChannel>(ClientMessage::ReleasePull);
+        }
+    }
+    // Shift+E / Shift+B — быстрая экипировка пояса и рюкзака
+    // (`SmartEquipBelt` / `SmartEquipBackpack` в keybinds.yml).
+    for (key, slot) in [(KeyCode::KeyE, "belt"), (KeyCode::KeyB, "back")] {
+        if shift && keys.just_pressed(key) {
+            for mut sender in senders.iter_mut() {
+                sender.send::<GameChannel>(ClientMessage::SmartEquip {
+                    slot: slot.to_string(),
+                });
+            }
+            tracing::info!(slot, "smart equip");
+        }
+    }
     // E — действие: дверь/ящик/предмет на полу под курсором; иначе применить
     // предмет из активной руки к тайлу (как `ActivateItemInWorld` в SS14).
-    // Shift+E — осмотр.
+    // Осмотр — Shift+ЛКМ (`ExamineEntity`), Shift+E занят поясом.
     if keys.just_pressed(KeyCode::KeyE)
         && let Some(world) = cursor_world(&windows, &camera)
     {
-        let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
         if shift {
-            send_examine(&mut senders, world);
+            // Shift+E — быстрая экипировка (выше).
         } else {
             send_interact(
                 &mut senders,
@@ -1082,7 +1094,7 @@ pub fn hud_hotkeys(
                     });
                 }
             }
-            HudAction::Examine => tracing::info!("осмотр: наведите курсор и нажмите E"),
+            HudAction::Examine => tracing::info!("осмотр: Shift+ЛКМ по объекту"),
             _ => {}
         }
     }
@@ -1168,7 +1180,7 @@ pub fn hud_click(
                     });
                 }
             }
-            HudAction::Examine => tracing::info!("осмотр: наведите курсор и нажмите E"),
+            HudAction::Examine => tracing::info!("осмотр: Shift+ЛКМ по объекту"),
             HudAction::Drop => {
                 // Кнопка «выбросить»: кладём под себя (сервер зажимает точку
                 // к игроку), параметров курсора здесь нет.

@@ -342,6 +342,7 @@ fn main() {
             inventory_ui::action_menu_click,
             inventory_ui::panel_buttons_click,
             inventory_ui::equip_slot_click,
+            inventory_ui::slot_context_menu,
             inventory_ui::render_character_panel,
         )
             .run_if(in_game),
@@ -431,6 +432,7 @@ fn main() {
             inventory_ui::unequip_test_mode,
             inventory_ui::build_test_mode,
             inventory_ui::attack_test_mode,
+            inventory_ui::throw_test_mode,
             crafting::craft_test_mode,
             console::admin_test_mode,
         )

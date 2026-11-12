@@ -27,6 +27,7 @@ const FLOOR_ITEM_Z: f32 = 0.75;
 /// поднятый или убранный в рюкзак — скрывается.
 pub fn sync_floor_item_icons(
     mut commands: Commands,
+    time: Res<Time>,
     items: Query<(Entity, &Item, Option<&ItemPosition>, &HeldBy)>,
     mut icons: Query<(&mut Transform, &mut Visibility), With<FloorItemIcon>>,
     registry: Res<RsiRegistry>,
@@ -37,8 +38,20 @@ pub fn sync_floor_item_icons(
         let on_floor = position.filter(|_| held.player == 0);
         match (on_floor, icons.get_mut(entity)) {
             (Some(position), Ok((mut transform, mut visibility))) => {
-                transform.translation.x = position.0[0];
-                transform.translation.y = position.0[1];
+                // Летящий предмет (бросок) сервер двигает каждый тик сети —
+                // без сглаживания он перескакивал рывками. Близкую цель
+                // догоняем плавно, далёкую (только что выпал из рук, был
+                // скрыт) ставим сразу.
+                let target = Vec2::from_array(position.0);
+                let current = transform.translation.truncate();
+                let hidden = *visibility == Visibility::Hidden;
+                let next = if hidden || current.distance(target) > 4.0 * 32.0 {
+                    target
+                } else {
+                    current.lerp(target, 1.0 - (-25.0 * time.delta_secs()).exp())
+                };
+                transform.translation.x = next.x;
+                transform.translation.y = next.y;
                 // Предмет на структуре с `PlaceableSurface` (стол) рисуется выше
                 // неё, на полу — под ней (как `PlaceableSurface` в сборке).
                 let on_surface = surfaces.0.contains(&crate::structures::tile_of(position.0));
@@ -240,6 +253,7 @@ pub fn pull_test_mode(
 #[allow(clippy::too_many_arguments)]
 pub fn floor_item_click(
     mouse: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
     windows: Query<&Window>,
     camera: Single<(&Camera, &GlobalTransform), With<Camera2d>>,
     entity_map: Option<Res<ServerEntityMap>>,
@@ -249,6 +263,18 @@ pub fn floor_item_click(
     ui: Query<&Interaction, With<Button>>,
 ) {
     if !mouse.just_pressed(MouseButton::Left) {
+        return;
+    }
+    // Shift/Ctrl/Alt+ЛКМ — осмотр, тянуть, альтернативное действие
+    // (`inventory_ui::world_click`), не подбор.
+    if keys.any_pressed([
+        KeyCode::ShiftLeft,
+        KeyCode::ShiftRight,
+        KeyCode::ControlLeft,
+        KeyCode::ControlRight,
+        KeyCode::AltLeft,
+        KeyCode::AltRight,
+    ]) {
         return;
     }
     // В режиме размещения (в т.ч. копии по P) ЛКМ ставит предмет, а не подбирает.
