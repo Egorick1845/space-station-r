@@ -545,7 +545,7 @@ pub struct RebindState {
 }
 
 /// Строк списка в окне (дальше — колесо мыши).
-const VISIBLE: usize = 12;
+const VISIBLE: usize = 11;
 
 /// Содержимое вкладки: строки «функция | основная | запасная».
 #[allow(clippy::type_complexity)]
@@ -574,6 +574,42 @@ pub fn render_keybinds_panel(
                 TextFont::from_font_size(12.0),
                 TextColor(Color::srgb(0.62, 0.62, 0.66)),
             ));
+            list.spawn(Node {
+                flex_direction: FlexDirection::Row,
+                column_gap: px(8),
+                align_items: AlignItems::Center,
+                margin: UiRect::vertical(px(4)),
+                ..default()
+            })
+            .with_children(|row| {
+                row.spawn((
+                    ResetBindsButton,
+                    Button,
+                    Node {
+                        padding: UiRect::axes(px(10), px(4)),
+                        border: UiRect::all(px(1)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgb(0.42, 0.13, 0.13)),
+                    BorderColor::from(Color::srgb(0.30, 0.30, 0.35)),
+                ))
+                .with_child((
+                    Text::new("Сбросить всё"),
+                    TextFont::from_font_size(13.0),
+                    TextColor(Color::srgb(0.88, 0.88, 0.90)),
+                ));
+                let total = KeyFunction::ALL.len();
+                row.spawn((
+                    Text::new(format!(
+                        "Строки {}–{} из {} (колесо мыши)",
+                        state.scroll + 1,
+                        (state.scroll + VISIBLE).min(total),
+                        total
+                    )),
+                    TextFont::from_font_size(12.0),
+                    TextColor(Color::srgb(0.62, 0.62, 0.66)),
+                ));
+            });
             let mut group = "";
             for function in KeyFunction::ALL.into_iter().skip(state.scroll).take(VISIBLE) {
                 if function.group() != group {
@@ -645,42 +681,6 @@ pub fn render_keybinds_panel(
                     }
                 });
             }
-            list.spawn(Node {
-                flex_direction: FlexDirection::Row,
-                column_gap: px(8),
-                align_items: AlignItems::Center,
-                margin: UiRect::top(px(6)),
-                ..default()
-            })
-            .with_children(|row| {
-                row.spawn((
-                    ResetBindsButton,
-                    Button,
-                    Node {
-                        padding: UiRect::axes(px(10), px(4)),
-                        border: UiRect::all(px(1)),
-                        ..default()
-                    },
-                    BackgroundColor(Color::srgb(0.42, 0.13, 0.13)),
-                    BorderColor::from(Color::srgb(0.30, 0.30, 0.35)),
-                ))
-                .with_child((
-                    Text::new("Сбросить всё"),
-                    TextFont::from_font_size(13.0),
-                    TextColor(Color::srgb(0.88, 0.88, 0.90)),
-                ));
-                let total = KeyFunction::ALL.len();
-                row.spawn((
-                    Text::new(format!(
-                        "Строки {}–{} из {} (колесо мыши)",
-                        state.scroll + 1,
-                        (state.scroll + VISIBLE).min(total),
-                        total
-                    )),
-                    TextFont::from_font_size(12.0),
-                    TextColor(Color::srgb(0.62, 0.62, 0.66)),
-                ));
-            });
         });
     }
 }

@@ -140,6 +140,7 @@ fn main() {
     app.init_resource::<chat::ChatState>();
     app.init_resource::<windows::WindowPositions>();
     app.init_resource::<settings::Settings>();
+    app.init_resource::<settings::SettingsDraft>();
     // Кэш PNG-иконок интерфейса (вербы/категории).
     app.init_resource::<inventory_ui::IconCache>();
     app.init_resource::<doors::DeniedDoors>();
@@ -434,7 +435,6 @@ fn main() {
             settings::settings_click,
             settings::settings_tab_click,
             settings::volume_slider_drag,
-            settings::update_settings_text,
             settings::menu_test,
         ),
     );
