@@ -30,6 +30,7 @@ mod doors;
 mod hud;
 mod humanoid;
 mod inventory_ui;
+mod keybinds;
 mod light_gpu;
 mod lighting;
 mod launcher;
@@ -207,6 +208,18 @@ fn main() {
     app.add_systems(Update, hud::sprint_hotkey);
     // Алерт выносливости (PORT_PLAN 1.5): 7 уровней, иконки из сборки.
     app.add_systems(Update, hud::render_alerts_column.run_if(in_game));
+    // Переназначаемые клавиши (вкладка «Управление»).
+    app.insert_resource(keybinds::Keybinds::load());
+    app.init_resource::<keybinds::RebindState>();
+    app.add_systems(
+        Update,
+        (
+            keybinds::render_keybinds_panel,
+            keybinds::keybind_clicks,
+            keybinds::capture_keybind,
+            keybinds::scroll_keybinds,
+        ),
+    );
     // Кадры иконок алертов играются по delays RSI (флипбук `SpriteView`).
     app.add_systems(Update, hud::animate_alerts);
     // Подсветка клеток при переносе предмета (PORT_PLAN 1.6).
@@ -657,18 +670,19 @@ fn send_connect(
 }
 
 /// Направление ввода WASD/стрелок.
-fn input_direction(input: &ButtonInput<KeyCode>) -> Vec2 {
+fn input_direction(input: &ButtonInput<KeyCode>, binds: &keybinds::Keybinds) -> Vec2 {
+    use keybinds::KeyFunction as F;
     let mut direction = Vec2::ZERO;
-    if input.any_pressed([KeyCode::KeyW, KeyCode::ArrowUp]) {
+    if binds.pressed(F::MoveUp, input) {
         direction.y += 1.0;
     }
-    if input.any_pressed([KeyCode::KeyS, KeyCode::ArrowDown]) {
+    if binds.pressed(F::MoveDown, input) {
         direction.y -= 1.0;
     }
-    if input.any_pressed([KeyCode::KeyA, KeyCode::ArrowLeft]) {
+    if binds.pressed(F::MoveLeft, input) {
         direction.x -= 1.0;
     }
-    if input.any_pressed([KeyCode::KeyD, KeyCode::ArrowRight]) {
+    if binds.pressed(F::MoveRight, input) {
         direction.x += 1.0;
     }
     direction.normalize_or_zero()
@@ -686,6 +700,7 @@ fn input_direction(input: &ButtonInput<KeyCode>) -> Vec2 {
 #[allow(clippy::too_many_arguments)]
 fn send_input(
     input: Res<ButtonInput<KeyCode>>,
+    binds: Res<keybinds::Keybinds>,
     time: Res<Time>,
     player_entity: Res<PlayerEntity>,
     console: Res<console::Console>,
@@ -731,7 +746,7 @@ fn send_input(
     } else if locked || console_open {
         Vec2::ZERO
     } else {
-        input_direction(&input)
+        input_direction(&input, &binds)
     };
     // Ввод шлём с частотой тика сети (T6.1): каждый кадр — это до тысяч
     // сообщений в секунду и лишний трафик. Смена направления уходит сразу.
@@ -745,7 +760,7 @@ fn send_input(
     state.last = movement;
     // Бег (Shift) и боевой режим (F) — в том же сообщении ввода.
     // В SS14 спринт по умолчанию, Shift включает ХОДЬБУ (DefaultSprinting).
-    let running = input.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight])
+    let running = binds.pressed(keybinds::KeyFunction::Walk, &input)
         || std::env::var_os("SSR_RUN_TEST").is_some();
     let combat = hud_state.combat;
     for mut sender in senders.iter_mut() {
@@ -760,10 +775,11 @@ fn send_input(
 /// Горячие клавиши: X — сменить руку (как в SS14).
 fn hotkeys(
     input: Res<ButtonInput<KeyCode>>,
+    binds: Res<keybinds::Keybinds>,
     console: Res<console::Console>,
     mut senders: Query<&mut MessageSender<ClientMessage>, With<Connected>>,
 ) {
-    if console.open || !input.just_pressed(KeyCode::KeyX) {
+    if console.open || !binds.just_pressed(keybinds::KeyFunction::SwapHands, &input) {
         return;
     }
     for mut sender in senders.iter_mut() {

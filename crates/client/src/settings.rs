@@ -466,7 +466,8 @@ fn spawn_menu(commands: &mut Commands, settings: &Settings) {
                 position_type: PositionType::Absolute,
                 left: Val::Percent(33.0),
                 top: Val::Percent(14.0),
-                width: px(470),
+                // Шире для вкладки «Управление» (две колонки привязок).
+                width: px(if settings.tab == SettingsTab::Controls { 520 } else { 470 }),
                 flex_direction: FlexDirection::Column,
                 row_gap: px(6),
                 padding: UiRect::all(px(12)),
@@ -547,10 +548,15 @@ fn spawn_menu(commands: &mut Commands, settings: &Settings) {
                 }
                 SettingsTab::Audio => volume_slider(panel, settings.volume),
                 SettingsTab::Controls => {
+                    // Список привязок наполняет `keybinds::render_keybinds_panel`
+                    // (`KeyRebindTab` в сборке).
                     panel.spawn((
-                        Text::new(KEYBINDS_HELP),
-                        TextFont::from_font_size(12.0),
-                        TextColor(Color::srgb(0.78, 0.78, 0.82)),
+                        crate::keybinds::KeybindsPanel,
+                        Node {
+                            flex_direction: FlexDirection::Column,
+                            row_gap: px(2),
+                            ..default()
+                        },
                     ));
                 }
                 SettingsTab::Accessibility => {
@@ -589,15 +595,6 @@ fn spawn_menu(commands: &mut Commands, settings: &Settings) {
                 ));
         });
 }
-
-/// Справка по управлению (вкладка «Управление»).
-pub const KEYBINDS_HELP: &str = "WASD — движение, Shift — ходьба, Space — спринт
-ЛКМ — использовать (в бою — удар), Shift+ЛКМ — осмотр, Ctrl+ЛКМ — тянуть, H — отпустить
-Alt+ЛКМ — альтернативное действие (стопка — пополам), ПКМ — действия по объекту, E — действие
-Z — использовать предмет в руке, X — сменить руку, Q — бросить, Ctrl+Q — метнуть
-Shift+E — пояс, Shift+B — рюкзак (убрать предмет из руки или достать)
-F — боевой режим, G — крафт, I — персонаж, F5 — спавн-меню, F7 — админ-меню
-` — консоль, Esc — закрыть окно/игровое меню";
 
 /// Ряд вкладок окна настроек: порядок и подписи как в `OptionsMenu.xaml`.
 fn tabs_row(panel: &mut RelatedSpawnerCommands<'_, ChildOf>, active: SettingsTab) {
