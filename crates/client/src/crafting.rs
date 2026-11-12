@@ -90,6 +90,7 @@ pub struct BuildButton(pub String);
 pub fn toggle_crafting(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
+    binds: Res<crate::keybinds::Keybinds>,
     console: Res<crate::console::Console>,
     chat: Res<crate::chat::ChatState>,
     mut state: ResMut<CraftingState>,
@@ -97,7 +98,10 @@ pub fn toggle_crafting(
 ) {
     // Пока игрок печатает в чате или в консоли — клавиша не открывает панель
     // («слишком настойчиво открывается»).
-    if console.open || chat.focused || !keys.just_pressed(KeyCode::KeyG) {
+    if console.open
+        || chat.focused
+        || !binds.just_pressed(crate::keybinds::KeyFunction::OpenCraftingMenu, &keys)
+    {
         return;
     }
     state.open = !state.open;

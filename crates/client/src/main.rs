@@ -24,14 +24,17 @@ mod chat;
 mod console;
 mod containers;
 mod content;
+mod context_menu;
 mod crafting;
 mod do_after;
 mod doors;
 mod hud;
 mod humanoid;
 mod inventory_ui;
+mod keybinds;
 mod light_gpu;
 mod lighting;
+mod launcher;
 mod lobby;
 mod overhead_speech;
 mod power_view;
@@ -39,6 +42,7 @@ mod rsi;
 mod settings;
 mod structures;
 mod tiles;
+mod tooltip;
 mod ui_theme;
 mod weapons;
 mod windows;
@@ -65,8 +69,10 @@ fn default_server_addr() -> SocketAddr {
 /// Адрес сервера для подключения (T5.4): из настроек («host:port», можно имя
 /// хоста), иначе локальный адрес по умолчанию.
 fn server_addr(settings: &settings::Settings) -> SocketAddr {
+    // Тестовые прогоны (`SSR_PORT`) всегда идут на свой локальный сервер, даже
+    // если в настройках сохранён другой адрес из лаунчера.
     let address = settings.server.trim();
-    if !address.is_empty() {
+    if std::env::var_os("SSR_PORT").is_none() && !address.is_empty() {
         if let Ok(parsed) = address.parse::<SocketAddr>() {
             return parsed;
         }
@@ -138,6 +144,7 @@ fn main() {
     app.init_resource::<chat::ChatState>();
     app.init_resource::<windows::WindowPositions>();
     app.init_resource::<settings::Settings>();
+    app.init_resource::<settings::SettingsDraft>();
     // Кэш PNG-иконок интерфейса (вербы/категории).
     app.init_resource::<inventory_ui::IconCache>();
     app.init_resource::<doors::DeniedDoors>();
@@ -205,7 +212,19 @@ fn main() {
     // Space — спринт-тоггл (PORT_PLAN 2.2).
     app.add_systems(Update, hud::sprint_hotkey);
     // Алерт выносливости (PORT_PLAN 1.5): 7 уровней, иконки из сборки.
-    app.add_systems(Update, hud::render_alerts_column);
+    app.add_systems(Update, hud::render_alerts_column.run_if(in_game));
+    // Переназначаемые клавиши (вкладка «Управление»).
+    app.insert_resource(keybinds::Keybinds::load());
+    app.init_resource::<keybinds::RebindState>();
+    app.add_systems(
+        Update,
+        (
+            keybinds::render_keybinds_panel,
+            keybinds::keybind_clicks,
+            keybinds::capture_keybind,
+            keybinds::scroll_keybinds,
+        ),
+    );
     // Кадры иконок алертов играются по delays RSI (флипбук `SpriteView`).
     app.add_systems(Update, hud::animate_alerts);
     // Подсветка клеток при переносе предмета (PORT_PLAN 1.6).
@@ -335,13 +354,17 @@ fn main() {
             // алерт `Health` в правой колонке (5 иконок human_alive.rsi),
             // давление — алерты Low/HighPressure только при опасности
             // (`BarotraumaSystem`), точные цифры — газоанализатор.
-            inventory_ui::render_action_menu,
+            context_menu::render_context_menu,
+            context_menu::context_menu_hover,
+            tooltip::show_tooltips,
+            context_menu::context_menu_test,
             inventory_ui::inventory_slot_click,
             inventory_ui::hands_ui_click,
             inventory_ui::world_click,
             inventory_ui::action_menu_click,
             inventory_ui::panel_buttons_click,
             inventory_ui::equip_slot_click,
+            inventory_ui::slot_context_menu,
             inventory_ui::render_character_panel,
         )
             .run_if(in_game),
@@ -419,7 +442,6 @@ fn main() {
             settings::settings_click,
             settings::settings_tab_click,
             settings::volume_slider_drag,
-            settings::update_settings_text,
             settings::menu_test,
         ),
     );
@@ -431,6 +453,7 @@ fn main() {
             inventory_ui::unequip_test_mode,
             inventory_ui::build_test_mode,
             inventory_ui::attack_test_mode,
+            inventory_ui::throw_test_mode,
             crafting::craft_test_mode,
             console::admin_test_mode,
         )
@@ -438,10 +461,10 @@ fn main() {
     );
     app.add_systems(
         Update,
-        (hud::close_windows_on_escape, screenshot_test_mode)
-            .run_if(in_game)
-            .chain(),
+        hud::close_windows_on_escape.run_if(in_game),
     );
+    // Снимок экрана для проверок — в любом состоянии (и в лобби).
+    app.add_systems(Update, screenshot_test_mode);
     app.add_systems(
         Update,
         (
@@ -497,16 +520,22 @@ fn main() {
     let auto_play = std::env::var_os("SSR_AUTO_PLAY").is_some();
     let show_lobby = !auto_play && (force_lobby || cfg!(not(debug_assertions)));
     if show_lobby {
-        app.init_resource::<lobby::LobbyInput>();
-        app.add_systems(Startup, lobby::spawn_lobby);
+        // Лаунчер (выбор сервера, как SS14.Launcher) → лобби сервера → игра.
+        app.init_resource::<launcher::Launcher>();
+        app.add_systems(Startup, launcher::spawn_launcher);
         app.add_systems(
             Update,
             (
                 enter_game,
+                launcher::launcher_test_mode,
+                launcher::poll_statuses,
+                launcher::launcher_click,
+                launcher::launcher_text_input,
+                launcher::launcher_scroll,
+                launcher::launcher_hover,
+                launcher::render_launcher,
+                lobby::spawn_lobby,
                 lobby::lobby_button,
-                lobby::lobby_field_click,
-                lobby::lobby_text_input,
-                lobby::lobby_field_text,
                 lobby::animate_lobby_background,
                 lobby::lobby_auto_ready,
             ),
@@ -648,18 +677,19 @@ fn send_connect(
 }
 
 /// Направление ввода WASD/стрелок.
-fn input_direction(input: &ButtonInput<KeyCode>) -> Vec2 {
+fn input_direction(input: &ButtonInput<KeyCode>, binds: &keybinds::Keybinds) -> Vec2 {
+    use keybinds::KeyFunction as F;
     let mut direction = Vec2::ZERO;
-    if input.any_pressed([KeyCode::KeyW, KeyCode::ArrowUp]) {
+    if binds.pressed(F::MoveUp, input) {
         direction.y += 1.0;
     }
-    if input.any_pressed([KeyCode::KeyS, KeyCode::ArrowDown]) {
+    if binds.pressed(F::MoveDown, input) {
         direction.y -= 1.0;
     }
-    if input.any_pressed([KeyCode::KeyA, KeyCode::ArrowLeft]) {
+    if binds.pressed(F::MoveLeft, input) {
         direction.x -= 1.0;
     }
-    if input.any_pressed([KeyCode::KeyD, KeyCode::ArrowRight]) {
+    if binds.pressed(F::MoveRight, input) {
         direction.x += 1.0;
     }
     direction.normalize_or_zero()
@@ -677,6 +707,7 @@ fn input_direction(input: &ButtonInput<KeyCode>) -> Vec2 {
 #[allow(clippy::too_many_arguments)]
 fn send_input(
     input: Res<ButtonInput<KeyCode>>,
+    binds: Res<keybinds::Keybinds>,
     time: Res<Time>,
     player_entity: Res<PlayerEntity>,
     console: Res<console::Console>,
@@ -722,7 +753,7 @@ fn send_input(
     } else if locked || console_open {
         Vec2::ZERO
     } else {
-        input_direction(&input)
+        input_direction(&input, &binds)
     };
     // Ввод шлём с частотой тика сети (T6.1): каждый кадр — это до тысяч
     // сообщений в секунду и лишний трафик. Смена направления уходит сразу.
@@ -736,7 +767,7 @@ fn send_input(
     state.last = movement;
     // Бег (Shift) и боевой режим (F) — в том же сообщении ввода.
     // В SS14 спринт по умолчанию, Shift включает ХОДЬБУ (DefaultSprinting).
-    let running = input.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight])
+    let running = binds.pressed(keybinds::KeyFunction::Walk, &input)
         || std::env::var_os("SSR_RUN_TEST").is_some();
     let combat = hud_state.combat;
     for mut sender in senders.iter_mut() {
@@ -751,10 +782,11 @@ fn send_input(
 /// Горячие клавиши: X — сменить руку (как в SS14).
 fn hotkeys(
     input: Res<ButtonInput<KeyCode>>,
+    binds: Res<keybinds::Keybinds>,
     console: Res<console::Console>,
     mut senders: Query<&mut MessageSender<ClientMessage>, With<Connected>>,
 ) {
-    if console.open || !input.just_pressed(KeyCode::KeyX) {
+    if console.open || !binds.just_pressed(keybinds::KeyFunction::SwapHands, &input) {
         return;
     }
     for mut sender in senders.iter_mut() {
@@ -848,6 +880,8 @@ fn receive_server(
                     // отбирала бы у этой сообщения (включая Welcome).
                     tracing::info!(count = options.len(), "actions received");
                     menu.options = options;
+                    menu.category = None;
+                    menu.entities.clear();
                 }
                 ServerMessage::EntityDelta { .. } => {} // дельты позиций — T1.3/T1.4
             }
@@ -1032,7 +1066,7 @@ fn asset_plugin() -> AssetPlugin {
 }
 
 /// Абсолютный путь к `<repo>/assets/`, вычисленный из окружения запуска.
-fn assets_file_path() -> String {
+pub(crate) fn assets_file_path() -> String {
     // `cargo run`: CARGO_MANIFEST_DIR = <repo>/crates/client → корень через два уровня.
     if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR")
         && let Some(root) = Path::new(&manifest_dir).ancestors().nth(2)

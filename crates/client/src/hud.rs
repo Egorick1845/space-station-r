@@ -383,12 +383,25 @@ pub fn spawn_hud(
     mut commands: Commands,
     own: Res<OwnPlayerEntity>,
     theme: Res<crate::ui_theme::UiTheme>,
-    roots: Query<(), With<HudRoot>>,
+    binds: Res<crate::keybinds::Keybinds>,
+    roots: Query<Entity, With<HudRoot>>,
 ) {
+    use crate::keybinds::KeyFunction as Key;
     use crate::ui_theme as ui;
-    if own.0.is_none() || !roots.is_empty() {
+    if own.0.is_none() {
         return;
     }
+    // Подписи клавиш берутся из привязок: после переназначения HUD
+    // пересобирается (`BoundKeyHelper.ShortKeyName` в сборке).
+    if !roots.is_empty() {
+        if !binds.is_changed() {
+            return;
+        }
+        for root in roots.iter() {
+            commands.entity(root).despawn();
+        }
+    }
+    let label = |function: Key| binds.short_label(function);
     // Верхняя панель — GameTopMenuBar (§11 SS14_PORT_PLAN, `GameTopMenuBar.xaml`):
     // 10 кнопок в ПОРЯДКЕ сборки, Escape 70×64 (ButtonOpenRight), остальные
     // 42×64 (ButtonSquare), AHelp замыкает. Иконка 24×24 (TextureScale 0.5) +
@@ -396,17 +409,17 @@ pub fn spawn_hud(
     // Action/Language/AHelp — окна-заглушки, пока их системы не перенесены.
     // Порядок и подписи:
     // (ключ, действие, индекс иконки TOP_ICONS)
-    let top: [(&str, HudAction, usize); 10] = [
-        ("Esc", HudAction::OpenSettings, 0),       // EscapeButton (hamburger)
-        ("Num0", HudAction::ToggleGuidebook, 1),   // GuidebookButton
-        ("I", HudAction::ToggleCharacter, 2),      // CharacterButton
-        ("Y", HudAction::ToggleEmotes, 3),         // EmotesButton
-        ("G", HudAction::ToggleCraft, 4),          // CraftingButton (hammer)
-        ("", HudAction::ToggleAction, 5),          // ActionButton (fist)
-        ("L", HudAction::ToggleLanguage, 6),       // LanguageButton
-        ("F7", HudAction::ToggleAdmin, 7),         // AdminButton (gavel)
-        ("F5", HudAction::ToggleSpawn, 8),         // SandboxButton
-        ("F1", HudAction::ToggleAHelp, 9),         // AHelpButton (info)
+    let top: [(String, HudAction, usize); 10] = [
+        ("Esc".to_string(), HudAction::OpenSettings, 0), // EscapeButton (hamburger)
+        (label(Key::OpenGuidebook), HudAction::ToggleGuidebook, 1), // GuidebookButton
+        (label(Key::OpenCharacterMenu), HudAction::ToggleCharacter, 2), // CharacterButton
+        (label(Key::OpenEmotesMenu), HudAction::ToggleEmotes, 3), // EmotesButton
+        (label(Key::OpenCraftingMenu), HudAction::ToggleCraft, 4), // CraftingButton
+        (String::new(), HudAction::ToggleAction, 5), // ActionButton (fist)
+        (label(Key::OpenLanguageMenu), HudAction::ToggleLanguage, 6), // LanguageButton
+        (label(Key::OpenAdminMenu), HudAction::ToggleAdmin, 7), // AdminButton (gavel)
+        (label(Key::OpenSandboxWindow), HudAction::ToggleSpawn, 8), // SandboxButton
+        (label(Key::OpenAHelp), HudAction::ToggleAHelp, 9), // AHelpButton (info)
     ];
     commands
         .spawn((
@@ -425,7 +438,22 @@ pub fn spawn_hud(
                 let icon = theme.icons.get(icon_index).cloned().unwrap_or_default();
                 // Первая кнопка панели в SS14 шире остальных (70×64).
                 let width = if index == 0 { 70.0 } else { 42.0 };
+                // Подсказка (`ToolTip` из GameTopMenuBar.xaml, ru-RU game-hud.ftl).
+                let tooltip = match action {
+                    HudAction::OpenSettings => "Открыть меню паузы.",
+                    HudAction::ToggleGuidebook => "Открыть меню руководства.",
+                    HudAction::ToggleCharacter => "Открыть меню персонажа.",
+                    HudAction::ToggleEmotes => "Открыть меню эмоций.",
+                    HudAction::ToggleCraft => "Открыть меню создания.",
+                    HudAction::ToggleAction => "Открыть меню действий.",
+                    HudAction::ToggleLanguage => "Открыть меню языков.",
+                    HudAction::ToggleAdmin => "Открыть меню администратора.",
+                    HudAction::ToggleSpawn => "Открыть меню песочницы.",
+                    HudAction::ToggleAHelp => "Открыть админ-помощь.",
+                    _ => "",
+                };
                 bar.spawn((
+                    crate::tooltip::Tooltip::new(tooltip),
                     action,
                     TopBarButton,
                     Button,
@@ -465,10 +493,10 @@ pub fn spawn_hud(
     // Колонка действий (ActionsBar): слоты 64×64, в углу — клавиша СЛОТА
     // (в SS14 это цифры 1..0, `TriggerAction(index)`), иконка — действие.
     // Порядок: как в движке, боевой режим первым (priority -100).
-    let actions: [(&str, HudAction, usize); 3] = [
-        ("1", HudAction::ToggleCombat, 2),
-        ("2", HudAction::Examine, 0),
-        ("3", HudAction::Drop, 1),
+    let actions: [(String, HudAction, usize); 3] = [
+        (label(Key::Hotbar1), HudAction::ToggleCombat, 2),
+        (label(Key::Hotbar2), HudAction::Examine, 0),
+        (label(Key::Hotbar3), HudAction::Drop, 1),
     ];
     commands
         .spawn((
@@ -493,8 +521,24 @@ pub fn spawn_hud(
                 // (`harm.png` включён / `harmOff.png` выключен — как ActionButton
                 // в сборке, где иконка берётся из состояния режима).
                 let combat_button = matches!(action, HudAction::ToggleCombat);
+                // Подсказка действия (`ActionAlertTooltip`: название и описание).
+                let tooltip = match action {
+                    HudAction::ToggleCombat => crate::tooltip::Tooltip::with_body(
+                        "Боевой режим",
+                        "Войти в боевой режим: клики бьют, а не используют.",
+                    ),
+                    HudAction::Examine => crate::tooltip::Tooltip::with_body(
+                        "Осмотреть",
+                        "Shift+ЛКМ по объекту — описание.",
+                    ),
+                    _ => crate::tooltip::Tooltip::with_body(
+                        "Выбросить",
+                        "Положить предмет из активной руки под ноги.",
+                    ),
+                };
                 column
                     .spawn((
+                        tooltip,
                         action,
                         Button,
                         HudTint {
@@ -934,13 +978,14 @@ pub fn render_alerts_column(
 /// сервер проверит запреты (лежание, призрак) и паузу 3 с между спринтами.
 pub fn sprint_hotkey(
     keys: Res<ButtonInput<KeyCode>>,
+    binds: Res<crate::keybinds::Keybinds>,
     console: Res<Console>,
     chat: Res<crate::chat::ChatState>,
     own: Res<OwnPlayerEntity>,
     sprintings: Query<&ssr_core::mechanics::Sprinting>,
     mut senders: Query<&mut MessageSender<ClientMessage>, With<Connected>>,
 ) {
-    if console.open || chat.focused || !keys.just_pressed(KeyCode::Space) {
+    if console.open || chat.focused || !binds.just_pressed(crate::keybinds::KeyFunction::Sprint, &keys) {
         return;
     }
     let Some(sprinting) = own.0.and_then(|entity| sprintings.get(entity).ok()) else {
@@ -954,27 +999,15 @@ pub fn sprint_hotkey(
     tracing::info!(sprint = !sprinting.0, "sprint toggle sent");
 }
 
-/// Отправляет осмотр тайла по мировым координатам.
-fn send_examine(
-    senders: &mut Query<&mut MessageSender<ClientMessage>, With<Connected>>,
-    world: Vec2,
-) {
-    let tx = (world.x / 32.0).floor() as i32;
-    let ty = (world.y / 32.0).floor() as i32;
-    for mut sender in senders.iter_mut() {
-        sender.send::<GameChannel>(ClientMessage::Examine { entity: 0, tx, ty });
-    }
-}
-
 /// Горячие клавиши: F5 спавн, F7 админ, F бой, E действие, Q бросить, C крафт.
 /// Предмет с пола поднимается кликом мыши (как в SS14).
 #[allow(clippy::too_many_arguments)]
 pub fn hud_hotkeys(
     keys: Res<ButtonInput<KeyCode>>,
+    binds: Res<crate::keybinds::Keybinds>,
     console: Res<Console>,
     chat: Res<crate::chat::ChatState>,
     mut state: ResMut<HudState>,
-    mut crafting: ResMut<crate::crafting::CraftingState>,
     mut senders: Query<&mut MessageSender<ClientMessage>, With<Connected>>,
     windows: Query<&Window>,
     camera: Single<(&Camera, &GlobalTransform), With<Camera2d>>,
@@ -1000,17 +1033,18 @@ pub fn hud_hotkeys(
     if console.open || chat.focused {
         return;
     }
-    if keys.just_pressed(KeyCode::F5) {
+    use crate::keybinds::KeyFunction as Key;
+    if binds.just_pressed(Key::OpenSandboxWindow, &keys) {
         state.spawn_open = !state.spawn_open;
         state.admin_open = false;
         tracing::info!(open = state.spawn_open, "spawn menu toggled");
     }
-    if keys.just_pressed(KeyCode::F7) {
+    if binds.just_pressed(Key::OpenAdminMenu, &keys) {
         state.admin_open = !state.admin_open;
         state.spawn_open = false;
         tracing::info!(open = state.admin_open, "admin menu toggled");
     }
-    if keys.just_pressed(KeyCode::KeyF) {
+    if binds.just_pressed(Key::ToggleCombatMode, &keys) {
         state.combat = !state.combat;
         for mut sender in senders.iter_mut() {
             sender.send::<GameChannel>(ClientMessage::SetCombat {
@@ -1021,25 +1055,50 @@ pub fn hud_hotkeys(
     }
     // Q — положить предмет из руки у курсора, Ctrl+Q — бросить (DropHand +
     // ThrowItemInHand в keybinds.yml:188-190,232-235).
-    if keys.just_pressed(KeyCode::KeyQ) {
+    let drop = binds.just_pressed(Key::Drop, &keys);
+    let throw = binds.just_pressed(Key::ThrowItemInHand, &keys);
+    if drop || throw {
         let target = cursor_world(&windows, &camera)
             .map(|world| [world.x, world.y])
             .unwrap_or_default();
-        let throw = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
         for mut sender in senders.iter_mut() {
             sender.send::<GameChannel>(ClientMessage::DropHand { target, throw });
         }
     }
+    // Z — использовать предмет в руке (`ActivateItemInHand`).
+    if binds.just_pressed(Key::ActivateItemInHand, &keys) {
+        for mut sender in senders.iter_mut() {
+            sender.send::<GameChannel>(ClientMessage::UseInHand);
+        }
+    }
+    // H — отпустить того, кого тянешь (`ReleasePulledObject`).
+    if binds.just_pressed(Key::ReleasePulledObject, &keys) {
+        for mut sender in senders.iter_mut() {
+            sender.send::<GameChannel>(ClientMessage::ReleasePull);
+        }
+    }
+    // Shift+E / Shift+B — быстрая экипировка пояса и рюкзака
+    // (`SmartEquipBelt` / `SmartEquipBackpack` в keybinds.yml).
+    for (function, slot) in [
+        (Key::SmartEquipBelt, "belt"),
+        (Key::SmartEquipBackpack, "back"),
+    ] {
+        if binds.just_pressed(function, &keys) {
+            for mut sender in senders.iter_mut() {
+                sender.send::<GameChannel>(ClientMessage::SmartEquip {
+                    slot: slot.to_string(),
+                });
+            }
+            tracing::info!(slot, "smart equip");
+        }
+    }
     // E — действие: дверь/ящик/предмет на полу под курсором; иначе применить
     // предмет из активной руки к тайлу (как `ActivateItemInWorld` в SS14).
-    // Shift+E — осмотр.
-    if keys.just_pressed(KeyCode::KeyE)
+    // Осмотр — Shift+ЛКМ (`ExamineEntity`), Shift+E занят поясом.
+    if binds.just_pressed(Key::ActivateItemInWorld, &keys)
         && let Some(world) = cursor_world(&windows, &camera)
     {
-        let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
-        if shift {
-            send_examine(&mut senders, world);
-        } else {
+        {
             send_interact(
                 &mut senders,
                 world,
@@ -1054,12 +1113,12 @@ pub fn hud_hotkeys(
     }
     // Цифры запускают действия колонки — как `TriggerAction(index)` по HotbarN
     // в SS14 (выбор руки там на X, у нас тоже).
-    for (key, action) in [
-        (KeyCode::Digit1, HudAction::ToggleCombat),
-        (KeyCode::Digit2, HudAction::Examine),
-        (KeyCode::Digit3, HudAction::Drop),
+    for (function, action) in [
+        (Key::Hotbar1, HudAction::ToggleCombat),
+        (Key::Hotbar2, HudAction::Examine),
+        (Key::Hotbar3, HudAction::Drop),
     ] {
-        if !keys.just_pressed(key) {
+        if !binds.just_pressed(function, &keys) {
             continue;
         }
         match action {
@@ -1082,16 +1141,14 @@ pub fn hud_hotkeys(
                     });
                 }
             }
-            HudAction::Examine => tracing::info!("осмотр: наведите курсор и нажмите E"),
+            HudAction::Examine => tracing::info!("осмотр: Shift+ЛКМ по объекту"),
             _ => {}
         }
     }
-    // G — окно крафта (в SS14 `OpenCraftingMenu` = G).
-    if keys.just_pressed(KeyCode::KeyG) {
-        crafting.open = !crafting.open;
-    }
+    // Окно крафта открывает `crafting::toggle_crafting` (раньше G
+    // переключалось и здесь — двойное переключение гасило само себя).
     // I — окно персонажа со слотами одежды (в SS14 `OpenInventoryMenu` = I).
-    if keys.just_pressed(KeyCode::KeyI) {
+    if binds.just_pressed(Key::OpenCharacterMenu, &keys) {
         for mut ui in uis.iter_mut() {
             ui.character_open = !ui.character_open;
         }
@@ -1099,10 +1156,23 @@ pub fn hud_hotkeys(
     // Крафт (G) обрабатывает `crafting::toggle_crafting` — здесь не дублируем,
     // иначе два обработчика гасят друг друга.
     // V — окно рюкзака (в SS14 это клавиша `OpenBackpack`).
-    if keys.just_pressed(KeyCode::KeyV) {
+    if binds.just_pressed(Key::OpenBackpack, &keys) {
         for mut ui in uis.iter_mut() {
             ui.open = !ui.open;
         }
+    }
+    // Окна-заглушки верхней панели (Y, Num0, L, F1 в `keybinds.yml`).
+    if binds.just_pressed(Key::OpenEmotesMenu, &keys) {
+        state.emotes_open = !state.emotes_open;
+    }
+    if binds.just_pressed(Key::OpenGuidebook, &keys) {
+        state.guidebook_open = !state.guidebook_open;
+    }
+    if binds.just_pressed(Key::OpenLanguageMenu, &keys) {
+        state.language_open = !state.language_open;
+    }
+    if binds.just_pressed(Key::OpenAHelp, &keys) {
+        state.ahelp_open = !state.ahelp_open;
     }
 }
 
@@ -1168,7 +1238,7 @@ pub fn hud_click(
                     });
                 }
             }
-            HudAction::Examine => tracing::info!("осмотр: наведите курсор и нажмите E"),
+            HudAction::Examine => tracing::info!("осмотр: Shift+ЛКМ по объекту"),
             HudAction::Drop => {
                 // Кнопка «выбросить»: кладём под себя (сервер зажимает точку
                 // к игроку), параметров курсора здесь нет.

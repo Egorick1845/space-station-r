@@ -9,7 +9,7 @@ use bevy::window::{MonitorSelection, WindowMode};
 use serde::{Deserialize, Serialize};
 
 /// Настройки игрока.
-#[derive(Resource, Debug, Clone, Serialize, Deserialize)]
+#[derive(Resource, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub volume: f32,
@@ -32,6 +32,8 @@ pub struct Settings {
     /// Показывать призраков живым (команда `showghosts` в сборке).
     #[serde(default)]
     pub show_ghosts: bool,
+    /// LOOC над головами (`hud.show_looc_above_head`, default true).
+    pub show_looc_overhead: bool,
 }
 
 impl Default for Settings {
@@ -49,6 +51,7 @@ impl Default for Settings {
             combat_indicators: true,
             foot_walk_animation: true,
             show_ghosts: false,
+            show_looc_overhead: true,
         }
     }
 }
@@ -110,25 +113,58 @@ pub enum EscapeAction {
     Quit,
 }
 
-/// Кнопка меню настроек.
-#[derive(Component, Clone, Copy, PartialEq, Eq)]
-pub enum SettingsAction {
-    ToggleFullscreen,
-    ToggleFps,
-    ToggleCombatIndicators,
-    ToggleFootWalk,
-    Close,
-}
-
-/// Текст значения настройки (обновляется при изменении).
-#[derive(Component, Clone, Copy, PartialEq, Eq)]
-pub enum SettingsValue {
-    Volume,
+/// Переключаемая настройка (галочка).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Opt {
     Fullscreen,
     Fps,
     CombatIndicators,
     FootWalk,
+    LoocOverhead,
 }
+
+impl Opt {
+    fn get(self, s: &Settings) -> bool {
+        match self {
+            Opt::Fullscreen => s.fullscreen,
+            Opt::Fps => s.show_fps,
+            Opt::CombatIndicators => s.combat_indicators,
+            Opt::FootWalk => s.foot_walk_animation,
+            Opt::LoocOverhead => s.show_looc_overhead,
+        }
+    }
+
+    fn flip(self, s: &mut Settings) {
+        match self {
+            Opt::Fullscreen => s.fullscreen = !s.fullscreen,
+            Opt::Fps => s.show_fps = !s.show_fps,
+            Opt::CombatIndicators => s.combat_indicators = !s.combat_indicators,
+            Opt::FootWalk => s.foot_walk_animation = !s.foot_walk_animation,
+            Opt::LoocOverhead => s.show_looc_overhead = !s.show_looc_overhead,
+        }
+    }
+}
+
+/// Кнопка окна настроек (`OptionsMenu.xaml`: вкладки, галочки и нижняя
+/// панель «Сброс к настройкам по умолчанию / Сброс изменений / Сохранить и
+/// применить»).
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsAction {
+    Toggle(Opt),
+    Close,
+    ResetDefaults,
+    ResetChanges,
+    Apply,
+}
+
+/// Черновик настроек: правки окна копятся здесь и применяются кнопкой
+/// «Сохранить и применить» (как `OptionsMenu` сборки).
+#[derive(Resource, Default, Clone)]
+pub struct SettingsDraft(pub Settings);
+
+/// Текст значения громкости (обновляется при протяжке ползунка).
+#[derive(Component)]
+pub struct VolumeValue;
 
 /// Активная вкладка окна настроек — порядок и названия как у вкладок
 /// `OptionsMenu.xaml` сборки (Основные, Графика, Управление, Аудио, Доступность).
@@ -253,7 +289,15 @@ pub fn menu_test(
             for entity in settings_root.iter() {
                 commands.entity(entity).despawn();
             }
-            settings.tab = SettingsTab::Graphics;
+            // 2 — «Графика», 3 — «Управление», 4 — «Основные», 5 — «Аудио»,
+            // 6 — «Доступность».
+            settings.tab = match mode {
+                3 => SettingsTab::Controls,
+                4 => SettingsTab::Misc,
+                5 => SettingsTab::Audio,
+                6 => SettingsTab::Accessibility,
+                _ => SettingsTab::Graphics,
+            };
             spawn_menu(&mut commands, &settings);
         }
     }
@@ -452,155 +496,265 @@ pub fn open_menu(
     }
 }
 
-/// Строит окно настроек: заголовок, вкладки и содержимое активной вкладки.
+// Цвета окна настроек SS14 (тёмная тема `StyleNano`).
+const WIN_BG: Color = Color::srgba(0.13, 0.13, 0.15, 0.97);
+const WIN_TITLE: Color = Color::srgb(0.09, 0.09, 0.105);
+const WIN_BORDER: Color = Color::srgb(0.26, 0.26, 0.30);
+const TAB_STRIP: Color = Color::srgb(0.10, 0.10, 0.115);
+const TAB_ACTIVE: Color = Color::srgb(0.29, 0.31, 0.37);
+const SECTION: Color = Color::srgb(0.80, 0.66, 0.36);
+const OPT_TEXT: Color = Color::srgb(0.88, 0.88, 0.90);
+const OPT_DIM: Color = Color::srgb(0.58, 0.58, 0.63);
+const BOX_BG: Color = Color::srgb(0.08, 0.08, 0.095);
+const BOX_ON: Color = Color::srgb(0.62, 0.65, 0.74);
+const BTN: Color = Color::srgb(0.20, 0.21, 0.25);
+const BTN_PRIMARY: Color = Color::srgb(0.27, 0.36, 0.30);
+
+/// Открывает окно настроек заново: черновик — копия текущих настроек.
 fn spawn_menu(commands: &mut Commands, settings: &Settings) {
+    commands.insert_resource(SettingsDraft(settings.clone()));
+    build_menu(commands, settings, false);
+}
+
+/// Пересобирает окно по черновику (`dirty` — есть несохранённые правки).
+fn build_menu(commands: &mut Commands, draft: &Settings, dirty: bool) {
     commands
         .spawn((
             SettingsMenu,
             Node {
                 position_type: PositionType::Absolute,
-                left: Val::Percent(33.0),
-                top: Val::Percent(14.0),
-                width: px(470),
+                left: Val::Percent(50.0),
+                top: Val::Percent(50.0),
+                width: px(720),
+                height: px(500),
+                margin: UiRect::new(px(-360), px(0), px(-250), px(0)),
                 flex_direction: FlexDirection::Column,
-                row_gap: px(6),
-                padding: UiRect::all(px(12)),
-                border: UiRect::all(px(2)),
+                border: UiRect::all(px(1)),
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.06, 0.06, 0.08, 0.96)),
-            BorderColor::from(Color::srgb(0.30, 0.30, 0.36)),
+            BackgroundColor(WIN_BG),
+            BorderColor::from(WIN_BORDER),
+            GlobalZIndex(50),
         ))
         .with_children(|panel| {
+            // Заголовок окна и крестик (`DefaultWindow`).
             panel
                 .spawn((
                     Node {
                         width: Val::Percent(100.0),
-                        padding: UiRect::axes(px(8), px(3)),
+                        height: px(30),
+                        flex_shrink: 0.0,
+                        align_items: AlignItems::Center,
+                        padding: UiRect::horizontal(px(8)),
                         ..default()
                     },
-                    BackgroundColor(Color::srgb(0.10, 0.10, 0.13)),
+                    BackgroundColor(WIN_TITLE),
                 ))
-                .with_child((
-                    Text::new("Игровые настройки"),
-                    TextFont::from_font_size(16.0),
-                    TextColor(Color::srgb(1.0, 0.75, 0.25)),
-                ));
-            tabs_row(panel, settings.tab);
-            match settings.tab {
-                SettingsTab::Misc => {
-                    settings_row(
-                        panel,
-                        "Показывать счётчик FPS",
-                        if settings.show_fps {
-                            "Вкл"
-                        } else {
-                            "Выкл"
-                        },
-                        SettingsValue::Fps,
-                        SettingsAction::ToggleFps,
-                        SettingsAction::ToggleFps,
-                    );
-                    settings_row(
-                        panel,
-                        "Прицел боевого режима у курсора",
-                        if settings.combat_indicators {
-                            "Вкл"
-                        } else {
-                            "Выкл"
-                        },
-                        SettingsValue::CombatIndicators,
-                        SettingsAction::ToggleCombatIndicators,
-                        SettingsAction::ToggleCombatIndicators,
-                    );
-                }
-                SettingsTab::Graphics => {
-                    settings_row(
-                        panel,
-                        "Полный экран",
-                        if settings.fullscreen {
-                            "Вкл"
-                        } else {
-                            "Выкл"
-                        },
-                        SettingsValue::Fullscreen,
-                        SettingsAction::ToggleFullscreen,
-                        SettingsAction::ToggleFullscreen,
-                    );
-                    settings_row(
-                        panel,
-                        "Показывать счётчик FPS",
-                        if settings.show_fps {
-                            "Вкл"
-                        } else {
-                            "Выкл"
-                        },
-                        SettingsValue::Fps,
-                        SettingsAction::ToggleFps,
-                        SettingsAction::ToggleFps,
-                    );
-                }
-                SettingsTab::Audio => volume_slider(panel, settings.volume),
-                SettingsTab::Controls => {
-                    panel.spawn((
-                        Text::new(KEYBINDS_HELP),
-                        TextFont::from_font_size(12.0),
-                        TextColor(Color::srgb(0.78, 0.78, 0.82)),
+                .with_children(|title| {
+                    title.spawn((
+                        Text::new("Игровые настройки"),
+                        TextFont::from_font_size(16.0),
+                        TextColor(OPT_TEXT),
                     ));
-                }
-                SettingsTab::Accessibility => {
-                    settings_row(
-                        panel,
-                        "Анимация шага",
-                        if settings.foot_walk_animation {
-                            "Вкл"
-                        } else {
-                            "Выкл"
-                        },
-                        SettingsValue::FootWalk,
-                        SettingsAction::ToggleFootWalk,
-                        SettingsAction::ToggleFootWalk,
-                    );
-                }
-            }
+                    title.spawn(Node {
+                        flex_grow: 1.0,
+                        ..default()
+                    });
+                    title
+                        .spawn((
+                            SettingsAction::Close,
+                            Button,
+                            Node {
+                                width: px(24),
+                                height: px(24),
+                                justify_content: JustifyContent::Center,
+                                align_items: AlignItems::Center,
+                                ..default()
+                            },
+                            BackgroundColor(Color::NONE),
+                        ))
+                        .with_child((
+                            Text::new("×"),
+                            TextFont::from_font_size(20.0),
+                            TextColor(OPT_DIM),
+                        ));
+                });
+            tabs_row(panel, draft.tab);
+            // Содержимое вкладки.
+            panel
+                .spawn(Node {
+                    width: Val::Percent(100.0),
+                    flex_grow: 1.0,
+                    // Без min_height 0 длинный список (Управление) выдавливал
+                    // нижнюю панель за край окна.
+                    min_height: px(0),
+                    flex_direction: FlexDirection::Column,
+                    row_gap: px(2),
+                    padding: UiRect::axes(px(12), px(8)),
+                    overflow: Overflow::clip(),
+                    ..default()
+                })
+                .with_children(|page| match draft.tab {
+                    SettingsTab::Misc => {
+                        section(page, "Речь");
+                        checkbox(page, draft, Opt::LoocOverhead, "Показывать LOOC-чат над головами персонажей");
+                        section(page, "Курсор");
+                        checkbox(page, draft, Opt::CombatIndicators, "Показать индикатор боевого режима рядом с курсором");
+                    }
+                    SettingsTab::Graphics => {
+                        section(page, "Окно");
+                        checkbox(page, draft, Opt::Fullscreen, "Полноэкранный режим");
+                        section(page, "Интерфейс");
+                        checkbox(page, draft, Opt::Fps, "Показывать счётчик FPS");
+                    }
+                    SettingsTab::Audio => {
+                        section(page, "Громкость");
+                        volume_slider(page, draft.volume);
+                    }
+                    SettingsTab::Controls => {
+                        // Список привязок наполняет `keybinds::render_keybinds_panel`
+                        // (`KeyRebindTab` в сборке); привязки применяются сразу.
+                        page.spawn((
+                            crate::keybinds::KeybindsPanel,
+                            Node {
+                                flex_direction: FlexDirection::Column,
+                                row_gap: px(2),
+                                ..default()
+                            },
+                        ));
+                    }
+                    SettingsTab::Accessibility => {
+                        section(page, "Движение");
+                        checkbox(page, draft, Opt::FootWalk, "Процедурная анимация шага");
+                    }
+                });
+            // Нижняя панель.
             panel
                 .spawn((
-                    SettingsAction::Close,
-                    Button,
                     Node {
-                        height: px(32),
-                        justify_content: JustifyContent::Center,
+                        width: Val::Percent(100.0),
+                        height: px(40),
+                        flex_shrink: 0.0,
                         align_items: AlignItems::Center,
-                        border: UiRect::all(px(2)),
+                        column_gap: px(6),
+                        padding: UiRect::horizontal(px(10)),
+                        border: UiRect::top(px(1)),
                         ..default()
                     },
-                    BackgroundColor(Color::srgb(0.13, 0.13, 0.16)),
-                    BorderColor::from(Color::srgb(0.30, 0.30, 0.35)),
+                    BorderColor::from(WIN_BORDER),
                 ))
-                .with_child((
-                    Text::new("Закрыть"),
-                    TextFont::from_font_size(14.0),
-                    TextColor(Color::srgb(0.88, 0.88, 0.90)),
-                ));
+                .with_children(|bar| {
+                    bottom_button(bar, "Сброс к настройкам по умолчанию", SettingsAction::ResetDefaults, BTN);
+                    bar.spawn(Node {
+                        flex_grow: 1.0,
+                        ..default()
+                    });
+                    bottom_button(bar, "Сброс изменений", SettingsAction::ResetChanges, BTN);
+                    bottom_button(
+                        bar,
+                        "Сохранить и применить",
+                        SettingsAction::Apply,
+                        if dirty { BTN_PRIMARY } else { BTN },
+                    );
+                });
         });
 }
 
-/// Справка по управлению (вкладка «Управление»).
-pub const KEYBINDS_HELP: &str = "WASD — движение, Shift — ходьба, Space — спринт
-ЛКМ — использовать (в бою — удар), Ctrl+ЛКМ — тянуть/передать предмет
-ПКМ — действия по объекту, E — действие, Shift+E — осмотр
-1/2 — руки, X — сменить руку, Q — бросить предмет
-F — боевой режим, C — крафт, I — персонаж, F5 — спавн-меню, F7 — админ-меню
-` — консоль, Esc — закрыть окно/игровое меню";
+/// Золотой заголовок раздела.
+fn section(page: &mut RelatedSpawnerCommands<'_, ChildOf>, title: &str) {
+    page.spawn((
+        Text::new(title.to_string()),
+        TextFont::from_font_size(15.0),
+        TextColor(SECTION),
+        Node {
+            margin: UiRect::top(px(4)),
+            ..default()
+        },
+    ));
+}
 
-/// Ряд вкладок окна настроек: порядок и подписи как в `OptionsMenu.xaml`.
+/// Строка-галочка (`CheckBox` в OptionsMenu).
+fn checkbox(page: &mut RelatedSpawnerCommands<'_, ChildOf>, draft: &Settings, opt: Opt, label: &str) {
+    let on = opt.get(draft);
+    page.spawn((
+        SettingsAction::Toggle(opt),
+        Button,
+        Node {
+            align_items: AlignItems::Center,
+            column_gap: px(8),
+            height: px(24),
+            ..default()
+        },
+        BackgroundColor(Color::NONE),
+    ))
+    .with_children(|row| {
+        row.spawn((
+            Node {
+                width: px(16),
+                height: px(16),
+                border: UiRect::all(px(1)),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            BackgroundColor(BOX_BG),
+            BorderColor::from(Color::srgb(0.40, 0.40, 0.46)),
+        ))
+        .with_children(|b| {
+            if on {
+                b.spawn((
+                    Node {
+                        width: px(10),
+                        height: px(10),
+                        ..default()
+                    },
+                    BackgroundColor(BOX_ON),
+                ));
+            }
+        });
+        row.spawn((
+            Text::new(label.to_string()),
+            TextFont::from_font_size(14.0),
+            TextColor(OPT_TEXT),
+        ));
+    });
+}
+
+fn bottom_button(bar: &mut RelatedSpawnerCommands<'_, ChildOf>, label: &str, action: SettingsAction, bg: Color) {
+    bar.spawn((
+        action,
+        Button,
+        Node {
+            height: px(28),
+            padding: UiRect::horizontal(px(12)),
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::Center,
+            ..default()
+        },
+        BackgroundColor(bg),
+    ))
+    .with_child((
+        Text::new(label.to_string()),
+        TextFont::from_font_size(14.0),
+        TextColor(OPT_TEXT),
+    ));
+}
+
+/// Ряд вкладок окна настроек: порядок и подписи как в `OptionsMenu.xaml`,
+/// плоские вкладки, активная — светлее.
 fn tabs_row(panel: &mut RelatedSpawnerCommands<'_, ChildOf>, active: SettingsTab) {
     panel
-        .spawn(Node {
-            flex_direction: FlexDirection::Row,
-            column_gap: px(4),
-            ..default()
-        })
+        .spawn((
+            Node {
+                width: Val::Percent(100.0),
+                flex_direction: FlexDirection::Row,
+                padding: UiRect::new(px(8), px(8), px(6), px(0)),
+                column_gap: px(2),
+                flex_shrink: 0.0,
+                ..default()
+            },
+            BackgroundColor(TAB_STRIP),
+        ))
         .with_children(|tabs| {
             for tab in SettingsTab::ALL {
                 let selected = tab == active;
@@ -609,29 +763,17 @@ fn tabs_row(panel: &mut RelatedSpawnerCommands<'_, ChildOf>, active: SettingsTab
                     Button,
                     Node {
                         height: px(26),
-                        padding: UiRect::horizontal(px(12)),
+                        padding: UiRect::horizontal(px(8)),
                         align_items: AlignItems::Center,
                         justify_content: JustifyContent::Center,
-                        border: UiRect::all(px(2)),
                         ..default()
                     },
-                    // `glassTabActive` / `glassTabInactive` из StyleNano:
-                    // активная #323240D9, неактивная #1A1A24B3.
-                    BackgroundColor(if selected {
-                        Color::srgba(0.196, 0.196, 0.251, 0.85)
-                    } else {
-                        Color::srgba(0.102, 0.102, 0.141, 0.70)
-                    }),
-                    BorderColor::from(if selected {
-                        Color::srgb(1.0, 0.75, 0.25)
-                    } else {
-                        Color::srgb(0.30, 0.30, 0.35)
-                    }),
+                    BackgroundColor(if selected { TAB_ACTIVE } else { Color::NONE }),
                 ))
                 .with_child((
                     Text::new(tab.title()),
-                    TextFont::from_font_size(13.0),
-                    TextColor(Color::srgb(0.88, 0.88, 0.90)),
+                    TextFont::from_font_size(14.0),
+                    TextColor(if selected { OPT_TEXT } else { OPT_DIM }),
                 ));
             }
         });
@@ -648,29 +790,29 @@ fn volume_slider(panel: &mut RelatedSpawnerCommands<'_, ChildOf>, volume: f32) {
                 padding: UiRect::axes(px(6), px(3)),
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.12, 0.12, 0.15, 0.7)),
         ))
         .with_children(|row| {
-            row.spawn((
-                Text::new("Громкость"),
+            row.spawn(Node {
+                width: px(180),
+                align_items: AlignItems::Center,
+                ..default()
+            })
+            .with_child((
+                Text::new("Общая громкость"),
                 TextFont::from_font_size(14.0),
-                TextColor(Color::srgb(0.88, 0.88, 0.90)),
-                Node {
-                    width: px(110),
-                    ..default()
-                },
+                TextColor(OPT_TEXT),
             ));
             row.spawn((
                 VolumeSlider,
                 Button,
                 Node {
-                    width: px(230),
-                    height: px(16),
+                    width: px(260),
+                    height: px(14),
                     border: UiRect::all(px(2)),
                     ..default()
                 },
-                BackgroundColor(Color::srgb(0.16, 0.16, 0.20)),
-                BorderColor::from(Color::srgb(0.34, 0.34, 0.40)),
+                BackgroundColor(BOX_BG),
+                BorderColor::from(Color::srgb(0.40, 0.40, 0.46)),
             ))
             .with_child((
                 VolumeKnob,
@@ -682,13 +824,13 @@ fn volume_slider(panel: &mut RelatedSpawnerCommands<'_, ChildOf>, volume: f32) {
                     height: px(18),
                     ..default()
                 },
-                BackgroundColor(Color::srgb(1.0, 0.75, 0.25)),
+                BackgroundColor(BOX_ON),
             ));
             row.spawn((
-                SettingsValue::Volume,
+                VolumeValue,
                 Text::new(format!("{}%", (volume * 100.0).round())),
                 TextFont::from_font_size(14.0),
-                TextColor(Color::srgb(1.0, 0.75, 0.25)),
+                TextColor(OPT_TEXT),
             ));
         });
 }
@@ -697,9 +839,10 @@ fn volume_slider(panel: &mut RelatedSpawnerCommands<'_, ChildOf>, volume: f32) {
 pub fn volume_slider_drag(
     windows: Query<&Window>,
     mouse: Res<ButtonInput<MouseButton>>,
-    mut settings: ResMut<Settings>,
+    mut draft: ResMut<SettingsDraft>,
     sliders: Query<(&Interaction, &ComputedNode, &GlobalTransform), With<VolumeSlider>>,
     mut knobs: Query<&mut Node, With<VolumeKnob>>,
+    mut values: Query<&mut Text, With<VolumeValue>>,
 ) {
     if !mouse.pressed(MouseButton::Left) {
         return;
@@ -718,13 +861,16 @@ pub fn volume_slider_drag(
         let size = computed.size() * computed.inverse_scale_factor();
         let left = transform.translation().x - size.x / 2.0;
         let fraction = ((cursor.x - left) / size.x.max(1.0)).clamp(0.0, 1.0);
-        if (fraction - settings.volume).abs() < 0.001 {
+        if (fraction - draft.0.volume).abs() < 0.001 {
             continue;
         }
-        settings.volume = fraction;
-        settings.save();
+        // Громкость — в черновик: применится «Сохранить и применить».
+        draft.0.volume = fraction;
         for mut knob in knobs.iter_mut() {
             knob.left = Val::Percent(fraction * 100.0);
+        }
+        for mut text in values.iter_mut() {
+            text.0 = format!("{}%", (fraction * 100.0).round());
         }
     }
 }
@@ -737,81 +883,24 @@ type TabClicks<'w, 's> =
 pub fn settings_tab_click(
     mut commands: Commands,
     mut settings: ResMut<Settings>,
+    mut draft: ResMut<SettingsDraft>,
     root: Query<Entity, With<SettingsMenu>>,
     clicks: TabClicks,
 ) {
     for (interaction, tab) in clicks.iter() {
-        if *interaction != Interaction::Pressed || settings.tab == tab.0 {
+        if *interaction != Interaction::Pressed || draft.0.tab == tab.0 {
             continue;
         }
-        settings.tab = tab.0;
-        // Пересобираем окно с новой вкладкой.
+        // Вкладка не считается правкой: меняем её и в настройках, и в черновике.
+        settings.bypass_change_detection().tab = tab.0;
+        draft.0.tab = tab.0;
         for entity in root.iter() {
             commands.entity(entity).despawn();
         }
-        spawn_menu(&mut commands, &settings);
+        let dirty = draft.0 != *settings;
+        build_menu(&mut commands, &draft.0, dirty);
         tracing::info!(tab = ?tab.0, "settings tab changed");
     }
-}
-
-/// Одна строка настройки: подпись, значение и кнопки изменения.
-fn settings_row(
-    panel: &mut RelatedSpawnerCommands<'_, ChildOf>,
-    label: &str,
-    value: &str,
-    marker: SettingsValue,
-    left: SettingsAction,
-    right: SettingsAction,
-) {
-    panel
-        .spawn((
-            Node {
-                flex_direction: FlexDirection::Row,
-                align_items: AlignItems::Center,
-                column_gap: px(8),
-                padding: UiRect::axes(px(6), px(2)),
-                ..default()
-            },
-            BackgroundColor(Color::srgba(0.12, 0.12, 0.15, 0.7)),
-        ))
-        .with_children(|row| {
-            row.spawn((
-                Text::new(label.to_string()),
-                TextFont::from_font_size(14.0),
-                TextColor(Color::srgb(0.88, 0.88, 0.90)),
-                Node {
-                    width: px(180),
-                    ..default()
-                },
-            ));
-            for action in [left, right] {
-                row.spawn((
-                    action,
-                    Button,
-                    Node {
-                        width: px(34),
-                        height: px(28),
-                        justify_content: JustifyContent::Center,
-                        align_items: AlignItems::Center,
-                        border: UiRect::all(px(2)),
-                        ..default()
-                    },
-                    BackgroundColor(Color::srgb(0.13, 0.13, 0.16)),
-                    BorderColor::from(Color::srgb(0.30, 0.30, 0.35)),
-                ))
-                .with_child((
-                    Text::new(if action == left { "−" } else { "+" }),
-                    TextFont::from_font_size(15.0),
-                    TextColor(Color::srgb(0.9, 0.9, 0.92)),
-                ));
-            }
-            row.spawn((
-                marker,
-                Text::new(value.to_string()),
-                TextFont::from_font_size(14.0),
-                TextColor(Color::srgb(1.0, 0.75, 0.25)),
-            ));
-        });
 }
 
 /// Клик по кнопке настроек.
@@ -822,90 +911,65 @@ type SettingsClicks<'w, 's> = Query<
     (Changed<Interaction>, With<Button>),
 >;
 
-/// Обрабатывает клики по кнопкам настроек.
+/// Клики окна настроек: галочки правят черновик, «Сохранить и применить»
+/// переносит его в настройки (с полноэкранным режимом и сохранением),
+/// «Сброс изменений» — назад к текущим, «Сброс к настройкам по умолчанию» —
+/// значения по умолчанию (имя и серверы не трогаем).
 pub fn settings_click(
     mut commands: Commands,
     mut settings: ResMut<Settings>,
+    mut draft: ResMut<SettingsDraft>,
     mut windows: Query<&mut Window>,
     root: Query<Entity, With<SettingsMenu>>,
     clicks: SettingsClicks,
 ) {
-    let mut save = false;
+    let mut rebuild = false;
     for (interaction, action) in clicks.iter() {
         if *interaction != Interaction::Pressed {
             continue;
         }
-        save = true;
         match action {
-            SettingsAction::ToggleFullscreen => {
-                settings.fullscreen = !settings.fullscreen;
-                if let Ok(mut window) = windows.single_mut() {
-                    window.mode = if settings.fullscreen {
+            SettingsAction::Toggle(opt) => opt.flip(&mut draft.0),
+            SettingsAction::ResetChanges => draft.0 = settings.clone(),
+            SettingsAction::ResetDefaults => {
+                let keep = draft.0.clone();
+                draft.0 = Settings {
+                    player_name: keep.player_name,
+                    server: keep.server,
+                    servers: keep.servers,
+                    tab: keep.tab,
+                    ..Settings::default()
+                };
+            }
+            SettingsAction::Apply => {
+                if draft.0.fullscreen != settings.fullscreen
+                    && let Ok(mut window) = windows.single_mut()
+                {
+                    window.mode = if draft.0.fullscreen {
                         WindowMode::BorderlessFullscreen(MonitorSelection::Primary)
                     } else {
                         WindowMode::Windowed
                     };
                 }
-            }
-            SettingsAction::ToggleFps => settings.show_fps = !settings.show_fps,
-            SettingsAction::ToggleCombatIndicators => {
-                settings.combat_indicators = !settings.combat_indicators;
-            }
-            SettingsAction::ToggleFootWalk => {
-                settings.foot_walk_animation = !settings.foot_walk_animation;
+                *settings = draft.0.clone();
+                settings.save();
+                tracing::info!("settings applied");
             }
             SettingsAction::Close => {
                 for entity in root.iter() {
                     commands.entity(entity).despawn();
                 }
-                save = false;
+                return;
             }
         }
+        rebuild = true;
     }
-    if save {
-        settings.save();
-    }
-}
-
-/// Обновляет тексты значений при изменении настроек.
-pub fn update_settings_text(
-    settings: Res<Settings>,
-    mut texts: Query<(&mut Text, &SettingsValue)>,
-) {
-    if !settings.is_changed() {
-        return;
-    }
-    for (mut text, marker) in texts.iter_mut() {
-        let value = match marker {
-            SettingsValue::Volume => format!("{}%", (settings.volume * 100.0).round()),
-            SettingsValue::Fullscreen => (if settings.fullscreen {
-                "Вкл"
-            } else {
-                "Выкл"
-            })
-            .into(),
-            SettingsValue::Fps => (if settings.show_fps {
-                "Вкл"
-            } else {
-                "Выкл"
-            })
-            .into(),
-            SettingsValue::CombatIndicators => (if settings.combat_indicators {
-                "Вкл"
-            } else {
-                "Выкл"
-            })
-            .into(),
-            SettingsValue::FootWalk => (if settings.foot_walk_animation {
-                "Вкл"
-            } else {
-                "Выкл"
-            })
-            .into(),
-        };
-        if text.0 != value {
-            text.0 = value;
+    if rebuild {
+        for entity in root.iter() {
+            commands.entity(entity).despawn();
         }
+        let dirty = draft.0 != *settings;
+        build_menu(&mut commands, &draft.0, dirty);
     }
 }
 
