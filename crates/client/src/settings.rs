@@ -253,7 +253,12 @@ pub fn menu_test(
             for entity in settings_root.iter() {
                 commands.entity(entity).despawn();
             }
-            settings.tab = SettingsTab::Graphics;
+            // 2 — вкладка «Графика», 3 — «Управление».
+            settings.tab = if mode >= 3 {
+                SettingsTab::Controls
+            } else {
+                SettingsTab::Graphics
+            };
             spawn_menu(&mut commands, &settings);
         }
     }

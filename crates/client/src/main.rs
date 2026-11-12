@@ -32,6 +32,7 @@ mod humanoid;
 mod inventory_ui;
 mod light_gpu;
 mod lighting;
+mod launcher;
 mod lobby;
 mod overhead_speech;
 mod power_view;
@@ -205,7 +206,7 @@ fn main() {
     // Space — спринт-тоггл (PORT_PLAN 2.2).
     app.add_systems(Update, hud::sprint_hotkey);
     // Алерт выносливости (PORT_PLAN 1.5): 7 уровней, иконки из сборки.
-    app.add_systems(Update, hud::render_alerts_column);
+    app.add_systems(Update, hud::render_alerts_column.run_if(in_game));
     // Кадры иконок алертов играются по delays RSI (флипбук `SpriteView`).
     app.add_systems(Update, hud::animate_alerts);
     // Подсветка клеток при переносе предмета (PORT_PLAN 1.6).
@@ -440,10 +441,10 @@ fn main() {
     );
     app.add_systems(
         Update,
-        (hud::close_windows_on_escape, screenshot_test_mode)
-            .run_if(in_game)
-            .chain(),
+        hud::close_windows_on_escape.run_if(in_game),
     );
+    // Снимок экрана для проверок — в любом состоянии (и в лобби).
+    app.add_systems(Update, screenshot_test_mode);
     app.add_systems(
         Update,
         (
@@ -499,16 +500,22 @@ fn main() {
     let auto_play = std::env::var_os("SSR_AUTO_PLAY").is_some();
     let show_lobby = !auto_play && (force_lobby || cfg!(not(debug_assertions)));
     if show_lobby {
-        app.init_resource::<lobby::LobbyInput>();
-        app.add_systems(Startup, lobby::spawn_lobby);
+        // Лаунчер (выбор сервера, как SS14.Launcher) → лобби сервера → игра.
+        app.init_resource::<launcher::Launcher>();
+        app.add_systems(Startup, launcher::spawn_launcher);
         app.add_systems(
             Update,
             (
                 enter_game,
+                launcher::launcher_test_mode,
+                launcher::poll_statuses,
+                launcher::launcher_click,
+                launcher::launcher_text_input,
+                launcher::launcher_scroll,
+                launcher::launcher_hover,
+                launcher::render_launcher,
+                lobby::spawn_lobby,
                 lobby::lobby_button,
-                lobby::lobby_field_click,
-                lobby::lobby_text_input,
-                lobby::lobby_field_text,
                 lobby::animate_lobby_background,
                 lobby::lobby_auto_ready,
             ),
@@ -1034,7 +1041,7 @@ fn asset_plugin() -> AssetPlugin {
 }
 
 /// Абсолютный путь к `<repo>/assets/`, вычисленный из окружения запуска.
-fn assets_file_path() -> String {
+pub(crate) fn assets_file_path() -> String {
     // `cargo run`: CARGO_MANIFEST_DIR = <repo>/crates/client → корень через два уровня.
     if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR")
         && let Some(root) = Path::new(&manifest_dir).ancestors().nth(2)

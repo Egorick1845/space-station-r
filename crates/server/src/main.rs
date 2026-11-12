@@ -19,6 +19,7 @@ use bevy::prelude::*;
 
 mod interaction;
 mod medical;
+mod status;
 mod throwing;
 mod weapons;
 use lightyear::connection::server::Start;
@@ -114,6 +115,9 @@ fn main() {
     // Interest management через комнаты (T1.4): сущность видна клиенту,
     // если они делят хотя бы одну комнату.
     app.add_plugins(RoomPlugin);
+    // HTTP-статус для лаунчера (`GET /status`, как `StatusHost` SS14).
+    status::start(&mut app, server_addr());
+    app.add_systems(Update, status::update_status);
     // Физика только на сервере (ADR-3): стены — статические тела, игрок — динамическое.
     app.add_plugins(PhysicsPlugins::default());
     // Топ-даун вид: гравитация avian (−9.81 по Y) не нужна.
