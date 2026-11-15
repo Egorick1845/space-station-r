@@ -450,8 +450,11 @@ pub mod respirator {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Healing {
     pub damage: DamageSpecifier,
-    /// `bloodlossModifier` (кровотечения пока нет — только запись).
+    /// `bloodlossModifier`: на сколько меняется кровотечение (бинт −10).
     pub bloodloss_modifier: f32,
+    /// `modifyBloodLevel`: у пакета крови −30 — Goob вычитает это число,
+    /// то есть восполняет 30 ед. крови.
+    pub modify_blood_level: f32,
     /// `Delay` = 2 с (Goob).
     pub delay: f32,
     /// `SelfHealPenaltyMultiplier` = 2 (Goob).
@@ -524,9 +527,11 @@ pub fn healing_for(id: &str) -> Option<Healing> {
         ),
         _ => return None,
     };
+    let modify_blood_level = if id == "Bloodpack" { -30.0 } else { 0.0 };
     Some(Healing {
         damage,
         bloodloss_modifier,
+        modify_blood_level,
         delay: HEALING_DELAY,
         self_heal_penalty: SELF_HEAL_PENALTY,
         stack: 15,
@@ -541,6 +546,32 @@ impl Healing {
         self.damage
             .entries()
             .any(|(damage_type, _)| target.damage.get(damage_type) > 0.0)
+    }
+
+    /// `HealingSystem.HasDamage` целиком: урон или кровоток — крови меньше
+    /// нормы (пакет крови) либо идёт кровотечение (бинт).
+    pub fn can_heal(&self, target: &Damageable, blood: Option<&crate::blood::Bloodstream>) -> bool {
+        if self.has_damage(target) {
+            return true;
+        }
+        let Some(blood) = blood else {
+            return false;
+        };
+        (self.modify_blood_level < 0.0 && blood.level() < 1.0)
+            || (self.bloodloss_modifier < 0.0 && blood.bleed > 0.0)
+    }
+
+    /// Применить к кровотоку (`OnDoAfter`): кровотечение и уровень крови.
+    /// Возвращает, остановлено ли кровотечение этим применением.
+    pub fn apply_blood(&self, blood: &mut crate::blood::Bloodstream) -> bool {
+        let was_bleeding = blood.bleed > 0.0;
+        if self.bloodloss_modifier != 0.0 {
+            blood.modify_bleed(self.bloodloss_modifier);
+        }
+        if self.modify_blood_level != 0.0 {
+            blood.modify_level(-self.modify_blood_level);
+        }
+        was_bleeding && blood.bleed <= 0.0
     }
 
     /// Задержка (`TryHeal`): на себя — со штрафом `GetScaledHealingPenalty`.

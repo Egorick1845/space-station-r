@@ -17,6 +17,7 @@ use avian2d::prelude::{
 use bevy::app::ScheduleRunnerPlugin;
 use bevy::prelude::*;
 
+mod blood;
 mod interaction;
 mod medical;
 mod status;
@@ -165,6 +166,9 @@ fn main() {
     app.init_resource::<interaction::InteractionQueue>();
     app.init_resource::<throwing::ThrowCooldowns>();
     app.init_resource::<medical::DoAfterIds>();
+    app.init_resource::<blood::Spills>();
+    app.init_resource::<blood::ScanRequests>();
+    app.init_resource::<blood::BloodRng>();
     app.add_message::<DeathEvent>();
     app.add_systems(
         Update,
@@ -177,6 +181,8 @@ fn main() {
                 interaction::process_interactions,
                 medical::start_healing,
                 medical::tick_healing,
+                blood::start_scan,
+                blood::tick_scan,
                 apply_damage,
                 respawn_dead,
             )
@@ -207,11 +213,19 @@ fn main() {
             suffocation,
             // Стопки: полное количество у новых стопочных предметов.
             interaction::ensure_stacks,
-            // Медицина: дыхание (удушье в крите) и пассивная регенерация.
+            // Медицина: дыхание, регенерация; кровоток: кровотечение от
+            // урона, такт 3 с, лужи, аптечки, анализатор.
             (
                 medical::breathing,
                 medical::passive_regen,
                 medical::medical_test,
+                blood::ensure_bloodstream,
+                blood::bleed_on_damage,
+                blood::tick_bloodstream,
+                blood::spill_puddles,
+                blood::fill_containers,
+                blood::update_scans,
+                blood::blood_test,
             ),
             (
                 interaction::items_test,
@@ -332,6 +346,13 @@ impl ProtoCatalog {
             .cloned()
             .unwrap_or_else(|| id.to_string())
     }
+}
+
+/// Каталоги для наполнения контейнеров (`blood::fill_containers`).
+#[derive(bevy::ecs::system::SystemParam)]
+struct FillWorld<'w> {
+    prototypes: Res<'w, ProtoCatalog>,
+    catalogs: Res<'w, ContentCatalog>,
 }
 
 /// Спавнимые прототипы сборки (IMP.2/IMP.3): id → размер предмета (`itemSize`).
@@ -455,11 +476,12 @@ fn load_prototypes(mut commands: Commands) {
     match ssr_core::prototypes::ProtoSet::load(&path) {
         Ok(set) => {
             // Русские имена (import-names: ru-RU .ftl → names_ru.ron).
-            let names_ru: std::collections::HashMap<String, String> =
+            let mut names_ru: std::collections::HashMap<String, String> =
                 std::fs::read_to_string(ssr_core::assets_root().join("prototypes/names_ru.ron"))
                     .ok()
                     .and_then(|text| ron::from_str(&text).ok())
                     .unwrap_or_default();
+            ssr_core::prototypes::resolve_name_refs(&mut names_ru);
             let mut catalog = ProtoCatalog {
                 names: names_ru,
                 ..Default::default()
@@ -3621,7 +3643,10 @@ fn handle_client_messages(
                         .and_then(|h| h.active_item())
                         .and_then(Entity::try_from_bits)
                         .and_then(|item| items.get(item).ok())
-                        .is_some_and(|item| ssr_core::damage::healing_for(&item.name).is_some());
+                        .is_some_and(|item| {
+                            ssr_core::damage::healing_for(&item.name).is_some()
+                                || ssr_core::blood::analyzer::is_analyzer(&item.name)
+                        });
                     let action = if healing && !combat {
                         ActionKind::Heal { target }
                     } else {
@@ -4144,6 +4169,7 @@ fn update_client_rooms(
 /// (столам), снарядам и звукам — у остальных сущностей комнату ставит свой код.
 type RoomAssignable = Or<(
     With<Item>,
+    With<ssr_core::blood::Puddle>,
     With<ssr_core::structures::Structure>,
     With<weapons::Projectile>,
     With<weapons::WorldSound>,
@@ -4167,7 +4193,8 @@ fn sync_item_rooms(
         RoomAssignable,
     >,
     holders: Query<&ItemRoom, With<PlayerPosition>>,
-    containers: Query<(&Inventory, &ItemRoom), With<Container>>,
+    // Ящики и хранилища предметов (аптечка): содержимое видно через их комнату.
+    containers: Query<(&Inventory, &ItemRoom), Or<(With<Container>, With<ItemStorage>)>>,
     mut chunk_rooms: ResMut<ChunkRooms>,
     mut allocator: ResMut<RoomAllocator>,
 ) {
@@ -5133,6 +5160,10 @@ fn process_actions(
                     // `rejuvenate` в сборке лечит полностью и снимает станы.
                     health.rejuvenate();
                 }
+                commands
+                    .entity(target)
+                    .entry::<ssr_core::blood::Bloodstream>()
+                    .and_modify(|mut blood| blood.rejuvenate());
                 commands.entity(target).remove::<KnockedDown>();
             }
             // Админ-верб «Стать призраком» (`aghost`): переводим игрока в

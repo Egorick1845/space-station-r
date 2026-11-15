@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 pub const GAME_NAME: &str = "Space Station R";
 
 pub mod atmosphere;
+pub mod blood;
 pub mod clothing;
 pub mod damage;
 pub mod inventory;

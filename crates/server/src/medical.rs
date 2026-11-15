@@ -127,8 +127,25 @@ pub fn start_healing(
     names: Query<&ssr_core::mechanics::PlayerName>,
     mut senders: Senders,
     mut sounds: ResMut<crate::weapons::SoundQueue>,
+    bloods: Query<&ssr_core::blood::Bloodstream>,
+    mut scans: ResMut<crate::blood::ScanRequests>,
 ) {
     for (user, target) in std::mem::take(&mut requests.0) {
+        // Анализатор здоровья в руке — скан (`HealthAnalyzerSystem.OnAfterInteract`).
+        if let Some(analyzer) = hands
+            .get(user)
+            .ok()
+            .and_then(|h| h.active_item())
+            .and_then(Entity::try_from_bits)
+            .filter(|item| {
+                items
+                    .get(*item)
+                    .is_ok_and(|i| ssr_core::blood::analyzer::is_analyzer(&i.name))
+            })
+        {
+            scans.0.push((user, target, analyzer));
+            continue;
+        }
         // Лекарь в крите/мёртв — действовать не может (`CheckAct`).
         if damageables.get(user).is_ok_and(|d| d.incapacitated()) {
             continue;
@@ -157,7 +174,7 @@ pub fn start_healing(
         if stacks.get(item).is_ok_and(|stack| stack.count < 1) {
             continue;
         }
-        if !healing.has_damage(target_damage) {
+        if !healing.can_heal(target_damage, bloods.get(target).ok()) {
             popup(
                 &players,
                 &mut senders,
@@ -212,6 +229,7 @@ pub fn tick_healing(
     mut senders: Senders,
     mut sounds: ResMut<crate::weapons::SoundQueue>,
     mut damage_events: MessageWriter<DamageEvent>,
+    mut bloods: Query<&mut ssr_core::blood::Bloodstream>,
 ) {
     let dt = time.delta_secs();
     for (user, mut doafter) in doers.iter_mut() {
@@ -268,6 +286,33 @@ pub fn tick_healing(
             continue;
         };
         let item_name = catalog.items.name_of(&proto).to_lowercase();
+        // Кровоток: кровотечение (`bloodlossModifier`) и уровень крови
+        // (`modifyBloodLevel`) — до урона, как в `OnDoAfter`.
+        let mut blood_after = None;
+        if let Ok(mut blood) = bloods.get_mut(doafter.target) {
+            let mut next = *blood;
+            let stopped = healing.apply_blood(&mut next);
+            if next != *blood {
+                *blood = next;
+            }
+            blood_after = Some(next);
+            if stopped {
+                let text = if doafter.target == user {
+                    "Вы остановили кровотечение.".to_string()
+                } else {
+                    format!(
+                        "Вы остановили кровотечение у {}.",
+                        players
+                            .entries
+                            .iter()
+                            .find(|entry| entry.player == doafter.target)
+                            .map(|entry| entry.name.clone())
+                            .unwrap_or_else(|| "пациента".to_string())
+                    )
+                };
+                popup(&players, &mut senders, user, &text);
+            }
+        }
         // Лечение идёт через общий путь урона (пороги, подъём из крита).
         let mut after = *target_damage;
         let healed = after.change(&healing.damage);
@@ -305,7 +350,7 @@ pub fn tick_healing(
             "healing applied"
         );
         // `args.Repeat = HasDamage && !dontRepeat`.
-        let repeat = healing.has_damage(&after) && !empty;
+        let repeat = healing.can_heal(&after, blood_after.as_ref()) && !empty;
         if !repeat {
             commands
                 .entity(user)
