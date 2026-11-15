@@ -120,8 +120,10 @@ pub fn nearest_floor_item(
 /// поставить её ЛКМ). Предмет на полу отдаёт имя своего прототипа в режим
 /// размещения — дальше работает обычный поток спавн-меню: призрак висит на
 /// курсоре, ЛКМ ставит копию, ПКМ отменяет.
+#[allow(clippy::too_many_arguments)]
 pub fn copy_entity_key(
     keys: Res<ButtonInput<KeyCode>>,
+    binds: Res<crate::keybinds::Keybinds>,
     chat: Res<crate::chat::ChatState>,
     console: Res<crate::console::Console>,
     windows: Query<&Window>,
@@ -129,7 +131,7 @@ pub fn copy_entity_key(
     items: Query<(Entity, &Item, &ItemPosition, &HeldBy)>,
     mut placement: ResMut<crate::hud::Placement>,
 ) {
-    if !keys.just_pressed(KeyCode::KeyP) {
+    if !binds.just_pressed(crate::keybinds::KeyFunction::EditorCopyObject, &keys) {
         return;
     }
     // Набор текста в чате/консоли приоритетнее: P там — буква.

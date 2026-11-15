@@ -85,9 +85,13 @@ pub fn shoot_input(
 /// механика та же: вынуть/вставить магазин).
 pub fn reload_input(
     keys: Res<ButtonInput<KeyCode>>,
+    binds: Res<crate::keybinds::Keybinds>,
+    chat: Res<crate::chat::ChatState>,
+    console: Res<crate::console::Console>,
     mut senders: Query<&mut MessageSender<ClientMessage>, With<Connected>>,
 ) {
-    if !keys.just_pressed(KeyCode::KeyR) {
+    // Буква «r» в чате/консоли — не перезарядка.
+    if chat.focused || console.open || !binds.just_pressed(crate::keybinds::KeyFunction::Reload, &keys) {
         return;
     }
     for mut sender in senders.iter_mut() {

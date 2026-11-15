@@ -56,10 +56,11 @@ pub struct ConsoleInputText;
 pub fn toggle_console(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
+    binds: Res<crate::keybinds::Keybinds>,
     mut console: ResMut<Console>,
     root: Query<Entity, With<ConsoleRoot>>,
 ) {
-    if !keys.just_pressed(KeyCode::Backquote) {
+    if !binds.just_pressed(crate::keybinds::KeyFunction::ShowDebugConsole, &keys) {
         return;
     }
     console.open = !console.open;
