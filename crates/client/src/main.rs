@@ -432,6 +432,7 @@ fn main() {
             inventory_ui::unequip_test_mode,
             inventory_ui::build_test_mode,
             inventory_ui::attack_test_mode,
+            inventory_ui::throw_test_mode,
             crafting::craft_test_mode,
             console::admin_test_mode,
         )
