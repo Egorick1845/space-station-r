@@ -17,6 +17,7 @@ use ssr_core::damage::{
     Damageable, DoAfterBar, MobState, healing_for, respirator,
 };
 use ssr_core::inventory::{Hands, Item};
+use ssr_core::stack::Stack;
 use ssr_core::mechanics::Ghost;
 use ssr_protocol::ServerMessage;
 use ssr_protocol::net::GameChannel;
@@ -26,11 +27,6 @@ use crate::{DamageEvent, DamageSource, Players, TILE_SIZE};
 /// Заявки «лечить» из обработки действий: (лекарь, цель).
 #[derive(Resource, Default)]
 pub struct HealRequests(pub Vec<(Entity, Entity)>);
-
-/// Остаток стопки лечащего предмета (`StackComponent.Count`). Нет
-/// компонента — стопка полная (`healing.yml`: Full = 15).
-#[derive(Component, Clone, Copy, Debug)]
-pub struct Stack(pub u32);
 
 /// Идущее лечение (DoAfter с `HealingDoAfterEvent`) на лекаре.
 #[derive(Component, Clone, Copy, Debug)]
@@ -62,7 +58,7 @@ impl Default for Breath {
 #[derive(Resource, Default)]
 pub struct DoAfterIds(pub u32);
 
-type Senders<'w, 's> = Query<
+pub(crate) type Senders<'w, 's> = Query<
     'w,
     's,
     (Entity, &'static mut MessageSender<ServerMessage>),
@@ -70,7 +66,7 @@ type Senders<'w, 's> = Query<
 >;
 
 /// Всплывашка игроку (`PopupClient`) — у нас строка системного чата.
-fn popup(players: &Players, senders: &mut Senders, player: Entity, text: &str) {
+pub(crate) fn popup(players: &Players, senders: &mut Senders, player: Entity, text: &str) {
     let Some(link) = players
         .entries
         .iter()
@@ -155,7 +151,7 @@ pub fn start_healing(
         if user != target && distance(user_pos.0, target_pos.0) > crate::INTERACT_RANGE + 32.0 {
             continue;
         }
-        if stacks.get(item).is_ok_and(|stack| stack.0 < 1) {
+        if stacks.get(item).is_ok_and(|stack| stack.count < 1) {
             continue;
         }
         if !healing.has_damage(target_damage) {
@@ -277,7 +273,7 @@ pub fn tick_healing(
             source: DamageSource::Healing { healer: user },
         });
         // Расход стопки (`ReduceCount(1)`), пустая — удаляется.
-        let left = stacks.get(doafter.item).map(|s| s.0).unwrap_or(healing.stack) - 1;
+        let left = stacks.get(doafter.item).map(|s| s.count).unwrap_or(1).saturating_sub(1);
         let empty = left == 0;
         if empty {
             if let Ok(mut hand) = hands.get_mut(user) {
@@ -289,7 +285,7 @@ pub fn tick_healing(
             }
             commands.entity(doafter.item).despawn();
         } else {
-            commands.entity(doafter.item).insert(Stack(left));
+            commands.entity(doafter.item).insert(Stack { count: left });
         }
         sounds.0.push((target_pos.0, healing.end_sound.to_string()));
         tracing::info!(

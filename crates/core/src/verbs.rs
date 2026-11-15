@@ -93,6 +93,8 @@ pub enum VerbCategory {
     Switch,
     Interaction,
     SetTransferAmount,
+    /// `VerbCategory.Split` (стопки).
+    Split,
 }
 
 impl VerbCategory {
@@ -113,6 +115,7 @@ impl VerbCategory {
             VerbCategory::Switch => "Переключить",
             VerbCategory::Interaction => "Взаимодействие",
             VerbCategory::SetTransferAmount => "Объём переноса",
+            VerbCategory::Split => "Разделить",
         }
     }
 

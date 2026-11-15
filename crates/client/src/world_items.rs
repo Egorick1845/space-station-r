@@ -240,6 +240,7 @@ pub fn pull_test_mode(
 #[allow(clippy::too_many_arguments)]
 pub fn floor_item_click(
     mouse: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
     windows: Query<&Window>,
     camera: Single<(&Camera, &GlobalTransform), With<Camera2d>>,
     entity_map: Option<Res<ServerEntityMap>>,
@@ -249,6 +250,18 @@ pub fn floor_item_click(
     ui: Query<&Interaction, With<Button>>,
 ) {
     if !mouse.just_pressed(MouseButton::Left) {
+        return;
+    }
+    // Shift/Ctrl/Alt+ЛКМ — осмотр, тянуть, альтернативное действие
+    // (`inventory_ui::world_click`), не подбор.
+    if keys.any_pressed([
+        KeyCode::ShiftLeft,
+        KeyCode::ShiftRight,
+        KeyCode::ControlLeft,
+        KeyCode::ControlRight,
+        KeyCode::AltLeft,
+        KeyCode::AltRight,
+    ]) {
         return;
     }
     // В режиме размещения (в т.ч. копии по P) ЛКМ ставит предмет, а не подбирает.

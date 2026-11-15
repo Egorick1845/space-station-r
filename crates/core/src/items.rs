@@ -45,6 +45,15 @@ pub struct ItemProto {
     /// умолчанию `true` (прежнее правило «тянуть только от 2×2» было выдумкой).
     #[serde(default = "default_pullable")]
     pub pullable: bool,
+    /// Размер стопки (`StackPrototype.maxCount`), `None` — предмет не
+    /// складывается. Стопки сборки: листы, прутья, кабель, руда, слитки — 30
+    /// (`BaseSheetStack`/`BaseMediumStack`), медицина — 15 (`medical.yml`).
+    #[serde(default)]
+    pub max_stack: Option<u32>,
+    /// Спрайт в сетке хранилища (`Item.storedSprite`): у вытянутых предметов
+    /// (лом, ключ, нож) — вертикальный `storage`, под форму 1×2.
+    #[serde(default)]
+    pub stored: Option<String>,
 }
 
 fn default_pullable() -> bool {
@@ -125,6 +134,11 @@ impl ItemSet {
     /// Спрайт «надетым» (ключ `path.rsi#state`).
     pub fn worn_of(&self, id: &str) -> Option<&str> {
         self.by_id(id).and_then(|item| item.worn.as_deref())
+    }
+
+    /// Максимум стопки (`None` — не стопка).
+    pub fn max_stack(&self, id: &str) -> Option<u32> {
+        self.by_id(id).and_then(|item| item.max_stack)
     }
 
     /// Название для UI (неизвестный предмет — сам id).

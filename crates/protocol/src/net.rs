@@ -41,6 +41,7 @@ pub fn register_replication(app: &mut bevy_app::App) {
     app.component::<Hands>().replicate();
     app.component::<ssr_core::damage::Damageable>().replicate();
     app.component::<ssr_core::damage::DoAfterBar>().replicate();
+    app.component::<ssr_core::stack::Stack>().replicate();
     app.component::<HeldBy>().replicate();
     app.component::<Container>().replicate();
     app.component::<ItemStorage>().replicate();
