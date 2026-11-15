@@ -313,7 +313,7 @@ pub fn position_speech_bubbles(
 
 /// Облачко набора (`TypingIndicatorVisualizerSystem`): слой `speech.rsi`
 /// поверх тела, `default0` — печатает, `default3` — ждёт, нет — скрыт.
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn sync_typing_clouds(
     mut commands: Commands,
     time: Res<Time>,

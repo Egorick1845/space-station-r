@@ -32,9 +32,9 @@ mod hud;
 mod humanoid;
 mod inventory_ui;
 mod keybinds;
+mod launcher;
 mod light_gpu;
 mod lighting;
-mod launcher;
 mod lobby;
 mod overhead_speech;
 mod power_view;
@@ -459,10 +459,7 @@ fn main() {
         )
             .run_if(in_game),
     );
-    app.add_systems(
-        Update,
-        hud::close_windows_on_escape.run_if(in_game),
-    );
+    app.add_systems(Update, hud::close_windows_on_escape.run_if(in_game));
     // Снимок экрана для проверок — в любом состоянии (и в лобби).
     app.add_systems(Update, screenshot_test_mode);
     app.add_systems(

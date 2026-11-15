@@ -597,9 +597,19 @@ fn build_menu(commands: &mut Commands, draft: &Settings, dirty: bool) {
                 .with_children(|page| match draft.tab {
                     SettingsTab::Misc => {
                         section(page, "Речь");
-                        checkbox(page, draft, Opt::LoocOverhead, "Показывать LOOC-чат над головами персонажей");
+                        checkbox(
+                            page,
+                            draft,
+                            Opt::LoocOverhead,
+                            "Показывать LOOC-чат над головами персонажей",
+                        );
                         section(page, "Курсор");
-                        checkbox(page, draft, Opt::CombatIndicators, "Показать индикатор боевого режима рядом с курсором");
+                        checkbox(
+                            page,
+                            draft,
+                            Opt::CombatIndicators,
+                            "Показать индикатор боевого режима рядом с курсором",
+                        );
                     }
                     SettingsTab::Graphics => {
                         section(page, "Окно");
@@ -644,7 +654,12 @@ fn build_menu(commands: &mut Commands, draft: &Settings, dirty: bool) {
                     BorderColor::from(WIN_BORDER),
                 ))
                 .with_children(|bar| {
-                    bottom_button(bar, "Сброс к настройкам по умолчанию", SettingsAction::ResetDefaults, BTN);
+                    bottom_button(
+                        bar,
+                        "Сброс к настройкам по умолчанию",
+                        SettingsAction::ResetDefaults,
+                        BTN,
+                    );
                     bar.spawn(Node {
                         flex_grow: 1.0,
                         ..default()
@@ -674,7 +689,12 @@ fn section(page: &mut RelatedSpawnerCommands<'_, ChildOf>, title: &str) {
 }
 
 /// Строка-галочка (`CheckBox` в OptionsMenu).
-fn checkbox(page: &mut RelatedSpawnerCommands<'_, ChildOf>, draft: &Settings, opt: Opt, label: &str) {
+fn checkbox(
+    page: &mut RelatedSpawnerCommands<'_, ChildOf>,
+    draft: &Settings,
+    opt: Opt,
+    label: &str,
+) {
     let on = opt.get(draft);
     page.spawn((
         SettingsAction::Toggle(opt),
@@ -720,7 +740,12 @@ fn checkbox(page: &mut RelatedSpawnerCommands<'_, ChildOf>, draft: &Settings, op
     });
 }
 
-fn bottom_button(bar: &mut RelatedSpawnerCommands<'_, ChildOf>, label: &str, action: SettingsAction, bg: Color) {
+fn bottom_button(
+    bar: &mut RelatedSpawnerCommands<'_, ChildOf>,
+    label: &str,
+    action: SettingsAction,
+    bg: Color,
+) {
     bar.spawn((
         action,
         Button,
@@ -782,15 +807,13 @@ fn tabs_row(panel: &mut RelatedSpawnerCommands<'_, ChildOf>, active: SettingsTab
 /// Ползунок громкости: дорожка и ручка (как слайдеры в опциях SS14).
 fn volume_slider(panel: &mut RelatedSpawnerCommands<'_, ChildOf>, volume: f32) {
     panel
-        .spawn((
-            Node {
-                flex_direction: FlexDirection::Row,
-                align_items: AlignItems::Center,
-                column_gap: px(8),
-                padding: UiRect::axes(px(6), px(3)),
-                ..default()
-            },
-        ))
+        .spawn((Node {
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::Center,
+            column_gap: px(8),
+            padding: UiRect::axes(px(6), px(3)),
+            ..default()
+        },))
         .with_children(|row| {
             row.spawn(Node {
                 width: px(180),

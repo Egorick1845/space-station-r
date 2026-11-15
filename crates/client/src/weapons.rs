@@ -91,7 +91,10 @@ pub fn reload_input(
     mut senders: Query<&mut MessageSender<ClientMessage>, With<Connected>>,
 ) {
     // Буква «r» в чате/консоли — не перезарядка.
-    if chat.focused || console.open || !binds.just_pressed(crate::keybinds::KeyFunction::Reload, &keys) {
+    if chat.focused
+        || console.open
+        || !binds.just_pressed(crate::keybinds::KeyFunction::Reload, &keys)
+    {
         return;
     }
     for mut sender in senders.iter_mut() {

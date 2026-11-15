@@ -637,7 +637,9 @@ pub fn render_inventory_panel(
                     }
                     // Предметы: рамка по футпринту (`Storage/piece_*`) и спрайт ×2
                     // по центру занятой площади (ItemGridPiece.cs).
-                    for (bits, x, y, w, h) in ssr_core::inventory::item_layout(inventory.cols, &inventory.cells) {
+                    for (bits, x, y, w, h) in
+                        ssr_core::inventory::item_layout(inventory.cols, &inventory.cells)
+                    {
                         let Some(sprite) = sprites.stored_icon(bits) else {
                             continue;
                         };
@@ -1776,7 +1778,10 @@ pub fn throw_test_mode(
             Some([x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?])
         })
         .unwrap_or([1.0, 0.4]);
-    let target = [at.0[0] + 5.0 * TILE_UNITS * dir[0], at.0[1] + 5.0 * TILE_UNITS * dir[1]];
+    let target = [
+        at.0[0] + 5.0 * TILE_UNITS * dir[0],
+        at.0[1] + 5.0 * TILE_UNITS * dir[1],
+    ];
     for mut sender in senders.iter_mut() {
         sender.send::<GameChannel>(ClientMessage::DropHand {
             target,
@@ -2283,7 +2288,11 @@ pub fn equip_slot_click(
         // `InventorySystem.OnUseSlot`: предмет в руке и вещь в слоте —
         // `InteractUsing` (положить в рюкзак/пояс); у нас это та же логика,
         // что и у быстрой экипировки.
-        if held.is_some() && clothing.and_then(|clothing| clothing.get(button.0)).is_some() {
+        if held.is_some()
+            && clothing
+                .and_then(|clothing| clothing.get(button.0))
+                .is_some()
+        {
             for mut sender in senders.iter_mut() {
                 sender.send::<GameChannel>(ClientMessage::SmartEquip {
                     slot: button.0.id().to_string(),

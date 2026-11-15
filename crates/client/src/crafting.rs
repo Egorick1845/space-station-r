@@ -10,8 +10,8 @@
 //! сервер проверяет материалы и выдаёт результат. Erase/Clear — заглушки:
 //! в сборке они относятся к строительным призракам (Construction-графы, §7).
 
-use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::input::ButtonState;
+use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::prelude::*;
 use lightyear::prelude::client::*;
 use lightyear::prelude::*;
@@ -172,15 +172,7 @@ pub(crate) fn matched_count(state: &CraftingState, content: &ClientContent) -> u
 
 /// Отпечаток окна: открытость, поиск, категория, попап, выбор, прокрутка,
 /// спрайты и доступность рецептов (кнопка Build).
-type CraftSignature = (
-    bool,
-    String,
-    String,
-    bool,
-    Option<String>,
-    u32,
-    Vec<bool>,
-);
+type CraftSignature = (bool, String, String, bool, Option<String>, u32, Vec<bool>);
 
 /// Рисует окно (пересобирает при изменении отпечатка).
 #[allow(clippy::too_many_arguments)]
@@ -310,33 +302,23 @@ pub fn render_crafting(
             crate::hud::window_header(window, &theme, "Строительство");
             let (mut body, background) = crate::hud::window_body();
             body.height = px(WINDOW_H - 25.0);
-            window
-                .spawn((body, background))
-                .with_children(|body| {
-                    // Горизонтальный корень XAML: левая колонка + правая.
-                    body.spawn(Node {
-                        flex_direction: FlexDirection::Row,
-                        flex_grow: 1.0,
-                        column_gap: px(LEFT_COL_GAP),
-                        min_height: px(0),
-                        ..default()
-                    })
-                    .with_children(|columns| {
-                        left_column(
-                            columns,
-                            &state,
-                            &content,
-                            &cats,
-                            &visible,
-                            &icons,
-                            content_h,
-                            view_h,
-                            offset,
-                            bar_width,
-                        );
-                        right_column(columns, &state, &content, &registry, &craftable);
-                    });
+            window.spawn((body, background)).with_children(|body| {
+                // Горизонтальный корень XAML: левая колонка + правая.
+                body.spawn(Node {
+                    flex_direction: FlexDirection::Row,
+                    flex_grow: 1.0,
+                    column_gap: px(LEFT_COL_GAP),
+                    min_height: px(0),
+                    ..default()
+                })
+                .with_children(|columns| {
+                    left_column(
+                        columns, &state, &content, &cats, &visible, &icons, content_h, view_h,
+                        offset, bar_width,
+                    );
+                    right_column(columns, &state, &content, &registry, &craftable);
                 });
+            });
         });
 }
 
@@ -442,32 +424,31 @@ fn left_column(
             })
             .with_children(|row| {
                 let (field, field_bg) = crate::hud::glass_field();
+                row.spawn((CraftSearchField, Button, field, field_bg))
+                    .with_child((
+                        Text::new(if state.search.is_empty() {
+                            "Search".to_string()
+                        } else {
+                            format!("{}_", state.search)
+                        }),
+                        TextFont::from_font_size(ui::FONT_BASE),
+                        TextColor(if state.search.is_empty() {
+                            ui::TEXT_MUTED
+                        } else {
+                            ui::TEXT
+                        }),
+                    ));
                 row.spawn((
-                    CraftSearchField,
+                    CategoryButton,
                     Button,
-                    field,
-                    field_bg,
+                    Node {
+                        width: px(CATEGORY_W),
+                        height: px(FIELD_H),
+                        align_items: AlignItems::Center,
+                        padding: UiRect::horizontal(px(8)),
+                        ..default()
+                    },
                 ))
-                .with_child((
-                    Text::new(if state.search.is_empty() {
-                        "Search".to_string()
-                    } else {
-                        format!("{}_", state.search)
-                    }),
-                    TextFont::from_font_size(ui::FONT_BASE),
-                    TextColor(if state.search.is_empty() {
-                        ui::TEXT_MUTED
-                    } else {
-                        ui::TEXT
-                    }),
-                ));
-                row.spawn((CategoryButton, Button, Node {
-                    width: px(CATEGORY_W),
-                    height: px(FIELD_H),
-                    align_items: AlignItems::Center,
-                    padding: UiRect::horizontal(px(8)),
-                    ..default()
-                }))
                 .with_children(|button| {
                     let label = if state.category.is_empty() {
                         "Все".to_string()
@@ -593,7 +574,13 @@ fn right_column(
         .as_deref()
         .and_then(|id| content.recipes.by_id(id));
     let can = selected
-        .and_then(|recipe| content.recipes.recipes.iter().position(|r| r.id == recipe.id))
+        .and_then(|recipe| {
+            content
+                .recipes
+                .recipes
+                .iter()
+                .position(|r| r.id == recipe.id)
+        })
         .map(|index| craftable[index])
         .unwrap_or(false);
     parent
@@ -653,27 +640,28 @@ fn right_column(
                                     ));
                                 }
                             });
-                        header.spawn(Node {
-                            flex_direction: FlexDirection::Column,
-                            flex_grow: 1.0,
-                            ..default()
-                        })
-                        .with_children(|labels| {
-                            labels.spawn((
-                                Text::new(recipe.name.clone()),
-                                TextFont::from_font_size(ui::FONT_LABEL),
-                                TextColor(ui::NANO_GOLD),
-                            ));
-                            labels.spawn((
-                                Text::new(format!(
-                                    "Результат: {} ×{}",
-                                    content.items.name_of(&recipe.output.0),
-                                    recipe.output.1
-                                )),
-                                TextFont::from_font_size(ui::FONT_BASE),
-                                TextColor(ui::TEXT_MUTED),
-                            ));
-                        });
+                        header
+                            .spawn(Node {
+                                flex_direction: FlexDirection::Column,
+                                flex_grow: 1.0,
+                                ..default()
+                            })
+                            .with_children(|labels| {
+                                labels.spawn((
+                                    Text::new(recipe.name.clone()),
+                                    TextFont::from_font_size(ui::FONT_LABEL),
+                                    TextColor(ui::NANO_GOLD),
+                                ));
+                                labels.spawn((
+                                    Text::new(format!(
+                                        "Результат: {} ×{}",
+                                        content.items.name_of(&recipe.output.0),
+                                        recipe.output.1
+                                    )),
+                                    TextFont::from_font_size(ui::FONT_BASE),
+                                    TextColor(ui::TEXT_MUTED),
+                                ));
+                            });
                     });
                 // Шаги (RecipeStepList): каждый вход и результат с иконками.
                 right
@@ -721,17 +709,18 @@ fn right_column(
                         TextColor(if can { ui::TEXT } else { ui::TEXT_MUTED }),
                     ));
             } else {
-                right.spawn(Node {
-                    flex_grow: 1.0,
-                    align_items: AlignItems::Center,
-                    justify_content: JustifyContent::Center,
-                    ..default()
-                })
-                .with_child((
-                    Text::new("Выберите рецепт в списке"),
-                    TextFont::from_font_size(ui::FONT_BASE),
-                    TextColor(ui::TEXT_MUTED),
-                ));
+                right
+                    .spawn(Node {
+                        flex_grow: 1.0,
+                        align_items: AlignItems::Center,
+                        justify_content: JustifyContent::Center,
+                        ..default()
+                    })
+                    .with_child((
+                        Text::new("Выберите рецепт в списке"),
+                        TextFont::from_font_size(ui::FONT_BASE),
+                        TextColor(ui::TEXT_MUTED),
+                    ));
             }
             // Ряд Erase (0.7) / Clear (0.3) — заглушки (Eraser Mode/Clear All
             // работают со строительными призраками).
@@ -742,7 +731,10 @@ fn right_column(
                     ..default()
                 })
                 .with_children(|row| {
-                    for (label, ratio) in [("Режим ластика", ERASE_RATIO), ("Очистить всё", 1.0 - ERASE_RATIO)] {
+                    for (label, ratio) in [
+                        ("Режим ластика", ERASE_RATIO),
+                        ("Очистить всё", 1.0 - ERASE_RATIO),
+                    ] {
                         row.spawn((
                             Button,
                             BackgroundColor(ui::GLASS_BUTTON_DISABLED),
@@ -923,8 +915,8 @@ pub fn craft_scroll_wheel(
     }
     let max_scroll = (matched_count(&state, &content) as f32 * ROW_STEP - list_view_h()).max(0.0);
     for event in wheel.read() {
-        state.scroll_target = (state.scroll_target - event.y * ui::SCROLLBAR_WHEEL_STEP)
-            .clamp(0.0, max_scroll);
+        state.scroll_target =
+            (state.scroll_target - event.y * ui::SCROLLBAR_WHEEL_STEP).clamp(0.0, max_scroll);
     }
 }
 
@@ -948,9 +940,8 @@ pub fn craft_scroll_apply(
     if inner.is_empty() {
         return;
     }
-    let max_scroll = (matched_count(&state, &content) as f32 * RECIPE_ROW_STEP
-        - list_view_h())
-    .max(0.0);
+    let max_scroll =
+        (matched_count(&state, &content) as f32 * RECIPE_ROW_STEP - list_view_h()).max(0.0);
     let scroll = state.scroll.clamp(0.0, max_scroll);
     let offset = scroll - (scroll / RECIPE_ROW_STEP).floor() * RECIPE_ROW_STEP;
     for mut transform in inner.iter_mut() {

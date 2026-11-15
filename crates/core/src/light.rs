@@ -337,6 +337,9 @@ mod tests {
         let dir = (-eye.0 / len, -eye.1 / len); // к (32, 32) — диагональ тайла
         let far = first_body_exit(eye, dir, rects);
         let expected = len + std::f32::consts::SQRT_2 * 32.0;
-        assert!((far - expected).abs() < 1e-2, "диагональ: {far} vs {expected}");
+        assert!(
+            (far - expected).abs() < 1e-2,
+            "диагональ: {far} vs {expected}"
+        );
     }
 }

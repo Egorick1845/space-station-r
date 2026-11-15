@@ -955,8 +955,8 @@ pub fn update_lighting(
             let len = (diff.0 * diff.0 + diff.1 * diff.1).sqrt();
             let wall = sample_map(&eye_map, diff.0, diff.1, FOV_BINS);
             let index = (ty * mask_dim_x + tx) as usize;
-            let hidden = !no_fov
-                && len > sample_map(&far_map, diff.0, diff.1, FOV_BINS) - hard_bias;
+            let hidden =
+                !no_fov && len > sample_map(&far_map, diff.0, diff.1, FOV_BINS) - hard_bias;
             hard_hidden[index] = hidden;
             visible[index] = if hidden {
                 0.0

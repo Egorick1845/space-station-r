@@ -112,7 +112,11 @@ fn reachable(world: &World, player: Entity, item: Entity) -> bool {
     if world.hands.get(player).is_ok_and(|h| h.has(bits)) {
         return true;
     }
-    if world.inventories.get(player).is_ok_and(|i| i.contains(bits)) {
+    if world
+        .inventories
+        .get(player)
+        .is_ok_and(|i| i.contains(bits))
+    {
         return true;
     }
     if let Ok(clothing) = world.clothings.get(player) {
@@ -194,26 +198,56 @@ pub fn process_interactions(
     for (player, request) in std::mem::take(&mut queue.0) {
         match request {
             Request::UseInHand => use_in_hand(&mut world, &mut heal, player),
-            Request::HandClick(hand) => {
-                hand_click(&mut commands, &mut world, &players, &mut senders, &mut heal, player, hand)
-            }
-            Request::InteractUsing(target) => {
-                interact_using(&mut commands, &mut world, &players, &mut senders, player, target)
-            }
-            Request::SmartEquip(slot) => {
-                smart_equip(&mut commands, &mut world, &players, &mut senders, player, slot)
-            }
+            Request::HandClick(hand) => hand_click(
+                &mut commands,
+                &mut world,
+                &players,
+                &mut senders,
+                &mut heal,
+                player,
+                hand,
+            ),
+            Request::InteractUsing(target) => interact_using(
+                &mut commands,
+                &mut world,
+                &players,
+                &mut senders,
+                player,
+                target,
+            ),
+            Request::SmartEquip(slot) => smart_equip(
+                &mut commands,
+                &mut world,
+                &players,
+                &mut senders,
+                player,
+                slot,
+            ),
             Request::AltInteract(target) => {
                 // Единственный альтернативный верб у нас — разделение стопки;
                 // первый по сортировке — «Разделить пополам» (приоритет 1).
                 let count = stack_count(&world.stacks, target);
                 if count > 1 && world.stacks.get(target).is_ok() {
-                    split(&mut commands, &mut world, &players, &mut senders, player, target, count / 2);
+                    split(
+                        &mut commands,
+                        &mut world,
+                        &players,
+                        &mut senders,
+                        player,
+                        target,
+                        count / 2,
+                    );
                 }
             }
-            Request::Split(item, amount) => {
-                split(&mut commands, &mut world, &players, &mut senders, player, item, amount)
-            }
+            Request::Split(item, amount) => split(
+                &mut commands,
+                &mut world,
+                &players,
+                &mut senders,
+                player,
+                item,
+                amount,
+            ),
             Request::Give(target) => give(&mut commands, &mut world, player, target),
             Request::ReleasePull => {
                 if let Ok(pulling) = world.pulling.get(player) {
@@ -239,7 +273,11 @@ fn use_in_hand(world: &mut World, heal: &mut HealRequests, player: Entity) {
     else {
         return;
     };
-    let name = world.items.get(item).map(|i| i.name.clone()).unwrap_or_default();
+    let name = world
+        .items
+        .get(item)
+        .map(|i| i.name.clone())
+        .unwrap_or_default();
     if ssr_core::damage::healing_for(&name).is_some() {
         heal.0.push((player, player));
         tracing::info!(?player, item = %name, "use in hand: heal self");
@@ -356,7 +394,12 @@ fn interact_using(
     }
     // Хранилище цели (сумка/ящик для инструментов в руке или на полу).
     if world.storages.get(target).is_ok() {
-        let (w, h) = crate::item_size_of(&world.catalog, &world.prototypes, &world.items, used.to_bits());
+        let (w, h) = crate::item_size_of(
+            &world.catalog,
+            &world.prototypes,
+            &world.items,
+            used.to_bits(),
+        );
         let placed = world
             .inventories
             .get_mut(target)
@@ -366,9 +409,12 @@ fn interact_using(
             if let Ok(mut hands) = world.hands.get_mut(player) {
                 hands.take(used.to_bits());
             }
-            commands.entity(used).remove::<ItemPosition>().insert(HeldBy {
-                player: player.to_bits(),
-            });
+            commands
+                .entity(used)
+                .remove::<ItemPosition>()
+                .insert(HeldBy {
+                    player: player.to_bits(),
+                });
             tracing::info!(?player, item = %used_name, ?target, "inserted into storage");
         }
     }
@@ -513,7 +559,12 @@ fn split(
         return;
     };
     if amount == 0 || amount >= stack.count {
-        popup(players, senders, player, "Стопка слишком мала для разделения.");
+        popup(
+            players,
+            senders,
+            player,
+            "Стопка слишком мала для разделения.",
+        );
         return;
     }
     stack.count -= amount;
@@ -634,11 +685,15 @@ pub fn items_test(
             *stage = 3;
         }
         3 if step(11.0) => {
-            queue.0.push((player, Request::SmartEquip(ClothingSlot::Belt)));
+            queue
+                .0
+                .push((player, Request::SmartEquip(ClothingSlot::Belt)));
             *stage = 4;
         }
         4 if step(13.0) => {
-            queue.0.push((player, Request::SmartEquip(ClothingSlot::Belt)));
+            queue
+                .0
+                .push((player, Request::SmartEquip(ClothingSlot::Belt)));
             *stage = 5;
         }
         5 if step(15.0) => {

@@ -212,8 +212,10 @@ pub fn plain_markdown(text: &str) -> String {
             line.replace("**", "").replace('`', "")
         })
         .collect::<Vec<_>>()
-        .join("
-")
+        .join(
+            "
+",
+        )
 }
 
 /// Адрес по умолчанию (`SSR_PORT` или 7777).
@@ -238,7 +240,9 @@ fn query_status(address: String, tx: Sender<(String, Option<ServerStatus>)>) {
         let result = (|| {
             let addr = address.to_socket_addrs().ok()?.next()?;
             let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(1500)).ok()?;
-            stream.set_read_timeout(Some(Duration::from_millis(1500))).ok()?;
+            stream
+                .set_read_timeout(Some(Duration::from_millis(1500)))
+                .ok()?;
             stream.write_all(status_request(&address).as_bytes()).ok()?;
             let mut response = String::new();
             stream.read_to_string(&mut response).ok()?;
@@ -284,7 +288,11 @@ pub fn poll_statuses(mut launcher: ResMut<Launcher>) {
 // ---------------------------------------------------------------- отрисовка
 
 fn text(parent: &mut ChildSpawnerCommands, value: impl Into<String>, size: f32, color: Color) {
-    parent.spawn((Text::new(value), TextFont::from_font_size(size), TextColor(color)));
+    parent.spawn((
+        Text::new(value),
+        TextFont::from_font_size(size),
+        TextColor(color),
+    ));
 }
 
 /// Кнопка лаунчера: синяя плашка (`OpenRight` и т.п. стили SS14).
@@ -321,7 +329,11 @@ fn button(
             },
         ));
     }
-    entity.with_child((Text::new(label), TextFont::from_font_size(15.0), TextColor(color)));
+    entity.with_child((
+        Text::new(label),
+        TextFont::from_font_size(15.0),
+        TextColor(color),
+    ));
 }
 
 /// Поле ввода (клик — фокус, в фокусе — курсор «▏»).
@@ -360,7 +372,11 @@ fn field(
             BackgroundColor(FIELD),
             BorderColor::from(if focused { GOLD } else { SEPARATOR }),
         ))
-        .with_child((Text::new(shown), TextFont::from_font_size(15.0), TextColor(color)));
+        .with_child((
+            Text::new(shown),
+            TextFont::from_font_size(15.0),
+            TextColor(color),
+        ));
 }
 
 /// Строка сервера: ▸ название | время | игроки | «Подключиться».
@@ -371,7 +387,11 @@ fn server_row(
     index: usize,
     removable: bool,
 ) {
-    let status = launcher.statuses.get(address).cloned().unwrap_or(Status::Pending);
+    let status = launcher
+        .statuses
+        .get(address)
+        .cloned()
+        .unwrap_or(Status::Pending);
     let expanded = launcher.expanded.as_deref() == Some(address);
     let (name, time, players, online) = match &status {
         Status::Online(s) => (
@@ -387,7 +407,11 @@ fn server_row(
         Status::Online(s) => s.protocol_version == ssr_protocol::PROTOCOL_VERSION,
         _ => false,
     };
-    let bg = if index.is_multiple_of(2) { ROW_A } else { ROW_B };
+    let bg = if index.is_multiple_of(2) {
+        ROW_A
+    } else {
+        ROW_B
+    };
     parent
         .spawn((
             Node {
@@ -598,7 +622,11 @@ fn tab_bar(root: &mut ChildSpawnerCommands, active: Tab) {
     ))
     .with_children(|bar| {
         for tab in Tab::ALL {
-            let base = if tab == active { TAB_ACTIVE } else { Color::NONE };
+            let base = if tab == active {
+                TAB_ACTIVE
+            } else {
+                Color::NONE
+            };
             bar.spawn((
                 Button,
                 Action::Tab(tab),
@@ -613,7 +641,11 @@ fn tab_bar(root: &mut ChildSpawnerCommands, active: Tab) {
                     ..default()
                 },
             ))
-            .with_child((Text::new(tab.title()), TextFont::from_font_size(17.0), TextColor(TEXT)));
+            .with_child((
+                Text::new(tab.title()),
+                TextFont::from_font_size(17.0),
+                TextColor(TEXT),
+            ));
         }
         bar.spawn(Node {
             flex_grow: 1.0,
@@ -630,7 +662,11 @@ fn tab_bar(root: &mut ChildSpawnerCommands, active: Tab) {
     });
 }
 
-fn home(page: &mut ChildSpawnerCommands, launcher: &Launcher, settings: &crate::settings::Settings) {
+fn home(
+    page: &mut ChildSpawnerCommands,
+    launcher: &Launcher,
+    settings: &crate::settings::Settings,
+) {
     let list = favorites(settings);
     page.spawn(Node {
         width: percent(100),
@@ -682,7 +718,12 @@ fn home(page: &mut ChildSpawnerCommands, launcher: &Launcher, settings: &crate::
         ..default()
     })
     .with_children(|rows| {
-        for (index, address) in list.iter().enumerate().skip(launcher.scroll).take(VISIBLE_ROWS) {
+        for (index, address) in list
+            .iter()
+            .enumerate()
+            .skip(launcher.scroll)
+            .take(VISIBLE_ROWS)
+        {
             let removable = *address != local_address();
             server_row(rows, launcher, address, index, removable);
         }
@@ -718,7 +759,13 @@ fn home(page: &mut ChildSpawnerCommands, launcher: &Launcher, settings: &crate::
                 launcher.focused == Some(Field::Direct),
                 px(260),
             );
-            button(row, "Подключиться", Action::ConfirmDirect, true, Node::default());
+            button(
+                row,
+                "Подключиться",
+                Action::ConfirmDirect,
+                true,
+                Node::default(),
+            );
             button(row, "Отмена", Action::Cancel, true, Node::default());
         } else {
             button(
@@ -787,7 +834,12 @@ fn servers(
         if shown.is_empty() {
             text(rows, "Ничего не найдено.", 15.0, TEXT_DIM);
         }
-        for (index, address) in shown.iter().enumerate().skip(launcher.scroll).take(VISIBLE_ROWS) {
+        for (index, address) in shown
+            .iter()
+            .enumerate()
+            .skip(launcher.scroll)
+            .take(VISIBLE_ROWS)
+        {
             let removable = **address != local_address();
             server_row(rows, launcher, address, index, removable);
         }
@@ -812,7 +864,12 @@ fn servers(
             flex_grow: 1.0,
             ..default()
         });
-        text(row, format!("Показано {} из {}", shown.len(), all.len()), 14.0, TEXT_DIM);
+        text(
+            row,
+            format!("Показано {} из {}", shown.len(), all.len()),
+            14.0,
+            TEXT_DIM,
+        );
         button(row, "Обновить", Action::Refresh, true, Node::default());
     });
 }
@@ -876,7 +933,11 @@ fn settings_tab(
             },
             BackgroundColor(BUTTON),
         ))
-        .with_child((Text::new(title), TextFont::from_font_size(16.0), TextColor(TEXT)));
+        .with_child((
+            Text::new(title),
+            TextFont::from_font_size(16.0),
+            TextColor(TEXT),
+        ));
     };
     header_chip(page, "Персонаж");
     page.spawn(Node {
@@ -1032,7 +1093,9 @@ pub fn render_launcher(
 }
 
 /// Подсветка кнопок под курсором.
-pub fn launcher_hover(mut buttons: Query<(&Interaction, &Hover, &mut BackgroundColor), Changed<Interaction>>) {
+pub fn launcher_hover(
+    mut buttons: Query<(&Interaction, &Hover, &mut BackgroundColor), Changed<Interaction>>,
+) {
     for (interaction, hover, mut color) in buttons.iter_mut() {
         color.0 = match interaction {
             Interaction::None => hover.base,
@@ -1184,7 +1247,9 @@ pub fn launcher_text_input(
         if event.state != ButtonState::Pressed {
             continue;
         }
-        let edit = |launcher: &mut Launcher, settings: &mut crate::settings::Settings, f: &dyn Fn(&mut String)| {
+        let edit = |launcher: &mut Launcher,
+                    settings: &mut crate::settings::Settings,
+                    f: &dyn Fn(&mut String)| {
             match field {
                 Field::Search => f(&mut launcher.search),
                 Field::Direct => f(&mut launcher.direct),
@@ -1237,7 +1302,11 @@ pub fn launcher_text_input(
 }
 
 /// Колесо мыши — прокрутка списка (по строке).
-pub fn launcher_scroll(mut wheel: MessageReader<MouseWheel>, mut launcher: ResMut<Launcher>, state: Res<LobbyState>) {
+pub fn launcher_scroll(
+    mut wheel: MessageReader<MouseWheel>,
+    mut launcher: ResMut<Launcher>,
+    state: Res<LobbyState>,
+) {
     if *state != LobbyState::Launcher {
         wheel.clear();
         return;
@@ -1293,7 +1362,8 @@ mod tests {
 
     #[test]
     fn news_are_progress_sections_newest_first() {
-        let news = parse_news("# Заголовок\nвступление\n## Первая\nтекст 1\n\n## Вторая\nтекст 2\n");
+        let news =
+            parse_news("# Заголовок\nвступление\n## Первая\nтекст 1\n\n## Вторая\nтекст 2\n");
         assert_eq!(news.len(), 2);
         assert_eq!(news[0].title, "Вторая");
         assert_eq!(news[0].body, "текст 2");
@@ -1303,8 +1373,10 @@ mod tests {
     #[test]
     fn markdown_is_stripped() {
         assert_eq!(
-            plain_markdown("- **Баг**: `Thrown` ок
-### Осталось"),
+            plain_markdown(
+                "- **Баг**: `Thrown` ок
+### Осталось"
+            ),
             "- Баг: Thrown ок
 Осталось"
         );

@@ -1155,7 +1155,11 @@ pub fn sync_overheads(
     // удалённый визуал — в реплицированное тело.
     let mut owners: Vec<(Entity, Entity)> = players
         .iter()
-        .filter_map(|entity| own.0.filter(|data| data == &entity).map(|data| (entity, data)))
+        .filter_map(|entity| {
+            own.0
+                .filter(|data| data == &entity)
+                .map(|data| (entity, data))
+        })
         .collect();
     owners.extend(
         visuals
@@ -1176,7 +1180,10 @@ pub fn sync_overheads(
             }
             continue;
         }
-        if existing.as_ref().is_some_and(|(_, overlay)| overlay.state == state) {
+        if existing
+            .as_ref()
+            .is_some_and(|(_, overlay)| overlay.state == state)
+        {
             continue;
         }
         if let Some((entity, _)) = existing {
@@ -1206,7 +1213,9 @@ pub fn sync_overheads(
     // --- SSD ---
     for (owner, data) in &owners {
         let sleeping = ssds.contains(*data);
-        let existing = ssd_icons.iter().find(|(_, overlay)| overlay.owner == *owner);
+        let existing = ssd_icons
+            .iter()
+            .find(|(_, overlay)| overlay.owner == *owner);
         if !sleeping {
             if let Some((entity, _)) = existing {
                 commands.entity(entity).despawn();
@@ -1263,7 +1272,11 @@ pub fn sync_overheads(
         match existing {
             Some((_, _)) => {
                 // Обновление ширины/цвета заполнения у существующей полоски.
-                for child in childrens.get(*owner).map(|c| c.to_vec()).unwrap_or_default() {
+                for child in childrens
+                    .get(*owner)
+                    .map(|c| c.to_vec())
+                    .unwrap_or_default()
+                {
                     if let Ok((_, mut sprite)) = fills.get_mut(child) {
                         sprite.custom_size =
                             Some(Vec2::new(HEALTH_BAR_WIDTH * fraction, HEALTH_BAR_HEIGHT));
@@ -1276,10 +1289,7 @@ pub fn sync_overheads(
                 background.custom_size = Some(Vec2::new(HEALTH_BAR_WIDTH, HEALTH_BAR_HEIGHT));
                 background.color = Color::srgba(0.0, 0.0, 0.0, 0.55);
                 let mut fill = Sprite::from_image(texture.0.clone());
-                fill.custom_size = Some(Vec2::new(
-                    HEALTH_BAR_WIDTH * fraction,
-                    HEALTH_BAR_HEIGHT,
-                ));
+                fill.custom_size = Some(Vec2::new(HEALTH_BAR_WIDTH * fraction, HEALTH_BAR_HEIGHT));
                 fill.color = color;
                 commands.entity(*owner).with_children(move |parent| {
                     parent.spawn((
@@ -1307,8 +1317,7 @@ pub struct HealthBarFill;
 #[allow(clippy::too_many_arguments)]
 /// Кэш нарезанных половинок обуви: (ключ RSI, направление, правая?) →
 /// (индекс ячейки атласа, половинчатое изображение).
-pub type HalvesCache =
-    std::collections::HashMap<(String, u32, bool), (usize, Handle<Image>)>;
+pub type HalvesCache = std::collections::HashMap<(String, u32, bool), (usize, Handle<Image>)>;
 
 fn shoe_half(
     registry: &RsiRegistry,

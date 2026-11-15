@@ -403,6 +403,18 @@ pub fn context_menu_hover(
     }
 }
 
+/// Тест `SSR_CONTEXT_TEST=1`: как только пришли вербы с категориями — открыть
+/// первую (снимок подменю без мыши).
+pub fn context_menu_test(mut menu: ResMut<ActionMenu>, mut done: Local<bool>) {
+    if *done || std::env::var_os("SSR_CONTEXT_TEST").is_none() || menu.category.is_some() {
+        return;
+    }
+    if let Some(category) = menu.options.iter().find_map(|o| o.category) {
+        menu.category = Some(category);
+        *done = true;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -441,17 +453,5 @@ mod tests {
                 TopItem::Category(VerbCategory::Split)
             ]
         );
-    }
-}
-
-/// Тест `SSR_CONTEXT_TEST=1`: как только пришли вербы с категориями — открыть
-/// первую (снимок подменю без мыши).
-pub fn context_menu_test(mut menu: ResMut<ActionMenu>, mut done: Local<bool>) {
-    if *done || std::env::var_os("SSR_CONTEXT_TEST").is_none() || menu.category.is_some() {
-        return;
-    }
-    if let Some(category) = menu.options.iter().find_map(|o| o.category) {
-        menu.category = Some(category);
-        *done = true;
     }
 }

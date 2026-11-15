@@ -17,8 +17,8 @@ use ssr_core::damage::{
     Damageable, DoAfterBar, MobState, healing_for, respirator,
 };
 use ssr_core::inventory::{Hands, Item};
-use ssr_core::stack::Stack;
 use ssr_core::mechanics::Ghost;
+use ssr_core::stack::Stack;
 use ssr_protocol::ServerMessage;
 use ssr_protocol::net::GameChannel;
 
@@ -58,12 +58,8 @@ impl Default for Breath {
 #[derive(Resource, Default)]
 pub struct DoAfterIds(pub u32);
 
-pub(crate) type Senders<'w, 's> = Query<
-    'w,
-    's,
-    (Entity, &'static mut MessageSender<ServerMessage>),
-    With<Connected>,
->;
+pub(crate) type Senders<'w, 's> =
+    Query<'w, 's, (Entity, &'static mut MessageSender<ServerMessage>), With<Connected>>;
 
 /// Всплывашка игроку (`PopupClient`) — у нас строка системного чата.
 pub(crate) fn popup(players: &Players, senders: &mut Senders, player: Entity, text: &str) {
@@ -84,7 +80,11 @@ pub(crate) fn popup(players: &Players, senders: &mut Senders, player: Entity, te
     }
 }
 
-fn name_of(names: &Query<&ssr_core::mechanics::PlayerName>, players: &Players, e: Entity) -> String {
+fn name_of(
+    names: &Query<&ssr_core::mechanics::PlayerName>,
+    players: &Players,
+    e: Entity,
+) -> String {
     names
         .get(e)
         .ok()
@@ -136,7 +136,10 @@ pub fn start_healing(
         let Ok(target_damage) = damageables.get(target) else {
             continue;
         };
-        let Some((item, proto)) = hands.get(user).ok().and_then(|h| healing_in_hand(h, &items))
+        let Some((item, proto)) = hands
+            .get(user)
+            .ok()
+            .and_then(|h| healing_in_hand(h, &items))
         else {
             continue;
         };
@@ -174,7 +177,9 @@ pub fn start_healing(
             );
         }
         let delay = healing.delay_for(self_heal, target_damage);
-        sounds.0.push((target_pos.0, healing.begin_sound.to_string()));
+        sounds
+            .0
+            .push((target_pos.0, healing.begin_sound.to_string()));
         ids.0 = ids.0.wrapping_add(1);
         commands.entity(user).insert((
             HealingDoAfter {
@@ -216,8 +221,7 @@ pub fn tick_healing(
                 .remove::<(HealingDoAfter, DoAfterBar)>();
             tracing::info!(?user, reason, "healing cancelled");
         };
-        let (Ok(user_pos), Ok(target_pos)) =
-            (positions.get(user), positions.get(doafter.target))
+        let (Ok(user_pos), Ok(target_pos)) = (positions.get(user), positions.get(doafter.target))
         else {
             cancel(&mut commands, "gone");
             continue;
@@ -273,7 +277,11 @@ pub fn tick_healing(
             source: DamageSource::Healing { healer: user },
         });
         // Расход стопки (`ReduceCount(1)`), пустая — удаляется.
-        let left = stacks.get(doafter.item).map(|s| s.count).unwrap_or(1).saturating_sub(1);
+        let left = stacks
+            .get(doafter.item)
+            .map(|s| s.count)
+            .unwrap_or(1)
+            .saturating_sub(1);
         let empty = left == 0;
         if empty {
             if let Ok(mut hand) = hands.get_mut(user) {
@@ -315,7 +323,9 @@ pub fn tick_healing(
         doafter.elapsed = 0.0;
         doafter.delay = delay;
         ids.0 = ids.0.wrapping_add(1);
-        commands.entity(user).insert(DoAfterBar { delay, id: ids.0 });
+        commands
+            .entity(user)
+            .insert(DoAfterBar { delay, id: ids.0 });
     }
 }
 
@@ -355,7 +365,11 @@ pub fn breathing(
                 target: entity,
                 damage: DamageSpecifier::of(DamageType::Asphyxiation, asphyxiation),
                 source: DamageSource::Environment {
-                    cause: if asphyxiation > 0.0 { "suffocation" } else { "breath recovery" },
+                    cause: if asphyxiation > 0.0 {
+                        "suffocation"
+                    } else {
+                        "breath recovery"
+                    },
                 },
             });
         }

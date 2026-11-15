@@ -128,7 +128,7 @@ impl ChatState {
             .collect();
         let end = shown.len().saturating_sub(self.scroll);
         let start = end.saturating_sub(CHAT_VISIBLE);
-        shown[start..end].to_vec().into_iter()
+        shown.into_iter().skip(start).take(end - start)
     }
 }
 

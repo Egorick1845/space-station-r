@@ -21,10 +21,16 @@ fn thresholds_move_between_states() {
     mob.change(&DamageSpecifier::of(DamageType::Blunt, 99.0));
     assert_eq!(mob.update_state(), None);
     mob.change(&DamageSpecifier::of(DamageType::Slash, 1.0));
-    assert_eq!(mob.update_state(), Some((MobState::Alive, MobState::Critical)));
+    assert_eq!(
+        mob.update_state(),
+        Some((MobState::Alive, MobState::Critical))
+    );
     assert!(mob.incapacitated());
     mob.change(&DamageSpecifier::of(DamageType::Blunt, -10.0));
-    assert_eq!(mob.update_state(), Some((MobState::Critical, MobState::Alive)));
+    assert_eq!(
+        mob.update_state(),
+        Some((MobState::Critical, MobState::Alive))
+    );
     mob.change(&DamageSpecifier::of(DamageType::Heat, 200.0));
     assert_eq!(mob.update_state(), Some((MobState::Alive, MobState::Dead)));
     // AllowRevives = false: мёртвого лечение не поднимает.

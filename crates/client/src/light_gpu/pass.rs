@@ -133,7 +133,13 @@ pub fn light_gpu_pass(
         &layouts.apply,
         APPLY_BINDINGS,
         &state.params,
-        &[(5, b_view), (6, a_view), (8, fov_view), (11, mask_view), (13, far_view)],
+        &[
+            (5, b_view),
+            (6, a_view),
+            (8, fov_view),
+            (11, mask_view),
+            (13, far_view),
+        ],
     );
     let mask_bind = bind(
         &layouts.wall_mask,

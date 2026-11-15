@@ -46,7 +46,11 @@ pub fn sync_do_after_bars(
         .iter()
         .filter_map(|entity| own.0.map(|data| (entity, data)))
         .collect();
-    owners.extend(visuals.iter().map(|(entity, visual)| (entity, visual.player)));
+    owners.extend(
+        visuals
+            .iter()
+            .map(|(entity, visual)| (entity, visual.player)),
+    );
     let dt = time.delta_secs();
 
     // Полоски без владельца или без DoAfter — убрать.

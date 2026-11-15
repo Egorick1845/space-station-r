@@ -55,7 +55,10 @@ fn serve(listener: TcpListener, shared: Arc<Mutex<ServerStatus>>) {
         };
         let request = String::from_utf8_lossy(&buffer[..read]);
         let response = if request.starts_with("GET /status") {
-            let status = shared.lock().map(|s| s.clone()).unwrap_or_else(|_| initial_status());
+            let status = shared
+                .lock()
+                .map(|s| s.clone())
+                .unwrap_or_else(|_| initial_status());
             http_json_response(&serde_json::to_string(&status).unwrap_or_default())
         } else {
             "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()

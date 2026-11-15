@@ -415,7 +415,7 @@ pub fn spawn_hud(
         (label(Key::OpenCharacterMenu), HudAction::ToggleCharacter, 2), // CharacterButton
         (label(Key::OpenEmotesMenu), HudAction::ToggleEmotes, 3), // EmotesButton
         (label(Key::OpenCraftingMenu), HudAction::ToggleCraft, 4), // CraftingButton
-        (String::new(), HudAction::ToggleAction, 5), // ActionButton (fist)
+        (String::new(), HudAction::ToggleAction, 5),     // ActionButton (fist)
         (label(Key::OpenLanguageMenu), HudAction::ToggleLanguage, 6), // LanguageButton
         (label(Key::OpenAdminMenu), HudAction::ToggleAdmin, 7), // AdminButton (gavel)
         (label(Key::OpenSandboxWindow), HudAction::ToggleSpawn, 8), // SandboxButton
@@ -985,7 +985,10 @@ pub fn sprint_hotkey(
     sprintings: Query<&ssr_core::mechanics::Sprinting>,
     mut senders: Query<&mut MessageSender<ClientMessage>, With<Connected>>,
 ) {
-    if console.open || chat.focused || !binds.just_pressed(crate::keybinds::KeyFunction::Sprint, &keys) {
+    if console.open
+        || chat.focused
+        || !binds.just_pressed(crate::keybinds::KeyFunction::Sprint, &keys)
+    {
         return;
     }
     let Some(sprinting) = own.0.and_then(|entity| sprintings.get(entity).ok()) else {
@@ -1371,15 +1374,13 @@ pub fn render_stub_windows(
             .with_children(|window| {
                 window_header(window, &theme, STUB_TITLES[index]);
                 let (body, background) = window_body();
-                window
-                    .spawn((body, background))
-                    .with_children(|body| {
-                        body.spawn((
-                            Text::new("В разработке — раздел плана порта (§11)."),
-                            TextFont::from_font_size(ui::FONT_BASE),
-                            TextColor(ui::TEXT_MUTED),
-                        ));
-                    });
+                window.spawn((body, background)).with_children(|body| {
+                    body.spawn((
+                        Text::new("В разработке — раздел плана порта (§11)."),
+                        TextFont::from_font_size(ui::FONT_BASE),
+                        TextColor(ui::TEXT_MUTED),
+                    ));
+                });
             });
     }
 }
@@ -1821,19 +1822,20 @@ pub fn render_spawn_menu(
                     field.flex_grow = 1.0;
                     // Button обязателен: без него bevy_ui не считает Interaction
                     // и клик по полю не включал ввод (поиск был мёртв).
-                    row.spawn((MenuSearchButton, Button, field, field_bg)).with_child((
-                        Text::new(if state.search.is_empty() {
-                            "поиск".to_string()
-                        } else {
-                            format!("{}_", state.search)
-                        }),
-                        TextFont::from_font_size(ui::FONT_BASE),
-                        TextColor(if state.search.is_empty() {
-                            ui::TEXT_MUTED
-                        } else {
-                            ui::TEXT
-                        }),
-                    ));
+                    row.spawn((MenuSearchButton, Button, field, field_bg))
+                        .with_child((
+                            Text::new(if state.search.is_empty() {
+                                "поиск".to_string()
+                            } else {
+                                format!("{}_", state.search)
+                            }),
+                            TextFont::from_font_size(ui::FONT_BASE),
+                            TextColor(if state.search.is_empty() {
+                                ui::TEXT_MUTED
+                            } else {
+                                ui::TEXT
+                            }),
+                        ));
                     row.spawn((
                         MenuClearButton,
                         Button,

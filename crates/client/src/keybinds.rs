@@ -195,9 +195,18 @@ impl KeyFunction {
         let one = |b: Binding| [Some(b), None];
         match self {
             MoveUp => [Some(Binding::key(K::KeyW)), Some(Binding::key(K::ArrowUp))],
-            MoveDown => [Some(Binding::key(K::KeyS)), Some(Binding::key(K::ArrowDown))],
-            MoveLeft => [Some(Binding::key(K::KeyA)), Some(Binding::key(K::ArrowLeft))],
-            MoveRight => [Some(Binding::key(K::KeyD)), Some(Binding::key(K::ArrowRight))],
+            MoveDown => [
+                Some(Binding::key(K::KeyS)),
+                Some(Binding::key(K::ArrowDown)),
+            ],
+            MoveLeft => [
+                Some(Binding::key(K::KeyA)),
+                Some(Binding::key(K::ArrowLeft)),
+            ],
+            MoveRight => [
+                Some(Binding::key(K::KeyD)),
+                Some(Binding::key(K::ArrowRight)),
+            ],
             Walk => [
                 Some(Binding::key(K::ShiftLeft)),
                 Some(Binding::key(K::ShiftRight)),
@@ -345,11 +354,15 @@ pub fn key_label(key: KeyCode) -> &'static str {
 }
 
 fn key_name(key: KeyCode) -> Option<&'static str> {
-    KEYS.iter().find(|(code, _, _)| *code == key).map(|(_, name, _)| *name)
+    KEYS.iter()
+        .find(|(code, _, _)| *code == key)
+        .map(|(_, name, _)| *name)
 }
 
 fn key_from_name(name: &str) -> Option<KeyCode> {
-    KEYS.iter().find(|(_, n, _)| *n == name).map(|(code, _, _)| *code)
+    KEYS.iter()
+        .find(|(_, n, _)| *n == name)
+        .map(|(code, _, _)| *code)
 }
 
 fn is_modifier(key: KeyCode) -> bool {
@@ -611,7 +624,11 @@ pub fn render_keybinds_panel(
                 ));
             });
             let mut group = "";
-            for function in KeyFunction::ALL.into_iter().skip(state.scroll).take(VISIBLE) {
+            for function in KeyFunction::ALL
+                .into_iter()
+                .skip(state.scroll)
+                .take(VISIBLE)
+            {
                 if function.group() != group {
                     group = function.group();
                     list.spawn((
@@ -648,11 +665,14 @@ pub fn render_keybinds_panel(
                     ));
                     for (slot, binding) in binds.get(function).into_iter().enumerate() {
                         let capturing = state.capture == Some((function, slot));
-                        let conflict = binding.is_some_and(|b| !binds.conflicts(function, &b).is_empty());
+                        let conflict =
+                            binding.is_some_and(|b| !binds.conflicts(function, &b).is_empty());
                         let label = if capturing {
                             "Нажмите клавишу…".to_string()
                         } else {
-                            binding.map(|b| b.label()).unwrap_or_else(|| "—".to_string())
+                            binding
+                                .map(|b| b.label())
+                                .unwrap_or_else(|| "—".to_string())
                         };
                         let color = if conflict {
                             Color::srgb(0.95, 0.45, 0.35)
@@ -677,7 +697,11 @@ pub fn render_keybinds_panel(
                             }),
                             BorderColor::from(Color::srgb(0.30, 0.30, 0.35)),
                         ))
-                        .with_child((Text::new(label), TextFont::from_font_size(12.0), TextColor(color)));
+                        .with_child((
+                            Text::new(label),
+                            TextFont::from_font_size(12.0),
+                            TextColor(color),
+                        ));
                     }
                 });
             }
@@ -728,9 +752,10 @@ pub fn capture_keybind(
     let ctrl = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
     let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
     let alt = keys.any_pressed([KeyCode::AltLeft, KeyCode::AltRight]);
-    let pressed = keys.get_just_pressed().copied().find(|key| {
-        key_name(*key).is_some() && (!is_modifier(*key) || function.held())
-    });
+    let pressed = keys
+        .get_just_pressed()
+        .copied()
+        .find(|key| key_name(*key).is_some() && (!is_modifier(*key) || function.held()));
     let Some(key) = pressed else {
         return;
     };

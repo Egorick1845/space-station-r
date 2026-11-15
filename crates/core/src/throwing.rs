@@ -66,7 +66,11 @@ pub fn damp(speed: f32, landed: bool, dt: f32) -> f32 {
     let friction = if landed { TILE_FRICTION } else { AIR_FRICTION };
     let control = speed.max(STOP_SPEED);
     let next = (speed - control * friction * dt).max(0.0);
-    if landed && next < STOP_SPEED { 0.0 } else { next }
+    if landed && next < STOP_SPEED {
+        0.0
+    } else {
+        next
+    }
 }
 
 #[cfg(test)]

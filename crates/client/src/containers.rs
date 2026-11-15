@@ -293,7 +293,10 @@ pub fn render_container_panel(
                         ));
                     }
                     // Предметы поверх — во всю занятую площадь (тетрис).
-                    for (bits, x, y, w, h) in ssr_core::inventory::item_layout(ssr_core::inventory::INVENTORY_COLS, &slots) {
+                    for (bits, x, y, w, h) in ssr_core::inventory::item_layout(
+                        ssr_core::inventory::INVENTORY_COLS,
+                        &slots,
+                    ) {
                         let Some(sprite) = sprites.stored_icon(bits) else {
                             continue;
                         };
@@ -683,94 +686,89 @@ pub fn render_storage_window(
             crate::hud::window_header(window, &theme, &name);
             let (mut body, background) = crate::hud::window_body();
             body.max_height = Val::Auto;
-            window
-                .spawn((body, background))
-                .with_children(|body| {
-                    body.spawn(Node {
-                        flex_direction: FlexDirection::Row,
-                        align_items: AlignItems::FlexStart,
-                        column_gap: px(6),
+            window.spawn((body, background)).with_children(|body| {
+                body.spawn(Node {
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::FlexStart,
+                    column_gap: px(6),
+                    ..default()
+                })
+                .with_children(|row| {
+                    // Сетка хранилища.
+                    row.spawn(Node {
+                        flex_direction: FlexDirection::Column,
                         ..default()
                     })
-                    .with_children(|row| {
-                        // Сетка хранилища.
-                        row.spawn(Node {
-                            flex_direction: FlexDirection::Column,
-                            ..default()
-                        })
-                        .with_children(|grid| {
-                            for y in 0..rows {
-                                grid.spawn(Node {
-                                    flex_direction: FlexDirection::Row,
-                                    ..default()
-                                })
-                                .with_children(|line| {
-                                    for x in 0..cols {
-                                        let slot = (y * cols + x) as u8;
-                                        let item_bits = inventory
-                                            .cells
-                                            .get(slot as usize)
-                                            .copied()
-                                            .flatten();
-                                        let mut cell_node = line.spawn((
-                                            StorageCell {
-                                                container: bits,
-                                                slot,
-                                            },
-                                            Button,
+                    .with_children(|grid| {
+                        for y in 0..rows {
+                            grid.spawn(Node {
+                                flex_direction: FlexDirection::Row,
+                                ..default()
+                            })
+                            .with_children(|line| {
+                                for x in 0..cols {
+                                    let slot = (y * cols + x) as u8;
+                                    let item_bits =
+                                        inventory.cells.get(slot as usize).copied().flatten();
+                                    let mut cell_node = line.spawn((
+                                        StorageCell {
+                                            container: bits,
+                                            slot,
+                                        },
+                                        Button,
+                                        Node {
+                                            width: px(cell),
+                                            height: px(cell),
+                                            align_items: AlignItems::Center,
+                                            justify_content: JustifyContent::Center,
+                                            ..default()
+                                        },
+                                        BackgroundColor(ui::GLASS_LINEEDIT),
+                                    ));
+                                    if let Some(bits) = item_bits
+                                        && let Some(client_entity) =
+                                            resolve(bits, entity_map.as_deref())
+                                        && let Ok(item) = items.get(client_entity)
+                                        && let Some(icon) = crate::inventory_ui::item_icon(
+                                            &registry, &content, &item.name,
+                                        )
+                                    {
+                                        cell_node.with_child((
+                                            crate::inventory_ui::icon_node(icon),
                                             Node {
-                                                width: px(cell),
-                                                height: px(cell),
-                                                align_items: AlignItems::Center,
-                                                justify_content: JustifyContent::Center,
+                                                width: px(28),
+                                                height: px(28),
                                                 ..default()
                                             },
-                                            BackgroundColor(ui::GLASS_LINEEDIT),
                                         ));
-                                        if let Some(bits) = item_bits
-                                            && let Some(client_entity) =
-                                                resolve(bits, entity_map.as_deref())
-                                            && let Ok(item) = items.get(client_entity)
-                                            && let Some(icon) = crate::inventory_ui::item_icon(
-                                                &registry, &content, &item.name,
-                                            )
-                                        {
-                                            cell_node.with_child((
-                                                crate::inventory_ui::icon_node(icon),
-                                                Node {
-                                                    width: px(28),
-                                                    height: px(28),
-                                                    ..default()
-                                                },
-                                            ));
-                                        }
                                     }
-                                });
-                            }
-                        });
-                        // Сайдбар: красный крестик закрывает окно (как у ящика).
-                        row.spawn((
-                            CloseStorageButton { container: bits },
-                            Button,
-                            Node {
-                                width: px(36),
-                                height: px(rows as f32 * cell),
-                                align_items: AlignItems::Center,
-                                justify_content: JustifyContent::Center,
-                                ..default()
-                            },
-                            BackgroundColor(ui::GLASS_BUTTON),
-                        ))
-                        .with_child((
-                            crate::ui_theme::stretched(&theme.storage_exit),
-                            Node {
-                                width: px(28),
-                                height: px(28),
-                                ..default()
-                            },
-                        ));
+                                }
+                            });
+                        }
                     });
+                    // Сайдбар: красный крестик закрывает окно (как у ящика).
+                    row.spawn((
+                        CloseStorageButton { container: bits },
+                        Button,
+                        Node {
+                            width: px(36),
+                            height: px(rows as f32 * cell),
+                            align_items: AlignItems::Center,
+                            justify_content: JustifyContent::Center,
+                            ..default()
+                        },
+                        BackgroundColor(ui::GLASS_BUTTON),
+                    ))
+                    .with_child((
+                        crate::ui_theme::stretched(&theme.storage_exit),
+                        Node {
+                            width: px(28),
+                            height: px(28),
+                            ..default()
+                        },
+                    ));
                 });
+            });
         });
 }
 
@@ -814,7 +812,11 @@ pub fn storage_window_click(
                     slot: cell.slot,
                 });
             }
-            tracing::info!(container = cell.container, slot = cell.slot, "storage take sent");
+            tracing::info!(
+                container = cell.container,
+                slot = cell.slot,
+                "storage take sent"
+            );
         }
     }
     for (interaction, button) in close.iter() {
@@ -836,7 +838,9 @@ pub fn flush_interact_requests(
 ) {
     for event in events.read() {
         for mut sender in senders.iter_mut() {
-            sender.send::<GameChannel>(ClientMessage::Interact { entity: event.entity });
+            sender.send::<GameChannel>(ClientMessage::Interact {
+                entity: event.entity,
+            });
         }
         tracing::info!(entity = event.entity, "storage close sent");
     }

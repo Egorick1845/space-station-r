@@ -96,12 +96,11 @@ pub fn load(path: &Path) -> Result<MapFile, String> {
                 };
                 // Грид-локальные координаты + смещение грида-родителя
                 // (`parent` внутри Transform; сущности вне гридов — мир).
-                let (wx, wy) = match transform_parent
-                    .and_then(|uid| grid_offsets.get(&uid).copied())
-                {
-                    Some((ox, oy)) => (x + ox as f32, y + oy as f32),
-                    None => (x, y),
-                };
+                let (wx, wy) =
+                    match transform_parent.and_then(|uid| grid_offsets.get(&uid).copied()) {
+                        Some((ox, oy)) => (x + ox as f32, y + oy as f32),
+                        None => (x, y),
+                    };
                 match kind {
                     ProtoKind::Wall => {
                         tiles.insert((wx.floor() as i32, wy.floor() as i32), TileType::Wall);
@@ -168,7 +167,10 @@ pub fn load(path: &Path) -> Result<MapFile, String> {
     spawn_points.dedup();
     spawn_points.retain(|(x, y)| {
         matches!(
-            tiles.get(&((*x / TILE_UNITS).floor() as i32, (*y / TILE_UNITS).floor() as i32)),
+            tiles.get(&(
+                (*x / TILE_UNITS).floor() as i32,
+                (*y / TILE_UNITS).floor() as i32
+            )),
             Some(TileType::Floor)
         )
     });
@@ -237,7 +239,10 @@ fn grid_transform(components: &[Value]) -> Option<((f32, f32), Option<i64>)> {
     let transform = components
         .iter()
         .find(|comp| comp["type"].as_str() == Some("Transform"))?;
-    let pos = transform.get("pos").and_then(|p| p.as_str()).and_then(parse_pos)?;
+    let pos = transform
+        .get("pos")
+        .and_then(|p| p.as_str())
+        .and_then(parse_pos)?;
     let parent = transform.get("parent").and_then(as_id);
     Some((pos, parent))
 }

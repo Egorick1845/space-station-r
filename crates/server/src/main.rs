@@ -27,13 +27,13 @@ use lightyear::prelude::server::*;
 use lightyear::prelude::*;
 use ssr_core::atmosphere::Gas;
 use ssr_core::clothing::{Clothing, ClothingSlot};
+use ssr_core::damage::{DamageSpecifier, DamageType, Damageable, MobState};
 use ssr_core::inventory::{
     Container, Hands, HeldBy, Inventory, Item, ItemPosition, ItemStorage, SLOT_ANY,
 };
 use ssr_core::mechanics::{
-        FacialHair, Hair, PlayerName, Sex, facial_hair_style_names, hair_style_names,
-    };
-use ssr_core::damage::{DamageSpecifier, DamageType, Damageable, MobState};
+    FacialHair, Hair, PlayerName, Sex, facial_hair_style_names, hair_style_names,
+};
 use ssr_core::mechanics::{Ghost, KnockedDown, Sprinting};
 use ssr_core::power::{Cable, Consumer, Generator, Light, Powered};
 use ssr_core::roles::{Access, PlayerRole, RoleSet};
@@ -208,8 +208,16 @@ fn main() {
             // Стопки: полное количество у новых стопочных предметов.
             interaction::ensure_stacks,
             // Медицина: дыхание (удушье в крите) и пассивная регенерация.
-            (medical::breathing, medical::passive_regen, medical::medical_test),
-            (interaction::items_test, interaction::log_hands_test, throwing::throw_test),
+            (
+                medical::breathing,
+                medical::passive_regen,
+                medical::medical_test,
+            ),
+            (
+                interaction::items_test,
+                interaction::log_hands_test,
+                throwing::throw_test,
+            ),
             auto_doors,
             knockdown_tick,
             power_grid,
@@ -448,12 +456,10 @@ fn load_prototypes(mut commands: Commands) {
         Ok(set) => {
             // Русские имена (import-names: ru-RU .ftl → names_ru.ron).
             let names_ru: std::collections::HashMap<String, String> =
-                std::fs::read_to_string(
-                    ssr_core::assets_root().join("prototypes/names_ru.ron"),
-                )
-                .ok()
-                .and_then(|text| ron::from_str(&text).ok())
-                .unwrap_or_default();
+                std::fs::read_to_string(ssr_core::assets_root().join("prototypes/names_ru.ron"))
+                    .ok()
+                    .and_then(|text| ron::from_str(&text).ok())
+                    .unwrap_or_default();
             let mut catalog = ProtoCatalog {
                 names: names_ru,
                 ..Default::default()
@@ -701,7 +707,6 @@ struct DoorAuto {
 
 /// Дальность аккуратного дропа Q: InteractionRange (1.5 тайла) в сборке.
 const DROP_RANGE: f32 = INTERACT_RANGE;
-
 
 /// Атмосфера мира (T4.3, lite): единая сетка газа по тайлам карты.
 /// Хранится плоско (мир маленький), а клиенту отдаётся по чанкам
@@ -1069,7 +1074,9 @@ fn simulate_atmosphere(
             for (dx, dy) in [(1i32, 0i32), (0, 1)] {
                 // Дверь герметична: через дверной тайл обмена нет (lite-модель
                 // считает шлюзы закрытыми).
-                if atmospheres.doors.contains(&(atmospheres.min.0 + x, atmospheres.min.1 + y))
+                if atmospheres
+                    .doors
+                    .contains(&(atmospheres.min.0 + x, atmospheres.min.1 + y))
                     || atmospheres
                         .doors
                         .contains(&(atmospheres.min.0 + x + dx, atmospheres.min.1 + y + dy))
@@ -2444,9 +2451,10 @@ fn attach_item_storage(
         });
     let cols = (bounds.2 - bounds.0 + 1).clamp(1, 16) as u8;
     let rows = (bounds.3 - bounds.1 + 1).clamp(1, 16) as u8;
-    commands
-        .entity(item)
-        .insert((ItemStorage { open: false }, Inventory::with_size(cols, rows)));
+    commands.entity(item).insert((
+        ItemStorage { open: false },
+        Inventory::with_size(cols, rows),
+    ));
     tracing::info!(name, cols, rows, "item storage attached");
 }
 
@@ -2461,7 +2469,10 @@ fn storage_accessible(
     player_position: [f32; 2],
     held: bool,
 ) -> bool {
-    if !item_storages.get(container).is_ok_and(|storage| storage.open) {
+    if !item_storages
+        .get(container)
+        .is_ok_and(|storage| storage.open)
+    {
         return false;
     }
     // Сумка в руке (открыта по Z — `UseInHand`) доступна владельцу.
@@ -2813,8 +2824,12 @@ fn handle_client_messages(
                             // Из стопки — сколько нужно, остальное остаётся.
                             let available = aux.stacks.get(entity).map(|s| s.count).unwrap_or(1);
                             let take = available.min(left);
-                            if interaction::reduce_stack(&mut commands, &mut aux.stacks, entity, take)
-                            {
+                            if interaction::reduce_stack(
+                                &mut commands,
+                                &mut aux.stacks,
+                                entity,
+                                take,
+                            ) {
                                 inventory.take(bits);
                             }
                             consumed += take as usize;
@@ -3034,10 +3049,8 @@ fn handle_client_messages(
                     // Бросок (`ThrowHeldItem`): до 8 тайлов, предмет
                     // останавливается у курсора (`compensateFriction`).
                     if throw
-                        && let Some(plan) = ssr_core::throwing::plan([
-                            offset[0] / TILE_SIZE,
-                            offset[1] / TILE_SIZE,
-                        ])
+                        && let Some(plan) =
+                            ssr_core::throwing::plan([offset[0] / TILE_SIZE, offset[1] / TILE_SIZE])
                     {
                         commands.entity(entity).insert((
                             HeldBy { player: 0 },
@@ -3526,10 +3539,7 @@ fn handle_client_messages(
                     let from = positions.get(player).map(|p| p.0).unwrap_or_default();
                     let mut recipients = 0;
                     for (link, mut sender) in senders.iter_mut() {
-                        let entry = players
-                            .entries
-                            .iter()
-                            .find(|entry| entry.link == link);
+                        let entry = players.entries.iter().find(|entry| entry.link == link);
                         // Адресация из сборки: LOOC слышат только рядом (OOC —
                         // все), чат мёртвых — призраки и админы
                         // (`GetDeadChatClients`), админ-чат — только админы.
@@ -3551,9 +3561,9 @@ fn handle_client_messages(
                                         || is_admin(&entry.name)
                                 })
                                 .unwrap_or(false),
-                            ChatChannel::AdminChat => entry
-                                .map(|entry| is_admin(&entry.name))
-                                .unwrap_or(false),
+                            ChatChannel::AdminChat => {
+                                entry.map(|entry| is_admin(&entry.name)).unwrap_or(false)
+                            }
                             _ => true,
                         };
                         if !audible {
@@ -3812,15 +3822,13 @@ fn handle_client_messages(
                 ))
                 .id();
             // Слот — из роли, иначе из каталога предметов.
-            let Some(slot) = ClothingSlot::from_id(slot_id)
-                .or_else(|| {
-                    content
-                        .catalogs
-                        .items
-                        .slot_of(worn_name)
-                        .and_then(ClothingSlot::from_id)
-                })
-            else {
+            let Some(slot) = ClothingSlot::from_id(slot_id).or_else(|| {
+                content
+                    .catalogs
+                    .items
+                    .slot_of(worn_name)
+                    .and_then(ClothingSlot::from_id)
+            }) else {
                 tracing::warn!(item = %worn_name, slot = %slot_id, "gear: unknown slot");
                 continue;
             };
@@ -4000,9 +4008,7 @@ fn movement(
         };
         // Замедление от урона (`SlowOnDamage` в `Species/base.yml`):
         // урон ≥60 → ×0.7, ≥80 → ×0.5 (числа из сборки).
-        let damage = health
-            .map(|health| health.total())
-            .unwrap_or(0.0);
+        let damage = health.map(|health| health.total()).unwrap_or(0.0);
         let damage_mult = if damage >= SLOW_ON_DAMAGE_HIGH {
             SLOW_ON_DAMAGE_HIGH_MULT
         } else if damage >= SLOW_ON_DAMAGE_LOW {
@@ -4206,22 +4212,14 @@ fn sync_item_rooms(
 /// интереса держится по СВОЕМУ чанку — как у предметов.
 fn sync_ssd_body_rooms(
     mut commands: Commands,
-    bodies: Query<
-        (
-            Entity,
-            &PlayerPosition,
-            Option<&ItemRoom>,
-        ),
-        With<ssr_core::mechanics::Ssd>,
-    >,
+    bodies: Query<(Entity, &PlayerPosition, Option<&ItemRoom>), With<ssr_core::mechanics::Ssd>>,
     mut chunk_rooms: ResMut<ChunkRooms>,
     mut allocator: ResMut<RoomAllocator>,
 ) {
     for (entity, position, current) in bodies.iter() {
-        let room = ItemRoom(chunk_rooms.room_for(
-            chunk_coords(position.0[0], position.0[1]),
-            &mut allocator,
-        ));
+        let room = ItemRoom(
+            chunk_rooms.room_for(chunk_coords(position.0[0], position.0[1]), &mut allocator),
+        );
         if current == Some(&room) {
             continue;
         }
@@ -4371,9 +4369,7 @@ fn spawn_map_entities(
         }
         if prototypes.contains(id) {
             commands.spawn((
-                Item {
-                    name: id.clone(),
-                },
+                Item { name: id.clone() },
                 HeldBy { player: 0 },
                 ItemPosition([*x, *y]),
                 Replicate::to_clients(NetworkTarget::All),
@@ -4716,12 +4712,8 @@ fn process_actions(
                                 options.push(unequip);
                                 options.push(ActionOption {
                                     label: format!("Осмотреть: {item_display}"),
-                                    action: ActionKind::Examine {
-                                        entity: *item_bits,
-                                    },
-                                    icon: Some(
-                                        "Interface/VerbIcons/examine.svg.192dpi.png".into(),
-                                    ),
+                                    action: ActionKind::Examine { entity: *item_bits },
+                                    icon: Some("Interface/VerbIcons/examine.svg.192dpi.png".into()),
                                     priority: 10,
                                     close_menu: Some(false),
                                     ..verb_default(ssr_core::verbs::VerbType::Examine)
@@ -4793,7 +4785,10 @@ fn process_actions(
                             for (label, amount) in ssr_core::stack::split_options(count) {
                                 options.push(ActionOption {
                                     label,
-                                    action: ActionKind::SplitStack { item: entity, amount },
+                                    action: ActionKind::SplitStack {
+                                        item: entity,
+                                        amount,
+                                    },
                                     category: Some(ssr_core::verbs::VerbCategory::Split),
                                     priority,
                                     ..verb_default(ssr_core::verbs::VerbType::Alternative)
@@ -5170,7 +5165,10 @@ fn process_actions(
                 // Единая модель с командой ghost: наблюдатель + тело в SSD.
                 // Раньше верб снимал только Ghost — ColliderDisabled оставался
                 // и «вернувшееся» тело продолжало летать сквозь стены.
-                let Some(entry) = players.entries.iter_mut().find(|entry| entry.player == player)
+                let Some(entry) = players
+                    .entries
+                    .iter_mut()
+                    .find(|entry| entry.player == player)
                 else {
                     continue;
                 };
@@ -5570,9 +5568,9 @@ fn apply_damage(
         match transition {
             Some((_, MobState::Critical)) => {
                 // Крит: лежит, пока урон не опустится ниже порога.
-                commands.entity(event.target).insert(KnockedDown {
-                    seconds: f32::MAX,
-                });
+                commands
+                    .entity(event.target)
+                    .insert(KnockedDown { seconds: f32::MAX });
                 tracing::info!(target = ?event.target, "mob state: critical");
             }
             Some((MobState::Critical, MobState::Alive)) => {
@@ -5639,9 +5637,9 @@ fn respawn_dead(
         }
         // Тело остаётся на месте и лежит навсегда (мёртвое): поднять может
         // только админский heal/rejuvenate.
-        commands.entity(event.target).insert(KnockedDown {
-            seconds: f32::MAX,
-        });
+        commands
+            .entity(event.target)
+            .insert(KnockedDown { seconds: f32::MAX });
         // Управление переходит призраку-наблюдателю (OnGhostStartup в сборке).
         if let Some(entry) = players
             .entries
@@ -6064,7 +6062,10 @@ fn move_projectiles(
             if dx * dx + dy * dy < (TILE_SIZE * 0.5) * (TILE_SIZE * 0.5) {
                 // Урон снаряда по типам (`Projectile.damage` прототипа).
                 let damage = DamageSpecifier::from_pairs(
-                    projectile.damage.iter().map(|(id, value)| (id.as_str(), *value)),
+                    projectile
+                        .damage
+                        .iter()
+                        .map(|(id, value)| (id.as_str(), *value)),
                 );
                 damage_events.write(DamageEvent {
                     target: player,
