@@ -24,6 +24,7 @@ mod chat;
 mod console;
 mod containers;
 mod content;
+mod context_menu;
 mod crafting;
 mod do_after;
 mod doors;
@@ -41,6 +42,7 @@ mod rsi;
 mod settings;
 mod structures;
 mod tiles;
+mod tooltip;
 mod ui_theme;
 mod weapons;
 mod windows;
@@ -67,8 +69,10 @@ fn default_server_addr() -> SocketAddr {
 /// Адрес сервера для подключения (T5.4): из настроек («host:port», можно имя
 /// хоста), иначе локальный адрес по умолчанию.
 fn server_addr(settings: &settings::Settings) -> SocketAddr {
+    // Тестовые прогоны (`SSR_PORT`) всегда идут на свой локальный сервер, даже
+    // если в настройках сохранён другой адрес из лаунчера.
     let address = settings.server.trim();
-    if !address.is_empty() {
+    if std::env::var_os("SSR_PORT").is_none() && !address.is_empty() {
         if let Ok(parsed) = address.parse::<SocketAddr>() {
             return parsed;
         }
@@ -350,7 +354,10 @@ fn main() {
             // алерт `Health` в правой колонке (5 иконок human_alive.rsi),
             // давление — алерты Low/HighPressure только при опасности
             // (`BarotraumaSystem`), точные цифры — газоанализатор.
-            inventory_ui::render_action_menu,
+            context_menu::render_context_menu,
+            context_menu::context_menu_hover,
+            tooltip::show_tooltips,
+            context_menu::context_menu_test,
             inventory_ui::inventory_slot_click,
             inventory_ui::hands_ui_click,
             inventory_ui::world_click,
@@ -873,6 +880,8 @@ fn receive_server(
                     // отбирала бы у этой сообщения (включая Welcome).
                     tracing::info!(count = options.len(), "actions received");
                     menu.options = options;
+                    menu.category = None;
+                    menu.entities.clear();
                 }
                 ServerMessage::EntityDelta { .. } => {} // дельты позиций — T1.3/T1.4
             }
