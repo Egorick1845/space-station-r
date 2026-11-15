@@ -1,22 +1,42 @@
-# T0.4 (PLAN.md): PR без зелёного CI нельзя мержить.
-# По требованию владельца: НЕ гонять CI на каждый push — только на PR и вручную
-# (`gh workflow run ci.yml -R Egorick1845/space-station-r`).
+# CI (PLAN.md T0.4): сборка, clippy и тесты Rust.
+# Гоняется на каждый PR, на push в master и вручную (workflow_dispatch).
 name: CI
 
 on:
+  push:
+    branches: [master]
   pull_request:
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  check:
+  fmt:
+    name: rustfmt
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
 
-      # Системные зависимости Bevy на Linux (аудио/udev/wayland) — нужны на этапе сборки
+  check:
+    name: build, clippy, test
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      # Системные зависимости Bevy на Linux (аудио/udev/wayland) - нужны при линковке
       - name: Install Linux deps
         run: |
           sudo apt-get update
@@ -26,18 +46,15 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: clippy
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Format
-        run: cargo fmt --all -- --check
-
       - name: Build
-        run: cargo build --workspace
+        run: cargo build --workspace --locked
 
       - name: Clippy
-        run: cargo clippy --workspace -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Tests
-        run: cargo test --workspace
+        run: cargo test --workspace --locked

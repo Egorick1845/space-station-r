@@ -1557,3 +1557,21 @@ Dev-карта (YAML напрямую): мебель/лампы/вендомат
 - Тестовые клиенты с `SSR_PORT` всегда подключаются к своему серверу, а не к адресу,
   сохранённому лаунчером.
 - `SSR_CONTEXT_TEST=1` открывает первое подменю (для снимка).
+
+## 2026-11-15 (24) - CI: формат, сборка, clippy и тесты на PR и master
+
+- Workflow `.github/workflows/ci.yml` переписан: быстрая джоба `rustfmt` и отдельная
+  `build, clippy, test` (`--locked`, clippy `--all-targets` с `-D warnings`), кэш
+  `Swatinem/rust-cache`, `concurrency` с отменой устаревших прогонов, таймаут 60 минут.
+  Триггеры: `pull_request`, push в `master`, `workflow_dispatch`. Раньше CI падал на
+  форматировании, а на master не запускался вовсе.
+- `cargo fmt --all` по всему workspace: после PR #1 и #2 часть файлов была не
+  отформатирована, из-за этого падал первый шаг CI.
+- Clippy на `--all-targets`: `ChatLog::visible` не копирует срез в `Vec`,
+  `sync_typing_clouds` помечен `too_many_arguments`, тесты `context_menu` перенесены
+  в конец файла.
+- Слиты PR #3 (руки, клики, быстрая экипировка, стопки), #4 (бросок), #5 (лаунчер,
+  статус сервера, настройки, переназначение клавиш), #6 (меню по ПКМ, подсказки).
+  `cargo test --workspace`: 121 тест, 0 упало; `cargo clippy --all-targets -D warnings`
+  чисто.
+
