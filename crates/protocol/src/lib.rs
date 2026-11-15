@@ -11,7 +11,8 @@ use serde::{Deserialize, Serialize};
 /// v14 — IC-каналы чата (`Local`, `Whisper`, `Emotes`).
 /// v15 — урон по типам и состояние моба (`Damageable`), лечение (`Heal`, `DoAfterBar`).
 /// v16 — стопки (`Stack`), руки и быстрая экипировка как в SS14.
-pub const PROTOCOL_VERSION: u32 = 16;
+/// v17 — кровоток (`Bloodstream`), лужи (`Puddle`), анализатор здоровья.
+pub const PROTOCOL_VERSION: u32 = 17;
 
 /// Порт игрового сервера по умолчанию (T1.2).
 pub const DEFAULT_SERVER_PORT: u16 = 7777;
@@ -315,6 +316,15 @@ pub enum ServerMessage {
     },
     /// Список контекстных действий (ответ на [`ClientMessage::RequestActions`]).
     Actions { options: Vec<ActionOption> },
+    /// Анализатор здоровья (`HealthAnalyzerScannedUserMessage`): открыть или
+    /// обновить окно пациента. Данные окно берёт из реплицируемых
+    /// `Damageable` и `Bloodstream` цели; `active` — цель в радиусе скана.
+    /// `opened` — скан только что завершён: окно открывается заново.
+    HealthScan {
+        target: u64,
+        active: bool,
+        opened: bool,
+    },
     /// Игровое событие для отображения (урон, взаимодействие и т.п.).
     Event {
         /// Тип события; типизируется в T3.1.

@@ -843,7 +843,13 @@ pub fn animate_alerts(
 }
 
 /// Подпись колонки алертов: уровни Health/Stamina и алерт давления (если есть).
-type AlertsSignature = (ssr_core::damage::HealthAlert, u8, Option<(bool, u8)>, bool);
+type AlertsSignature = (
+    ssr_core::damage::HealthAlert,
+    u8,
+    Option<(bool, u8)>,
+    bool,
+    Option<u8>,
+);
 
 /// Рисует колонку алертов: Health (5 иконок human_alive), Stamina
 /// (7 иконок stamina) и, в опасной зоне, давление (pressure.rsi) — правый
@@ -854,6 +860,7 @@ pub fn render_alerts_column(
     own: Res<OwnPlayerEntity>,
     staminas: Query<&ssr_core::stamina::Stamina>,
     healths: Query<&ssr_core::damage::Damageable>,
+    bloods: Query<&ssr_core::blood::Bloodstream>,
     knocked: Query<&ssr_core::mechanics::KnockedDown>,
     positions: Query<&ssr_core::PlayerPosition>,
     atmospheres: Query<(
@@ -907,7 +914,19 @@ pub fn render_alerts_column(
     // игрок лежит (нокдаун от стамина-крита или урона). В сборке при
     // стамина-крите он показывается БЕЗ кольца-таймера.
     let knockdown = own.0.is_some_and(|entity| knocked.get(entity).is_ok());
-    let signature = (level_health, level_stamina, pressure_alert, knockdown);
+    // Алерт «Bleed» (`alerts.yml`: `bleed.rsi#bleed0…bleed10`) —
+    // степень по кровотечению (`SharedBloodstreamSystem`).
+    let bleed = own
+        .0
+        .and_then(|entity| bloods.get(entity).ok())
+        .and_then(|blood| blood.alert_severity());
+    let signature = (
+        level_health,
+        level_stamina,
+        pressure_alert,
+        knockdown,
+        bleed,
+    );
     if last.as_ref() == Some(&signature) {
         return;
     }
@@ -917,6 +936,11 @@ pub fn render_alerts_column(
     ];
     if knockdown {
         icons.push("sprites/ss14/Interface/Alerts/stunnable.rsi#knocked-down".to_string());
+    }
+    if let Some(severity) = bleed {
+        icons.push(format!(
+            "sprites/ss14/Interface/Alerts/bleed.rsi#bleed{severity}"
+        ));
     }
     if let Some((high, level)) = pressure_alert {
         let side = if high { "high" } else { "low" };

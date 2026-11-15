@@ -72,6 +72,7 @@
         (id: "MedicatedSuture", name: "Медицинская нить", sprite: Some("Objects/Specific/Medical/medical.rsi#medicated-suture"), inhand: Some("Objects/Specific/Medical/medical.rsi#medicated-suture-inhand-right"), size_id: Some("Small"), tags: ["medical"], max_stack: Some(15)),
         (id: "RegenerativeMesh", name: "Регенеративная сеть", sprite: Some("Objects/Specific/Medical/medical.rsi#regenerative-mesh"), inhand: Some("Objects/Specific/Medical/medical.rsi#regenerative-mesh-inhand-right"), size_id: Some("Small"), tags: ["medical"], max_stack: Some(15)),
         (id: "Bloodpack", name: "Пакет крови", sprite: Some("Objects/Specific/Medical/medical.rsi#bloodpack"), inhand: Some("Objects/Specific/Medical/medical.rsi#bloodpack-inhand-right"), size_id: Some("Small"), tags: ["medical"], max_stack: Some(15)),
+        (id: "HandheldHealthAnalyzer", name: "Анализатор здоровья", sprite: Some("Objects/Specific/Medical/healthanalyzer.rsi#icon"), inhand: Some("Objects/Specific/Medical/healthanalyzer.rsi#analyzer-inhand-right"), size_id: Some("Small"), tags: ["medical"]),
         // ------------------------------------------------------------- еда
         (id: "Bread", name: "Батон", sprite: Some("Objects/Consumable/Food/Baked/bread.rsi#baguette"), size_id: Some("Normal"), tags: ["food"]),
         (id: "Cola", name: "Банка колы", sprite: Some("Objects/Consumable/Drinks/cola.rsi#icon"), inhand: Some("Objects/Consumable/Drinks/cola.rsi#icon"), size_id: Some("Small"), tags: ["drink"]),

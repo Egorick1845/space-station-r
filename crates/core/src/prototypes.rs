@@ -286,6 +286,44 @@ pub struct ProtoLight {
     pub enabled: bool,
 }
 
+/// Раскрыть ссылки Fluent `{ ent-ID }` в русских именах (`names_ru.ron`):
+/// в ru-RU `.ftl` имя наследника часто ссылается на имя родителя
+/// (`ent-MedkitAdvancedFilled = { ent-MedkitAdvanced }`). Без раскрытия
+/// игрок видел саму ссылку. Цепочки раскрываются до 8 уровней.
+pub fn resolve_name_refs(names: &mut HashMap<String, String>) {
+    for _ in 0..8 {
+        let mut changed = false;
+        let snapshot = names.clone();
+        for value in names.values_mut() {
+            let mut out = String::with_capacity(value.len());
+            let mut rest = value.as_str();
+            while let Some(start) = rest.find("{ ent-") {
+                let after = &rest[start + 6..];
+                let Some(end) = after.find(" }") else {
+                    break;
+                };
+                let id = &after[..end];
+                out.push_str(&rest[..start]);
+                match snapshot.get(id) {
+                    Some(target) if !target.contains(&format!("{{ ent-{id} }}")) => {
+                        out.push_str(target);
+                        changed = true;
+                    }
+                    _ => out.push_str(id),
+                }
+                rest = &after[end + 2..];
+            }
+            out.push_str(rest);
+            if out != *value {
+                *value = out;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+}
+
 /// Набор прототипов (`assets/prototypes/*.ron`).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProtoSet {
@@ -344,5 +382,27 @@ impl ProtoSet {
                         .iter()
                         .any(|category| category == "HideSpawnMenu")
             })
+    }
+}
+
+#[cfg(test)]
+mod name_ref_tests {
+    use std::collections::HashMap;
+
+    #[test]
+    fn fluent_name_refs_resolved() {
+        let mut names: HashMap<String, String> = [
+            ("MedkitAdvanced", "продвинутая аптечка"),
+            ("MedkitAdvancedFilled", "{ ent-MedkitAdvanced }"),
+            ("Deep", "{ ent-MedkitAdvancedFilled }, полная"),
+            ("Missing", "{ ent-Nope }"),
+        ]
+        .into_iter()
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .collect();
+        super::resolve_name_refs(&mut names);
+        assert_eq!(names["MedkitAdvancedFilled"], "продвинутая аптечка");
+        assert_eq!(names["Deep"], "продвинутая аптечка, полная");
+        assert_eq!(names["Missing"], "Nope");
     }
 }

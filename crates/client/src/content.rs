@@ -81,11 +81,12 @@ pub fn load_content(mut commands: Commands) {
     }
     // Русские имена (import-names: ru-RU .ftl → names_ru.ron) — перекрывают
     // английские `name` из YAML прототипов.
-    let names_ru: HashMap<String, String> =
+    let mut names_ru: HashMap<String, String> =
         std::fs::read_to_string(ssr_core::assets_root().join("prototypes/names_ru.ron"))
             .ok()
             .and_then(|text| ron::from_str(&text).ok())
             .unwrap_or_default();
+    ssr_core::prototypes::resolve_name_refs(&mut names_ru);
     let ru_count = names_ru.len();
     for (id, name) in names_ru {
         content.proto_names.insert(id, name);

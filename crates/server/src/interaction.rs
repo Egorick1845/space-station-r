@@ -278,7 +278,10 @@ fn use_in_hand(world: &mut World, heal: &mut HealRequests, player: Entity) {
         .get(item)
         .map(|i| i.name.clone())
         .unwrap_or_default();
-    if ssr_core::damage::healing_for(&name).is_some() {
+    // Лечащий предмет или анализатор здоровья — применить к себе.
+    if ssr_core::damage::healing_for(&name).is_some()
+        || ssr_core::blood::analyzer::is_analyzer(&name)
+    {
         heal.0.push((player, player));
         tracing::info!(?player, item = %name, "use in hand: heal self");
         return;
